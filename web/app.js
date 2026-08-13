@@ -14,6 +14,7 @@
     selectedAssets: new Set(),
     compareZoom: 1,
     comparePan: {x: 0, y: 0},
+    google: {configured: false, connected: false},
   };
 
   const el = (id) => document.getElementById(id);
@@ -111,13 +112,122 @@
     showOnly(dashboardView);
     el('desktop-setup').classList.toggle('hidden', !state.desktop);
     el('create-job-card').classList.toggle('hidden', !state.desktop);
+    el('google-photos-card').classList.toggle('hidden', !state.desktop);
     if (state.desktop && state.bootstrap) {
       el('ipad-url').textContent = state.bootstrap.ipad_url;
       el('pair-code-display').textContent = state.bootstrap.pair_code;
       el('data-dir').textContent = state.bootstrap.data_dir;
       el('pair-qr').src = `${state.bootstrap.pair_qr_url}?v=${Date.now()}`;
     }
+    if (state.desktop) await refreshGoogleStatus();
     renderJobs();
+  }
+
+  async function refreshGoogleStatus() {
+    try {
+      state.google = await api('/api/google/status');
+      renderGoogleStatus();
+      return state.google;
+    } catch (error) {
+      el('google-status').textContent = 'Unavailable';
+      el('google-copy').textContent = error.message;
+      return state.google;
+    }
+  }
+
+  function renderGoogleStatus() {
+    const google = state.google;
+    el('google-status').textContent = google.connected ? 'Connected' : google.configured ? 'Not connected' : 'Setup required';
+    el('google-connect').classList.toggle('hidden', google.connected);
+    el('google-pick').classList.toggle('hidden', !google.connected);
+    el('google-disconnect').classList.toggle('hidden', !google.connected);
+    el('google-connect').disabled = !google.configured;
+    el('google-copy').textContent = google.configured
+      ? google.connected
+        ? 'Google media can be added to the local collection currently open below. Exact duplicates are skipped.'
+        : 'Connect once, then combine selected Google photos and videos with a local collection.'
+      : `Download a Desktop OAuth credential from Google Cloud and save it as ${google.credentials_path}`;
+    renderGoogleDestination();
+    updateSelectionUi();
+  }
+
+  function renderGoogleDestination() {
+    const destination = state.libraryDirectory || state.google.inbox || 'Google Photos inbox';
+    el('google-destination').textContent = destination;
+    el('google-pick').textContent = state.libraryDirectory ? 'Add Google media here' : 'Add Google media to inbox';
+  }
+
+  function wait(milliseconds) {
+    return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+  }
+
+  async function waitForGoogleConnection() {
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      await wait(1000);
+      const status = await refreshGoogleStatus();
+      if (status.connected) {
+        toast('Google Photos connected.');
+        return;
+      }
+    }
+    toast('Google sign-in is still waiting. You can try Connect again.');
+  }
+
+  async function pollPickerSession(sessionId) {
+    el('google-progress').classList.remove('hidden');
+    el('google-progress-label').textContent = 'Waiting for your Google Photos selection…';
+    el('google-progress-value').textContent = '';
+    el('google-progress-bar').removeAttribute('value');
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      const session = await api(`/api/google/picker/sessions/${encodeURIComponent(sessionId)}`);
+      if (session.mediaItemsSet) return session;
+      const duration = Number.parseFloat(session.pollingConfig?.pollInterval || '2');
+      await wait(Math.max(1000, duration * 1000));
+    }
+    throw new Error('Google Photos selection timed out. Try choosing photos again.');
+  }
+
+  async function pollGoogleOperation(operationId) {
+    const progress = el('google-progress');
+    progress.classList.remove('hidden');
+    while (true) {
+      const operation = await api(`/api/google/operations/${encodeURIComponent(operationId)}`);
+      const processed = operation.completed + operation.duplicates + operation.failed;
+      const percent = operation.total ? Math.round((processed / operation.total) * 100) : 0;
+      el('google-progress-label').textContent = operation.kind === 'import'
+        ? `Checking and importing ${processed} of ${operation.total}…`
+        : `Uploading ${processed} of ${operation.total}…`;
+      el('google-progress-value').textContent = `${percent}%`;
+      el('google-progress-bar').value = percent;
+      if (['complete', 'complete_with_errors', 'failed'].includes(operation.status)) return operation;
+      await wait(750);
+    }
+  }
+
+  async function importGoogleSelection(sessionId) {
+    const operation = await api('/api/google/imports', {
+      method: 'POST',
+      body: JSON.stringify({
+        session_id: sessionId,
+        destination_directory: state.libraryDirectory || '',
+      }),
+    });
+    const finished = await pollGoogleOperation(operation.id);
+    if (finished.status === 'failed') throw new Error(finished.error || 'Google Photos import failed.');
+    const result = await api(`/api/local/scan?path=${encodeURIComponent(finished.directory)}`);
+    applyLibraryScan(result);
+    el('photo-workspace').classList.remove('hidden');
+    el('folder-browser').classList.add('hidden');
+    const details = [
+      `${finished.completed} added`,
+      `${finished.duplicates} exact duplicate${finished.duplicates === 1 ? '' : 's'} skipped`,
+      `${finished.possible_edits} possible edit${finished.possible_edits === 1 ? '' : 's'}`,
+      `${finished.related_variants} related variant${finished.related_variants === 1 ? '' : 's'}`,
+    ];
+    if (finished.failed) details.push(`${finished.failed} failed`);
+    el('google-result').textContent = `Import complete: ${details.join(' · ')}`;
+    el('google-result').classList.remove('hidden');
+    toast(`Google import complete: ${details.join(', ')}.`);
   }
 
   function renderJobs() {
@@ -131,7 +241,7 @@
       button.innerHTML = `
         <div class="job-card-top">
           <div><div class="eyebrow">${escapeHtml(formatDate(job.created_at))}</div><h3>${escapeHtml(job.name)}</h3></div>
-          <span class="job-count">${job.file_count} photos</span>
+          <span class="job-count">${job.file_count} media files</span>
         </div>
         <p>${job.return_count ? `${job.return_count} edits returned` : 'Waiting for Lightroom exports'}</p>
         <div class="job-stats"><span><strong>${job.file_count}</strong> sent</span><span><strong>${job.matched_count}</strong> matched</span></div>`;
@@ -191,11 +301,12 @@
     state.libraryDirectory = result.directory;
     // Culling is JPEG-driven: RAW-only files stay out of the visual workspace,
     // while a same-stem RAW remains available as the selected transfer source.
-    state.libraryAssets = result.assets.filter((asset) => asset.jpeg_files.length > 0);
+    state.libraryAssets = result.assets.filter((asset) => asset.jpeg_files.length > 0 || (asset.video_files || []).length > 0);
     state.culling = result.culling || null;
     state.selectedAssets = new Set();
     renderCullFolders();
     renderPhotoGrid();
+    renderGoogleDestination();
   }
 
   async function openCullFolder(path) {
@@ -235,14 +346,21 @@
       button.type = 'button';
       button.className = `photo-tile${selected ? ' selected' : ''}`;
       button.setAttribute('aria-pressed', String(selected));
-      const media = `<img src="${escapeHtml(previewUrl(asset.preview_path, 480, asset.preview_version))}" alt="${escapeHtml(asset.stem)}" loading="lazy" decoding="async">`;
-      const tags = `<span class="format-tag">JPEG${asset.jpeg_files.length > 1 ? ` ×${asset.jpeg_files.length}` : ''}</span>`;
+      const media = asset.preview_path
+        ? `<img src="${escapeHtml(previewUrl(asset.preview_path, 480, asset.preview_version))}" alt="${escapeHtml(asset.stem)}" loading="lazy" decoding="async">`
+        : '<span class="photo-placeholder video-placeholder"><span>▶</span>Video</span>';
+      const formatTags = [];
+      if (asset.jpeg_files.length) formatTags.push(`<span class="format-tag">JPEG${asset.jpeg_files.length > 1 ? ` ×${asset.jpeg_files.length}` : ''}</span>`);
+      if ((asset.video_files || []).length) formatTags.push(`<span class="format-tag">VIDEO${asset.video_files.length > 1 ? ` ×${asset.video_files.length}` : ''}</span>`);
+      const tags = formatTags.join('');
       button.innerHTML = `${media}<span class="pick-check">${selected ? '✓' : '+'}</span><span class="photo-tile-info"><strong>${escapeHtml(asset.stem)}</strong><span class="format-tags">${tags}</span></span>`;
       button.addEventListener('click', () => toggleAsset(asset.id, button));
       fragment.appendChild(button);
     });
     grid.appendChild(fragment);
-    el('photo-count').textContent = `${state.libraryAssets.length} JPEG previews · same-name RAW files remain available for transfer`;
+    const videoCount = state.libraryAssets.filter((asset) => (asset.video_files || []).length).length;
+    const photoCount = state.libraryAssets.filter((asset) => asset.jpeg_files.length).length;
+    el('photo-count').textContent = `${photoCount} photo group${photoCount === 1 ? '' : 's'} · ${videoCount} video group${videoCount === 1 ? '' : 's'} · same-name files stay grouped`;
     updateSelectionUi();
   }
 
@@ -268,7 +386,7 @@
 
   function updateSelectionUi() {
     const count = state.selectedAssets.size;
-    el('selection-summary').textContent = `${count} selected`;
+    el('selection-summary').textContent = `${count} media group${count === 1 ? '' : 's'} selected for iPad editing`;
     el('selection-job-form').querySelector('button[type="submit"]').disabled = count === 0;
     el('compare-picked').disabled = count < 2;
     el('compare-picked').textContent = `Compare selected${count ? ` (${count})` : ''}`;
@@ -278,6 +396,7 @@
     el('mark-select').disabled = count === 0;
     el('restore-inbox').disabled = count === 0;
     el('group-selected').disabled = count === 0 || !el('compare-group-name').value.trim();
+    el('google-upload-selected').disabled = count === 0 || !state.google.connected;
   }
 
   async function moveSelectedAssets(action) {
@@ -524,6 +643,73 @@
       await loadDashboard();
     } catch (error) {
       el('pair-error').textContent = error.message;
+    }
+  });
+
+  el('google-connect').addEventListener('click', async () => {
+    const popup = window.open('about:blank', 'kira-google-oauth', 'width=620,height=760');
+    try {
+      if (!popup) throw new Error('Allow pop-ups for Kira, then try connecting again.');
+      const result = await api('/api/google/oauth/start', {method: 'POST', body: '{}'});
+      popup.location.href = result.authorization_url;
+      await waitForGoogleConnection();
+    } catch (error) {
+      if (popup) popup.close();
+      showError(error);
+    }
+  });
+
+  el('google-pick').addEventListener('click', async () => {
+    const popup = window.open('about:blank', 'kira-google-picker', 'width=900,height=760');
+    try {
+      if (!popup) throw new Error('Allow pop-ups for Kira, then choose photos again.');
+      const session = await api('/api/google/picker/sessions', {
+        method: 'POST',
+        body: JSON.stringify({max_items: 2000}),
+      });
+      const pickerUrl = `${String(session.pickerUri).replace(/\/$/, '')}/autoclose`;
+      popup.location.href = pickerUrl;
+      await pollPickerSession(session.id);
+      await importGoogleSelection(session.id);
+    } catch (error) {
+      if (popup) popup.close();
+      showError(error);
+    } finally {
+      el('google-progress').classList.add('hidden');
+    }
+  });
+
+  el('google-disconnect').addEventListener('click', async () => {
+    if (!window.confirm('Disconnect Google Photos from Kira? Imported local files will stay on this computer.')) return;
+    try {
+      await api('/api/google/disconnect', {method: 'POST', body: '{}'});
+      await refreshGoogleStatus();
+      toast('Google Photos disconnected. Imported files were kept.');
+    } catch (error) {
+      showError(error);
+    }
+  });
+
+  el('google-upload-selected').addEventListener('click', async () => {
+    if (!state.selectedAssets.size || !state.google.connected) return;
+    const button = el('google-upload-selected');
+    button.disabled = true;
+    try {
+      const operation = await api('/api/google/uploads', {
+        method: 'POST',
+        body: JSON.stringify({
+          source_directory: state.libraryDirectory,
+          asset_ids: Array.from(state.selectedAssets),
+        }),
+      });
+      const finished = await pollGoogleOperation(operation.id);
+      if (finished.status === 'failed') throw new Error(finished.error || 'Google Photos upload failed.');
+      toast(`Uploaded ${finished.completed} media item${finished.completed === 1 ? '' : 's'}${finished.failed ? `; ${finished.failed} failed` : ''}.`);
+    } catch (error) {
+      showError(error);
+    } finally {
+      el('google-progress').classList.add('hidden');
+      updateSelectionUi();
     }
   });
 

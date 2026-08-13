@@ -50,6 +50,25 @@
           </dl>
         </section>
 
+        <section id="google-photos-card" class="panel google-photos-card hidden">
+          <div class="panel-heading">
+            <div><div class="eyebrow">Build one collection</div><h2>Google Photos</h2></div>
+            <span id="google-status" class="google-status">Checking…</span>
+          </div>
+          <p id="google-copy" class="panel-copy">Open a local theme folder, then add selected Google photos and videos to it.</p>
+          <div class="google-destination"><span>Import into</span><strong id="google-destination">Google Photos inbox</strong></div>
+          <div class="google-actions">
+            <button id="google-connect" class="primary-button" type="button">Connect Google Photos</button>
+            <button id="google-pick" class="primary-button hidden" type="button">Add Google media</button>
+            <button id="google-disconnect" class="quiet-button hidden" type="button">Disconnect</button>
+          </div>
+          <div id="google-progress" class="transfer-progress hidden" aria-live="polite">
+            <div class="progress-label"><span id="google-progress-label">Preparing…</span><span id="google-progress-value">0%</span></div>
+            <progress id="google-progress-bar" max="100" value="0"></progress>
+          </div>
+          <div id="google-result" class="google-result hidden" role="status"></div>
+        </section>
+
         <section id="create-job-card" class="panel library-panel hidden">
           <div class="panel-heading">
             <div><div class="eyebrow">Laptop library</div><h2>Choose photos</h2></div>
@@ -84,14 +103,15 @@
                 <button id="select-all" class="quiet-button compact-button" type="button">Select all</button>
                 <button id="clear-picked" class="quiet-button compact-button" type="button">Deselect all</button>
                 <button id="compare-picked" class="quiet-button compact-button" type="button" disabled>Compare selected</button>
+                <button id="google-upload-selected" class="quiet-button compact-button" type="button" disabled>Upload media to Google Photos</button>
               </div>
             </div>
             <div id="photo-grid" class="photo-grid"></div>
             <form id="selection-job-form" class="selection-job-form">
               <label><span>Job name</span><input id="job-name" name="name" type="text" maxlength="120" placeholder="Lake Michigan · Aug 12" required></label>
-              <label><span>Send to iPad as</span><select id="edit-source-format" name="source-format">
-                <option value="jpeg" selected>JPEG · smaller and faster</option>
-                <option value="raw">RAW · full editing range</option>
+              <label><span>Send photos to iPad as</span><select id="edit-source-format" name="source-format">
+                <option value="jpeg" selected>JPEG · videos stay original</option>
+                <option value="raw">RAW · videos stay original</option>
               </select></label>
               <div id="selection-summary">0 selected</div>
               <button class="primary-button" type="submit" disabled>Create iPad edit job</button>

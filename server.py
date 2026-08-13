@@ -29,6 +29,7 @@ if VENDOR_DIR.exists():
 
 import qrcode
 import qrcode.image.svg
+from google_photos import GooglePhotosError, GooglePhotosService
 try:
     from PIL import Image, ImageOps
 except ImportError:  # Kira can still run, but previews fall back to full JPEGs.
@@ -37,12 +38,12 @@ except ImportError:  # Kira can still run, but previews fall back to full JPEGs.
 
 
 APP_NAME = "Kira"
-APP_VERSION = "0.5.1"
+APP_VERSION = "0.7.0"
 CHUNK_COPY_SIZE = 4 * 1024 * 1024
 MAX_JSON_BODY = 1024 * 1024
 INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 EDIT_SUFFIX = re.compile(
-    r"(?:[\s_-]+(?:edited?|edit|final|copy|lr|lightroom))(?:[\s_-]*v?\d+)?$",
+    r"(?:[\s_-]+(?:(?:edited?|edit|final|copy|lr|lightroom|google)(?:[\s_-]*v?\d+)?|v\d+)|\s*\(\d+\))$",
     re.IGNORECASE,
 )
 RAW_EXTENSIONS = {
@@ -53,6 +54,11 @@ RAW_EXTENSIONS = {
 JPEG_EXTENSIONS = {".jpg", ".jpeg"}
 PREVIEW_EXTENSIONS = JPEG_EXTENSIONS | {".png", ".webp", ".avif"}
 PHOTO_EXTENSIONS = RAW_EXTENSIONS | PREVIEW_EXTENSIONS | {".tif", ".tiff", ".jxl", ".heic", ".heif"}
+VIDEO_EXTENSIONS = {
+    ".3g2", ".3gp", ".asf", ".avi", ".divx", ".m2t", ".m2ts", ".m4v",
+    ".mkv", ".mmv", ".mod", ".mov", ".mp4", ".mpg", ".mts", ".tod", ".wmv",
+}
+MEDIA_EXTENSIONS = PHOTO_EXTENSIONS | VIDEO_EXTENSIONS
 EXPORT_CATEGORIES = {"organized", "raw", "unselected-jpeg", "pre-edit", "edited"}
 
 
@@ -260,7 +266,7 @@ def move_culling_assets(
 
     planned: list[tuple[Path, Path]] = []
     for asset in chosen:
-        records = asset["raw_files"] + asset["jpeg_files"] + asset["other_files"]
+        records = asset["raw_files"] + asset["jpeg_files"] + asset.get("video_files", []) + asset["other_files"]
         for record in records:
             source = Path(record["path"])
             target = destination / source.name
@@ -313,21 +319,30 @@ def scan_photo_directory(value: str) -> dict:
     groups: dict[str, dict] = {}
     try:
         files = sorted(
-            (item for item in current.iterdir() if item.is_file() and item.suffix.casefold() in PHOTO_EXTENSIONS),
+            (item for item in current.iterdir() if item.is_file() and item.suffix.casefold() in MEDIA_EXTENSIONS),
             key=lambda item: natural_key(item.name),
         )
     except PermissionError as exc:
         raise KiraError(HTTPStatus.FORBIDDEN, "Windows denied access to this folder") from exc
 
     for path in files:
-        stem_key = path.stem.casefold()
+        stem_key = match_key(path.name)
         group = groups.setdefault(
             stem_key,
-            {"stem": path.stem, "raw_paths": [], "jpeg_paths": [], "preview_paths": [], "other_paths": []},
+            {
+                "stem": path.stem,
+                "raw_paths": [],
+                "jpeg_paths": [],
+                "video_paths": [],
+                "preview_paths": [],
+                "other_paths": [],
+            },
         )
         suffix = path.suffix.casefold()
         if suffix in RAW_EXTENSIONS:
             group["raw_paths"].append(path)
+        elif suffix in VIDEO_EXTENSIONS:
+            group["video_paths"].append(path)
         elif suffix in JPEG_EXTENSIONS:
             group["jpeg_paths"].append(path)
             group["preview_paths"].append(path)
@@ -339,7 +354,7 @@ def scan_photo_directory(value: str) -> dict:
 
     assets: list[dict] = []
     for group in groups.values():
-        all_paths = group["raw_paths"] + group["jpeg_paths"] + group["other_paths"]
+        all_paths = group["raw_paths"] + group["jpeg_paths"] + group["video_paths"] + group["other_paths"]
         asset_id = hashlib.sha256(f"{current}\0{group['stem'].casefold()}".encode("utf-8")).hexdigest()[:16]
         preview = group["preview_paths"][0] if group["preview_paths"] else None
         file_stats = {path: path.stat() for path in all_paths}
@@ -349,6 +364,7 @@ def scan_photo_directory(value: str) -> dict:
                 "stem": group["stem"],
                 "raw_files": [{"filename": path.name, "path": str(path), "size": file_stats[path].st_size} for path in group["raw_paths"]],
                 "jpeg_files": [{"filename": path.name, "path": str(path), "size": file_stats[path].st_size} for path in group["jpeg_paths"]],
+                "video_files": [{"filename": path.name, "path": str(path), "size": file_stats[path].st_size} for path in group["video_paths"]],
                 "other_files": [{"filename": path.name, "path": str(path), "size": file_stats[path].st_size} for path in group["other_paths"]],
                 "preview_path": str(preview) if preview else None,
                 "preview_version": file_stats[preview].st_mtime_ns if preview else None,
@@ -577,35 +593,44 @@ class KiraStore:
                     "selected": asset["id"] in selected,
                     "raw_files": asset["raw_files"],
                     "jpeg_files": asset["jpeg_files"],
+                    "video_files": asset.get("video_files", []),
                     "other_files": asset["other_files"],
                 }
                 manifest["assets"].append(stored_asset)
                 if not stored_asset["selected"]:
                     continue
-                candidates = asset["raw_files"] if source_format == "raw" else asset["jpeg_files"]
-                if not candidates:
+                photo_candidates = asset["raw_files"] if source_format == "raw" else asset["jpeg_files"]
+                has_photo = bool(asset["raw_files"] or asset["jpeg_files"])
+                if has_photo and not photo_candidates:
                     shutil.rmtree(self._job_dir(job_id))
                     label = "RAW" if source_format == "raw" else "JPEG"
                     raise KiraError(
                         HTTPStatus.BAD_REQUEST,
                         f"{asset['stem']} does not have a {label} file. Change the edit source or deselect it.",
                     )
-                source = Path(candidates[0]["path"])
-                record = {
-                    "id": uuid.uuid4().hex[:12],
-                    "asset_id": asset["id"],
-                    "filename": source.name,
-                    "original_filename": source.name,
-                    "source_path": str(source),
-                    "referenced": True,
-                    "size": source.stat().st_size,
-                    # Hash while building the transfer ZIP so large sources are
-                    # read once instead of once here and again for packaging.
-                    "sha256": None,
-                    "created_at": utc_now(),
-                }
-                manifest["files"].append(record)
-                stored_asset["edit_file_id"] = record["id"]
+                sources = ([photo_candidates[0]] if photo_candidates else []) + asset.get("video_files", [])
+                if not sources:
+                    shutil.rmtree(self._job_dir(job_id))
+                    raise KiraError(HTTPStatus.BAD_REQUEST, f"{asset['stem']} has no transferable media")
+                stored_asset["edit_file_ids"] = []
+                for candidate in sources:
+                    source = Path(candidate["path"])
+                    record = {
+                        "id": uuid.uuid4().hex[:12],
+                        "asset_id": asset["id"],
+                        "filename": source.name,
+                        "original_filename": source.name,
+                        "source_path": str(source),
+                        "referenced": True,
+                        "size": source.stat().st_size,
+                        # Hash while building the transfer ZIP so large sources are
+                        # read once instead of once here and again for packaging.
+                        "sha256": None,
+                        "created_at": utc_now(),
+                    }
+                    manifest["files"].append(record)
+                    stored_asset["edit_file_ids"].append(record["id"])
+                stored_asset["edit_file_id"] = stored_asset["edit_file_ids"][0]
             self._save_manifest(manifest)
             return self.job_summary(manifest)
 
@@ -1077,6 +1102,7 @@ class KiraHTTPServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], store: KiraStore, static_root: Path) -> None:
         self.store = store
         self.static_root = static_root
+        self.google_photos = GooglePhotosService(store.root, static_root.parent)
         super().__init__(address, KiraRequestHandler)
 
 
@@ -1108,6 +1134,9 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
         try:
+            if path == "/" and method == "GET" and "state" in query and ("code" in query or "error" in query):
+                self._google_oauth_callback(query)
+                return
             if path in {"/", "/index.html", "/app.js", "/styles.css"} and method in {"GET", "HEAD"}:
                 self._serve_static(path, method == "HEAD")
                 return
@@ -1123,9 +1152,79 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/pair" and method == "POST":
                 self._pair()
                 return
+            if path == "/api/google/oauth/callback" and method == "GET":
+                self._google_oauth_callback(query)
+                return
 
             self._require_auth(query)
             segments = [unquote(segment) for segment in path.strip("/").split("/")]
+            if segments[:2] == ["api", "google"]:
+                self._require_local()
+                if segments == ["api", "google", "status"] and method == "GET":
+                    self._send_json(self.server.google_photos.status())
+                    return
+                if segments == ["api", "google", "oauth", "start"] and method == "POST":
+                    self._discard_optional_body()
+                    port = self.server.server_address[1]
+                    redirect_uri = f"http://127.0.0.1:{port}"
+                    self._send_json(self.server.google_photos.start_oauth(redirect_uri))
+                    return
+                if segments == ["api", "google", "disconnect"] and method == "POST":
+                    self._discard_optional_body()
+                    self._send_json(self.server.google_photos.disconnect())
+                    return
+                if segments == ["api", "google", "picker", "sessions"] and method == "POST":
+                    body = self._read_json()
+                    self._send_json(
+                        self.server.google_photos.create_picker_session(int(body.get("max_items", 2000))),
+                        status=HTTPStatus.CREATED,
+                    )
+                    return
+                if len(segments) == 5 and segments[:4] == ["api", "google", "picker", "sessions"] and method == "GET":
+                    self._send_json(self.server.google_photos.picker_session(segments[4]))
+                    return
+                if segments == ["api", "google", "imports"] and method == "POST":
+                    body = self._read_json()
+                    session_id = str(body.get("session_id", "")).strip()
+                    if not session_id:
+                        raise KiraError(HTTPStatus.BAD_REQUEST, "Google Picker session is required")
+                    self._send_json(
+                        self.server.google_photos.start_import(
+                            session_id,
+                            resolve_directory(str(body.get("destination_directory", "")))
+                            if str(body.get("destination_directory", "")).strip()
+                            else None,
+                        ),
+                        status=HTTPStatus.ACCEPTED,
+                    )
+                    return
+                if segments == ["api", "google", "uploads"] and method == "POST":
+                    body = self._read_json()
+                    asset_ids = body.get("asset_ids", [])
+                    if not isinstance(asset_ids, list):
+                        raise KiraError(HTTPStatus.BAD_REQUEST, "asset_ids must be a list")
+                    scan = scan_photo_directory(str(body.get("source_directory", "")))
+                    selected = {str(asset_id) for asset_id in asset_ids}
+                    chosen = [asset for asset in scan["assets"] if asset["id"] in selected]
+                    if not chosen or len(chosen) != len(selected):
+                        raise KiraError(HTTPStatus.CONFLICT, "The folder changed; scan it again before uploading")
+                    paths = [
+                        Path(item["path"])
+                        for asset in chosen
+                        for item in asset["jpeg_files"] + asset.get("video_files", [])
+                    ]
+                    if not paths:
+                        raise KiraError(HTTPStatus.BAD_REQUEST, "Select at least one JPEG or video")
+                    self._send_json(
+                        self.server.google_photos.start_upload(paths),
+                        status=HTTPStatus.ACCEPTED,
+                    )
+                    return
+                if len(segments) == 4 and segments[:3] == ["api", "google", "operations"] and method == "GET":
+                    self._send_json(self.server.google_photos.operation(segments[3]))
+                    return
+                self._method_not_allowed()
+                return
             if segments == ["api", "local", "browse"] and method == "GET":
                 self._require_local()
                 self._send_json(browse_directories(query.get("path", [""])[0]))
@@ -1268,6 +1367,15 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
                 except (OSError, ValueError):
                     self.close_connection = True
             self._send_json({"error": exc.message, **exc.extra}, status=exc.status)
+        except GooglePhotosError as exc:
+            if path == "/api/google/oauth/callback" or (path == "/" and "state" in query):
+                self._send_html(
+                    "<!doctype html><meta charset='utf-8'><title>Kira</title>"
+                    f"<body style='font:16px system-ui;padding:40px'><h1>Could not connect</h1><p>{self._html_escape(str(exc))}</p></body>",
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+            else:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_GATEWAY)
         except (ValueError, TypeError, json.JSONDecodeError):
             self._send_json({"error": "Invalid request"}, status=HTTPStatus.BAD_REQUEST)
         except (BrokenPipeError, ConnectionResetError):
@@ -1281,6 +1389,22 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
             return ipaddress.ip_address(self.client_address[0]).is_loopback
         except ValueError:
             return False
+
+    def _google_oauth_callback(self, query: dict[str, list[str]]) -> None:
+        self._require_local()
+        error = query.get("error", [""])[0]
+        if error:
+            raise GooglePhotosError(f"Google sign-in was cancelled: {error}")
+        self.server.google_photos.finish_oauth(
+            query.get("code", [""])[0], query.get("state", [""])[0]
+        )
+        self._send_html(
+            "<!doctype html><meta charset='utf-8'><title>Kira</title>"
+            "<body style='font:16px system-ui;padding:40px'>"
+            "<h1>Google Photos connected</h1>"
+            "<p>You can close this window and return to Kira.</p>"
+            "<script>setTimeout(() => window.close(), 1200)</script></body>"
+        )
 
     def _require_local(self) -> None:
         if not self._is_loopback():
@@ -1391,6 +1515,21 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if not head_only:
             self.wfile.write(data)
+
+    @staticmethod
+    def _html_escape(value: str) -> str:
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+    def _send_html(self, html: str, status: int = HTTPStatus.OK) -> None:
+        encoded = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(encoded)
 
     def _serve_file(
         self,
