@@ -66,11 +66,6 @@
           <div id="photo-workspace" class="photo-workspace hidden">
             <div class="photo-toolbar">
               <div><small id="photo-count">—</small></div>
-              <div class="photo-toolbar-actions">
-                <button id="select-all" class="quiet-button" type="button">Select all</button>
-                <button id="clear-picked" class="quiet-button" type="button">Deselect all</button>
-                <button id="compare-picked" class="quiet-button" type="button" disabled>Compare selected</button>
-              </div>
             </div>
             <div class="cull-actions" aria-label="Organize selected photos">
               <div class="cull-action-buttons">
@@ -83,7 +78,14 @@
                 <button id="group-selected" class="quiet-button" type="button" disabled>Group to compare</button>
               </div>
             </div>
-            <nav id="cull-folders" class="cull-folders" aria-label="Culling folders"></nav>
+            <div class="cull-folder-row">
+              <nav id="cull-folders" class="cull-folders" aria-label="Culling folders"></nav>
+              <div class="photo-toolbar-actions">
+                <button id="select-all" class="quiet-button compact-button" type="button">Select all</button>
+                <button id="clear-picked" class="quiet-button compact-button" type="button">Deselect all</button>
+                <button id="compare-picked" class="quiet-button compact-button" type="button" disabled>Compare selected</button>
+              </div>
+            </div>
             <div id="photo-grid" class="photo-grid"></div>
             <form id="selection-job-form" class="selection-job-form">
               <label><span>Job name</span><input id="job-name" name="name" type="text" maxlength="120" placeholder="Lake Michigan · Aug 12" required></label>

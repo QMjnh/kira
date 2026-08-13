@@ -151,12 +151,14 @@ progress::-moz-progress-bar { background: var(--success); }
 .photo-toolbar > div:first-child { min-width: 0; }
 .photo-toolbar strong, .photo-toolbar small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .photo-toolbar small { color: var(--muted); margin-top: 3px; }
-.photo-toolbar-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.photo-toolbar-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.compact-button { min-height: 34px; padding: 7px 10px; border-radius: 8px; font-size: 12px; }
 .cull-actions { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0 0 10px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft); }
 .cull-action-buttons, .group-action { display: flex; align-items: center; gap: 7px; }
 .group-action { min-width: min(100%, 390px); }
 .group-action input { min-width: 0; flex: 1 1 180px; background: white; }
-.cull-folders { display: flex; gap: 6px; overflow-x: auto; margin-bottom: 10px; padding-bottom: 2px; }
+.cull-folder-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.cull-folders { display: flex; flex: 1 1 auto; min-width: 0; gap: 6px; overflow-x: auto; margin-bottom: 0; padding-bottom: 2px; }
 .cull-folder { flex: 0 0 auto; border: 1px solid var(--line); border-radius: 999px; background: white; color: var(--forest); padding: 6px 10px; cursor: pointer; font: inherit; font-size: 11px; font-weight: 700; }
 .cull-folder:hover { background: var(--surface-soft); }
 .cull-folder.active { background: var(--forest); color: white; border-color: var(--forest); }
@@ -238,6 +240,8 @@ progress::-moz-progress-bar { background: var(--success); }
   .cull-actions { align-items: stretch; flex-direction: column; }
   .cull-action-buttons { flex-wrap: wrap; }
   .group-action { min-width: 0; width: 100%; }
+  .cull-folder-row { align-items: stretch; flex-direction: column; gap: 8px; }
+  .photo-toolbar-actions { justify-content: flex-start; }
   .photo-grid { --photo-row-height: 116px; --photo-grid-height: 736px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .compare-modal { padding: 0; }
   .compare-shell { min-height: 100vh; border-radius: 0; padding: 12px; }

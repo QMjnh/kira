@@ -1,5 +1,7 @@
 # Kira
 
+New to Kira? Start with the [plain-language guide](README_FOR_HUMANS.md). This file remains the detailed technical reference.
+
 Kira is a transfer-first photo workflow MVP for moving selected RAW/JPEG files directly between a Windows laptop and an iPad on the same local network. It does not require Google Drive or another cloud-storage service.
 
 ## What works
