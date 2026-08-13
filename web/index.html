@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#173b2d">
+  <title>Kira</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Kira home">
+        <span class="brand-mark" aria-hidden="true">K</span>
+        <span>Kira</span>
+      </a>
+      <div id="connection-state" class="connection-state"><span></span>Connecting…</div>
+    </header>
+
+    <main>
+      <section id="pair-view" class="pair-view hidden" aria-labelledby="pair-title">
+        <div class="pair-card">
+          <div class="eyebrow">Connect this iPad</div>
+          <h1 id="pair-title">Pair with your Dell</h1>
+          <p>Enter the six-digit code shown in Kira on your laptop.</p>
+          <form id="pair-form">
+            <label for="pair-code">Pairing code</label>
+            <input id="pair-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required>
+            <button class="primary-button" type="submit">Connect</button>
+          </form>
+          <p id="pair-error" class="error-text" role="alert"></p>
+        </div>
+      </section>
+
+      <section id="dashboard-view" class="dashboard hidden">
+        <section id="desktop-setup" class="setup-card hidden">
+          <div>
+            <div class="eyebrow">Send without cloud storage</div>
+            <h1>Transfer directly to your iPad</h1>
+            <p>Open the Camera app on your iPad and scan this code. Kira opens already paired—no password to type.</p>
+            <div class="qr-wrap">
+              <img id="pair-qr" alt="QR code that opens and pairs Kira on the iPad">
+              <span>Scan with iPad Camera</span>
+            </div>
+          </div>
+          <dl class="connection-details">
+            <div><dt>Manual address</dt><dd id="ipad-url">—</dd></div>
+            <div><dt>Fallback pairing code</dt><dd id="pair-code-display">—</dd></div>
+            <div><dt>Hard-drive folder</dt><dd id="data-dir">—</dd></div>
+          </dl>
+        </section>
+
+        <section id="create-job-card" class="panel library-panel hidden">
+          <div class="panel-heading">
+            <div><div class="eyebrow">Laptop library</div><h2>Choose photos</h2></div>
+            <button id="browse-folders" class="quiet-button" type="button">Browse folders</button>
+          </div>
+          <div id="folder-browser" class="folder-browser hidden">
+            <div class="folder-browser-bar">
+              <button id="folder-up" class="quiet-button" type="button">↑ Up</button>
+              <nav id="folder-path" class="folder-breadcrumbs" aria-label="Current folder">Choose a drive or folder</nav>
+              <button id="use-folder" class="primary-button" type="button" disabled>Use this folder</button>
+            </div>
+            <div id="folder-list" class="folder-list"></div>
+          </div>
+          <div id="photo-workspace" class="photo-workspace hidden">
+            <div class="photo-toolbar">
+              <div><small id="photo-count">—</small></div>
+              <div class="photo-toolbar-actions">
+                <button id="select-all" class="quiet-button" type="button">Select all</button>
+                <button id="clear-picked" class="quiet-button" type="button">Deselect all</button>
+                <button id="compare-picked" class="quiet-button" type="button" disabled>Compare selected</button>
+              </div>
+            </div>
+            <div class="cull-actions" aria-label="Organize selected photos">
+              <div class="cull-action-buttons">
+                <button id="mark-unselect" class="quiet-button" type="button" disabled>Move to Unselected</button>
+                <button id="mark-select" class="primary-button" type="button" disabled>Move to Selected</button>
+                <button id="restore-inbox" class="quiet-button hidden" type="button" disabled>Restore to inbox</button>
+              </div>
+              <div class="group-action">
+                <input id="compare-group-name" type="text" maxlength="80" placeholder="Group name, e.g. bridge burst">
+                <button id="group-selected" class="quiet-button" type="button" disabled>Group to compare</button>
+              </div>
+            </div>
+            <nav id="cull-folders" class="cull-folders" aria-label="Culling folders"></nav>
+            <div id="photo-grid" class="photo-grid"></div>
+            <form id="selection-job-form" class="selection-job-form">
+              <label><span>Job name</span><input id="job-name" name="name" type="text" maxlength="120" placeholder="Lake Michigan · Aug 12" required></label>
+              <label><span>Send to iPad as</span><select id="edit-source-format" name="source-format">
+                <option value="jpeg" selected>JPEG · smaller and faster</option>
+                <option value="raw">RAW · full editing range</option>
+              </select></label>
+              <div id="selection-summary">0 selected</div>
+              <button class="primary-button" type="submit" disabled>Create iPad edit job</button>
+            </form>
+          </div>
+        </section>
+
+        <section class="jobs-section">
+          <div class="section-heading">
+            <div><div class="eyebrow">Transfer queue</div><h2>Edit jobs</h2></div>
+            <button id="refresh-jobs" class="quiet-button" type="button">Refresh</button>
+          </div>
+          <div id="jobs-list" class="jobs-list"></div>
+          <div id="empty-jobs" class="empty-state hidden">
+            <h3>No edit jobs yet</h3>
+            <p>Create one on the Dell, then open Kira on the iPad.</p>
+          </div>
+        </section>
+      </section>
+
+      <section id="job-view" class="job-view hidden">
+        <button id="back-to-jobs" class="back-button" type="button">← All jobs</button>
+        <header class="job-header">
+          <div><div class="eyebrow">Edit job</div><h1 id="job-title">—</h1><p id="job-summary">—</p></div>
+          <div class="job-header-actions">
+            <a id="download-bundle" class="primary-button link-button" href="#">Download edit sources</a>
+            <button id="delete-job" class="danger-button" type="button">Delete job</button>
+          </div>
+        </header>
+
+        <section id="job-pairing" class="job-pairing hidden" aria-label="Connect iPad to this job">
+          <div class="job-pairing-copy">
+            <div class="eyebrow">Open this job on iPad</div>
+            <h2>Scan to connect</h2>
+            <p>Scan with the iPad Camera, or use the address and pairing code.</p>
+            <dl>
+              <div><dt>Manual address</dt><dd id="job-ipad-url">—</dd></div>
+              <div><dt>Pairing code</dt><dd id="job-pair-code">—</dd></div>
+            </dl>
+          </div>
+          <div class="qr-wrap job-qr-wrap"><img id="job-pair-qr" alt="QR code that opens and pairs Kira on the iPad"><span>Scan with iPad Camera</span></div>
+        </section>
+
+        <div class="job-columns">
+          <section class="panel">
+            <div class="panel-heading"><div><div class="eyebrow">Step 1</div><h2>Download to iPad</h2></div></div>
+            <p class="panel-copy">Download the ZIP, tap it once in Files to unzip it, then import those photos into Lightroom.</p>
+            <div id="job-files" class="file-list"></div>
+          </section>
+
+          <section class="panel return-panel">
+            <div class="panel-heading"><div><div class="eyebrow">Step 2</div><h2>Return Lightroom exports</h2></div></div>
+            <p class="panel-copy">In Lightroom, export with the original filename to Files. Select those exports here and Kira will upload them to the Dell.</p>
+            <label class="return-picker">
+              <input id="return-files" type="file" multiple accept="image/*,.dng,.tif,.tiff,.avif,.jxl,.zip,application/zip">
+              <span class="return-picker-content"><strong>Choose edited photos or ZIP</strong><small>JPG, DNG, TIFF, AVIF, JXL, or ZIP</small></span>
+            </label>
+            <button id="upload-returns" class="primary-button full-button" type="button" disabled>Upload returned edits</button>
+            <div id="return-progress" class="transfer-progress hidden" aria-live="polite">
+              <div class="progress-label"><span id="return-progress-label">Preparing…</span><span id="return-progress-value">0%</span></div>
+              <progress id="return-progress-bar" max="100" value="0"></progress>
+            </div>
+            <div id="job-returns" class="return-list"></div>
+          </section>
+        </div>
+        <section id="export-panel" class="panel export-panel hidden">
+          <div class="panel-heading">
+            <div><div class="eyebrow">Step 3</div><h2>Finish and organize files</h2></div>
+          </div>
+          <p class="panel-copy">Kira moves the existing camera files inside the chosen source folder and copies—or extracts—the returned Lightroom edits into that same folder structure.</p>
+          <button id="organize-source" class="primary-button" type="button">Finish &amp; organize source folder</button>
+          <p id="organize-result" class="organize-result hidden" role="status"></p>
+          <div class="folder-preview" aria-label="Organized folder structure">
+            <code>selected/</code>
+            <code>selected/raw/</code>
+            <code>selected/pre-edit/</code>
+            <code>unselected_jpeg/</code>
+          </div>
+          <p class="panel-copy">After this finishes, deleting the Kira job removes only its transfer cache and manifest. These organized folders remain.</p>
+        </section>
+      </section>
+    </main>
+
+    <div id="compare-modal" class="compare-modal hidden" role="dialog" aria-modal="true" aria-labelledby="compare-title">
+      <div class="compare-shell">
+        <header class="compare-header">
+          <div><div class="eyebrow">Matched view</div><h2 id="compare-title">Compare photos</h2></div>
+          <label class="zoom-control"><span>Zoom</span><input id="compare-zoom" type="range" min="100" max="300" value="100" step="10"><output id="compare-zoom-value">100%</output></label>
+          <button id="close-compare" class="quiet-button" type="button">Done</button>
+        </header>
+        <div id="compare-grid" class="compare-grid"></div>
+        <p class="compare-hint">Drag any image to pan all images together. Uncheck weaker shots to remove them from the edit job.</p>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden" role="status"></div>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
