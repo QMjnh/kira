@@ -69,8 +69,9 @@ class KiraTransferTests(unittest.TestCase):
         self.assertIn('id="google-connect"', html)
         self.assertIn('id="google-download-mode"', html)
         self.assertIn('id="google-zip-threshold"', html)
-        self.assertIn('id="google-finish"', html)
-        self.assertIn('Open GG Photos', html)
+        self.assertNotIn('id="google-finish"', html)
+        self.assertIn('id="google-destination-folder"', html)
+        self.assertIn('id="google-import-archive"', html)
         self.assertIn('id="google-pick"', html)
         self.assertIn('id="google-upload-selected"', html)
 
@@ -111,9 +112,17 @@ class KiraTransferTests(unittest.TestCase):
                 self.uploaded = []
                 self.finished = None
                 self.import_destination = None
+                self.web_session = None
+                self.organized = None
+                self.matched_folder = None
 
             def status(self):
-                return {"configured": True, "connected": True, "inbox": "fake-inbox"}
+                return {
+                    "configured": True,
+                    "connected": True,
+                    "inbox": "fake-inbox",
+                    "organizer": {"available": True, "connected": True},
+                }
 
             def start_oauth(self, redirect_uri):
                 return {"authorization_url": f"https://accounts.example/auth?redirect={redirect_uri}"}
@@ -142,10 +151,35 @@ class KiraTransferTests(unittest.TestCase):
                 return {"id": "upload-1", "kind": "upload"}
 
             def operation(self, operation_id):
-                return {"id": operation_id, "status": "complete", "completed": 1, "failed": 0}
+                return {
+                    "id": operation_id,
+                    "kind": "organize" if operation_id == "organize-1" else "upload",
+                    "status": "complete",
+                    "completed": 1,
+                    "duplicates": 0,
+                    "failed": 0,
+                }
 
             def disconnect(self):
                 return {"connected": False}
+
+            def import_web_session(self, cookies_path, account_index):
+                self.web_session = (cookies_path, account_index)
+                return {"available": True, "connected": True, "account_index": account_index}
+
+            def disconnect_web_session(self):
+                return {"available": True, "connected": False}
+
+            def albums(self):
+                return {"albums": [{"media_key": "album-1", "title": "Trips"}]}
+
+            def start_organize(self, media_ids, album_title, archive):
+                self.organized = (media_ids, album_title, archive)
+                return {"id": "organize-1", "kind": "organize", "status": "starting"}
+
+            def start_match_folder(self, paths, album_title, archive):
+                self.matched_folder = (paths, album_title, archive)
+                return {"id": "match-1", "kind": "match_folder", "status": "complete"}
 
         fake = FakeGooglePhotos()
         self.server.google_photos = fake
@@ -196,6 +230,55 @@ class KiraTransferTests(unittest.TestCase):
         self.assertEqual(response.status, 202)
         self.assertEqual(uploaded["id"], "upload-1")
         self.assertEqual(set(fake.uploaded), {source / "IMG_9000.JPG", source / "clip.mp4"})
+
+        response, web_session = self.json_request(
+            "POST",
+            "/api/google/web-session",
+            {"cookies_path": str(source / "cookies.txt"), "account_index": 2},
+        )
+        self.assertEqual(response.status, 200)
+        self.assertTrue(web_session["connected"])
+        self.assertEqual(fake.web_session, (source / "cookies.txt", 2))
+
+        response, invalid_account = self.json_request(
+            "POST",
+            "/api/google/web-session",
+            {"cookies_path": str(source / "cookies.txt"), "account_index": None},
+        )
+        self.assertEqual(response.status, 400)
+        self.assertIn("account_index", invalid_account["error"])
+
+        response, albums = self.request("GET", "/api/google/albums")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(albums)["albums"][0]["title"], "Trips")
+
+        response, matched = self.json_request(
+            "POST",
+            "/api/google/match-folder",
+            {"source_directory": str(source), "album_title": "Trips", "archive": True},
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(matched["id"], "match-1")
+        self.assertEqual(matched["status"], "complete")
+        self.assertEqual(fake.matched_folder[1:], ("Trips", True))
+        self.assertEqual(set(fake.matched_folder[0]), {source / "IMG_9000.JPG", source / "clip.mp4"})
+
+        response, organized = self.json_request(
+            "POST",
+            "/api/google/organize",
+            {"media_ids": ["media-1"], "album_title": "Trips", "archive": True},
+        )
+        self.assertEqual(response.status, 202)
+        self.assertEqual(organized["id"], "organize-1")
+        self.assertEqual(fake.organized, (["media-1"], "Trips", True))
+
+        response, invalid = self.json_request(
+            "POST",
+            "/api/google/organize",
+            {"media_ids": ["media-1"], "album_title": "Trips", "archive": "false"},
+        )
+        self.assertEqual(response.status, 400)
+        self.assertIn("boolean", invalid["error"])
 
         response, operation = self.request("GET", "/api/google/operations/upload-1")
         self.assertEqual(response.status, 200)

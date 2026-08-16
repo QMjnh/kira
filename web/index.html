@@ -55,8 +55,11 @@
             <div><div class="eyebrow">Build one collection</div><h2>Google Photos</h2></div>
             <span id="google-status" class="google-status">Checking…</span>
           </div>
-          <p id="google-copy" class="panel-copy">Open a local theme folder, then add selected Google photos and videos to it.</p>
-          <div class="google-destination"><span>Import into</span><strong id="google-destination">Google Photos inbox</strong></div>
+          <p id="google-copy" class="panel-copy">Choose Google photos and videos, then save them into the folder below.</p>
+          <div class="google-destination">
+            <label for="google-destination-folder"><span>Import into folder</span><input id="google-destination-folder" type="text" value="/inbox" placeholder="/inbox"></label>
+            <strong id="google-destination">Google Photos inbox</strong>
+          </div>
           <div id="google-import-settings" class="google-import-settings">
             <label>
               <span>Download method</span>
@@ -68,15 +71,38 @@
             </label>
             <label id="google-zip-threshold-field">
               <span>Automatic ZIP at</span>
-              <span class="number-with-unit"><input id="google-zip-threshold" type="number" min="2" max="2000" step="1" value="25"><span>items</span></span>
+              <span class="number-with-unit"><input id="google-zip-threshold" type="number" min="2" max="2000" step="1" value="50"><span>items</span></span>
             </label>
             <p>Google transfers media individually. ZIP mode packages completed downloads temporarily on this Dell, extracts them as one verified batch, then deletes the ZIP.</p>
           </div>
           <div class="google-actions">
             <button id="google-connect" class="primary-button" type="button">Connect Google Photos</button>
             <button id="google-pick" class="primary-button hidden" type="button">Add Google media</button>
-            <a id="google-finish" class="quiet-button link-button hidden" href="https://photos.google.com/" target="_blank" rel="noopener">Open GG Photos</a>
             <button id="google-disconnect" class="quiet-button hidden" type="button">Disconnect</button>
+          </div>
+          <label class="google-import-archive-option"><input id="google-import-archive" type="checkbox" checked><span>Create the folder-named album and archive media after downloading</span></label>
+          <div id="google-organizer" class="google-organizer">
+            <div class="google-organizer-heading">
+              <strong>Match this folder in Google Photos</strong>
+              <span id="google-organizer-status" class="google-status">Not connected</span>
+            </div>
+            <p>Kira matches the open local folder against existing Google Photos by cryptographic file content—not filename—then adds confirmed matches to an album.</p>
+            <div id="google-organizer-connect" class="google-organizer-fields">
+              <label><span>Cookie export path</span><input id="google-cookies-path" type="text" placeholder="C:\Users\you\Downloads\photos.google.com.json"></label>
+              <label><span>Google account index</span><input id="google-account-index" type="number" min="0" max="99" value="0"></label>
+              <button id="google-organizer-connect-button" class="quiet-button" type="button">Import session</button>
+            </div>
+            <div id="google-organizer-controls" class="google-organizer-fields hidden">
+              <div id="google-match-source" class="google-match-source">Open a local folder below first.</div>
+              <div class="google-organizer-control-row">
+                <label><span>Album name for matches</span><input id="google-album-title" type="text" maxlength="500" placeholder="Album name"></label>
+                <label class="google-archive-option"><input id="google-archive-after-upload" type="checkbox" checked><span>Archive matched items after adding</span></label>
+                <button id="google-match-folder" class="primary-button" type="button" disabled>Match folder → album + archive</button>
+              </div>
+              <div class="google-organizer-footer">
+                <button id="google-organizer-disconnect" class="link-button quiet-button" type="button">Remove web session</button>
+              </div>
+            </div>
           </div>
           <div id="google-progress" class="transfer-progress hidden" aria-live="polite">
             <div class="progress-label"><span id="google-progress-label">Preparing…</span><span id="google-progress-value">0%</span></div>
