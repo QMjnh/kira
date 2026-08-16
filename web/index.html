@@ -57,9 +57,25 @@
           </div>
           <p id="google-copy" class="panel-copy">Open a local theme folder, then add selected Google photos and videos to it.</p>
           <div class="google-destination"><span>Import into</span><strong id="google-destination">Google Photos inbox</strong></div>
+          <div id="google-import-settings" class="google-import-settings">
+            <label>
+              <span>Download method</span>
+              <select id="google-download-mode">
+                <option value="automatic">Automatic</option>
+                <option value="zip">Always use temporary ZIP</option>
+                <option value="files">Never use ZIP</option>
+              </select>
+            </label>
+            <label id="google-zip-threshold-field">
+              <span>Automatic ZIP at</span>
+              <span class="number-with-unit"><input id="google-zip-threshold" type="number" min="2" max="2000" step="1" value="25"><span>items</span></span>
+            </label>
+            <p>Google transfers media individually. ZIP mode packages completed downloads temporarily on this Dell, extracts them as one verified batch, then deletes the ZIP.</p>
+          </div>
           <div class="google-actions">
             <button id="google-connect" class="primary-button" type="button">Connect Google Photos</button>
             <button id="google-pick" class="primary-button hidden" type="button">Add Google media</button>
+            <a id="google-finish" class="quiet-button link-button hidden" href="https://photos.google.com/" target="_blank" rel="noopener">Open GG Photos</a>
             <button id="google-disconnect" class="quiet-button hidden" type="button">Disconnect</button>
           </div>
           <div id="google-progress" class="transfer-progress hidden" aria-live="polite">
@@ -93,7 +109,11 @@
                 <button id="restore-inbox" class="quiet-button hidden" type="button" disabled>Restore to inbox</button>
               </div>
               <div class="group-action">
-                <input id="compare-group-name" type="text" maxlength="80" placeholder="Group name, e.g. bridge burst">
+                <select id="compare-group-select" aria-label="Comparison group">
+                  <option value="">Choose comparison group…</option>
+                  <option value="__new__">+ New comparison group…</option>
+                </select>
+                <input id="compare-group-name" class="hidden" type="text" maxlength="80" placeholder="New group name">
                 <button id="group-selected" class="quiet-button" type="button" disabled>Group to compare</button>
               </div>
             </div>

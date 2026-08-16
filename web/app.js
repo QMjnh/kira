@@ -140,6 +140,7 @@
     el('google-status').textContent = google.connected ? 'Connected' : google.configured ? 'Not connected' : 'Setup required';
     el('google-connect').classList.toggle('hidden', google.connected);
     el('google-pick').classList.toggle('hidden', !google.connected);
+    el('google-finish').classList.toggle('hidden', !google.connected);
     el('google-disconnect').classList.toggle('hidden', !google.connected);
     el('google-connect').disabled = !google.configured;
     el('google-copy').textContent = google.configured
@@ -147,8 +148,36 @@
         ? 'Google media can be added to the local collection currently open below. Exact duplicates are skipped.'
         : 'Connect once, then combine selected Google photos and videos with a local collection.'
       : `Download a Desktop OAuth credential from Google Cloud and save it as ${google.credentials_path}`;
+    renderGoogleImportPreferences();
     renderGoogleDestination();
     updateSelectionUi();
+  }
+
+  function googleImportPreferences() {
+    const threshold = Number.parseInt(el('google-zip-threshold').value, 10);
+    return {
+      download_mode: el('google-download-mode').value,
+      zip_threshold: Number.isFinite(threshold) ? threshold : 25,
+    };
+  }
+
+  function renderGoogleImportPreferences() {
+    el('google-download-mode').value = localStorage.getItem('kira-google-download-mode') || 'automatic';
+    el('google-zip-threshold').value = localStorage.getItem('kira-google-zip-threshold') || '25';
+    updateGooglePreferenceUi();
+  }
+
+  function updateGooglePreferenceUi() {
+    el('google-zip-threshold-field').classList.toggle('hidden', el('google-download-mode').value !== 'automatic');
+  }
+
+  function saveGoogleImportPreferences() {
+    const preferences = googleImportPreferences();
+    if (preferences.zip_threshold < 2 || preferences.zip_threshold > 2000) {
+      throw new Error('Automatic ZIP threshold must be between 2 and 2000 items.');
+    }
+    localStorage.setItem('kira-google-download-mode', preferences.download_mode);
+    localStorage.setItem('kira-google-zip-threshold', String(preferences.zip_threshold));
   }
 
   function renderGoogleDestination() {
@@ -205,11 +234,14 @@
   }
 
   async function importGoogleSelection(sessionId) {
+    const preferences = googleImportPreferences();
     const operation = await api('/api/google/imports', {
       method: 'POST',
       body: JSON.stringify({
         session_id: sessionId,
         destination_directory: state.libraryDirectory || '',
+        download_mode: preferences.download_mode,
+        zip_threshold: preferences.zip_threshold,
       }),
     });
     const finished = await pollGoogleOperation(operation.id);
@@ -225,6 +257,7 @@
       `${finished.related_variants} related variant${finished.related_variants === 1 ? '' : 's'}`,
     ];
     if (finished.failed) details.push(`${finished.failed} failed`);
+    details.push(finished.download_mode === 'zip' ? 'temporary ZIP extracted and removed' : 'saved as individual files');
     el('google-result').textContent = `Import complete: ${details.join(' · ')}`;
     el('google-result').classList.remove('hidden');
     toast(`Google import complete: ${details.join(', ')}.`);
@@ -305,6 +338,7 @@
     state.culling = result.culling || null;
     state.selectedAssets = new Set();
     renderCullFolders();
+    renderGroupPicker();
     renderPhotoGrid();
     renderGoogleDestination();
   }
@@ -330,6 +364,46 @@
     });
     const canRestore = Boolean(state.culling && state.culling.role !== 'inbox');
     el('restore-inbox').classList.toggle('hidden', !canRestore);
+  }
+
+  function comparisonGroups() {
+    return (state.culling?.folders || [])
+      .filter((folder) => folder.role === 'group')
+      .map((folder) => folder.group_name || folder.name.replace(/^Compare:\s*/, ''));
+  }
+
+  function selectedComparisonGroupName() {
+    const selected = el('compare-group-select').value;
+    return selected === '__new__' ? el('compare-group-name').value.trim() : selected;
+  }
+
+  function renderGroupPicker(preferredGroup = '') {
+    const select = el('compare-group-select');
+    const previous = preferredGroup || select.value;
+    select.replaceChildren();
+
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Choose comparison group…';
+    select.appendChild(placeholder);
+
+    const groups = comparisonGroups();
+    groups.forEach((name) => {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      select.appendChild(option);
+    });
+
+    const create = document.createElement('option');
+    create.value = '__new__';
+    create.textContent = '+ New comparison group…';
+    select.appendChild(create);
+
+    if (groups.includes(previous)) select.value = previous;
+    else if (!groups.length) select.value = '__new__';
+    else select.value = '';
+    el('compare-group-name').classList.toggle('hidden', select.value !== '__new__');
   }
 
   function previewUrl(path, size, version) {
@@ -395,7 +469,7 @@
     el('mark-unselect').disabled = count === 0;
     el('mark-select').disabled = count === 0;
     el('restore-inbox').disabled = count === 0;
-    el('group-selected').disabled = count === 0 || !el('compare-group-name').value.trim();
+    el('group-selected').disabled = count === 0 || !selectedComparisonGroupName();
     el('google-upload-selected').disabled = count === 0 || !state.google.connected;
   }
 
@@ -410,6 +484,9 @@
     if (!window.confirm(labels[action])) return;
     const controls = ['mark-unselect', 'mark-select', 'restore-inbox', 'group-selected'].map(el);
     controls.forEach((button) => { button.disabled = true; });
+    const groupButton = el('group-selected');
+    if (action === 'group') groupButton.textContent = 'Checking photos…';
+    const groupName = selectedComparisonGroupName();
     try {
       const result = await api('/api/local/cull', {
         method: 'POST',
@@ -417,15 +494,24 @@
           source_directory: state.libraryDirectory,
           asset_ids: Array.from(state.selectedAssets),
           action,
-          group_name: el('compare-group-name').value.trim(),
+          group_name: groupName,
         }),
       });
       applyLibraryScan(result);
-      if (action === 'group') el('compare-group-name').value = '';
+      if (action === 'group') renderGroupPicker(result.destination_group_name || groupName);
       const closedGroup = result.group_deleted ? ' The empty comparison group was removed.' : '';
-      toast(`${result.moved_assets} photo group${result.moved_assets === 1 ? '' : 's'} moved to ${result.destination}.${closedGroup}`);
+      const duplicates = result.deleted_duplicate_files || 0;
+      const renamed = (result.renamed_files || []).length;
+      const details = [];
+      if (duplicates) details.push(`${duplicates} visually identical duplicate${duplicates === 1 ? '' : 's'} removed from the source folder`);
+      if (renamed) details.push(`${renamed} same-name file${renamed === 1 ? '' : 's'} kept with a variant name`);
+      const destinationLabel = action === 'group' ? (result.destination_group_name || groupName) : result.destination;
+      const moved = `${result.moved_assets} photo group${result.moved_assets === 1 ? '' : 's'} moved to ${destinationLabel}`;
+      toast(`${moved}${details.length ? `; ${details.join('; ')}` : ''}.${closedGroup}`);
     } catch (error) {
       toast(error.message);
+    } finally {
+      groupButton.textContent = 'Group to compare';
       updateSelectionUi();
     }
   }
@@ -663,6 +749,7 @@
     const popup = window.open('about:blank', 'kira-google-picker', 'width=900,height=760');
     try {
       if (!popup) throw new Error('Allow pop-ups for Kira, then choose photos again.');
+      saveGoogleImportPreferences();
       const session = await api('/api/google/picker/sessions', {
         method: 'POST',
         body: JSON.stringify({max_items: 2000}),
@@ -677,6 +764,14 @@
     } finally {
       el('google-progress').classList.add('hidden');
     }
+  });
+
+  el('google-download-mode').addEventListener('change', () => {
+    updateGooglePreferenceUi();
+    saveGoogleImportPreferences();
+  });
+  el('google-zip-threshold').addEventListener('change', () => {
+    saveGoogleImportPreferences();
   });
 
   el('google-disconnect').addEventListener('click', async () => {
@@ -725,6 +820,12 @@
   el('restore-inbox').addEventListener('click', () => moveSelectedAssets('restore'));
   el('group-selected').addEventListener('click', () => moveSelectedAssets('group'));
   el('compare-group-name').addEventListener('input', updateSelectionUi);
+  el('compare-group-select').addEventListener('change', () => {
+    const creating = el('compare-group-select').value === '__new__';
+    el('compare-group-name').classList.toggle('hidden', !creating);
+    if (creating) el('compare-group-name').focus();
+    updateSelectionUi();
+  });
   el('select-all').addEventListener('click', () => {
     state.selectedAssets = new Set(state.libraryAssets.map((asset) => asset.id));
     syncSelectionTiles();

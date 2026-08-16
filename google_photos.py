@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import ctypes
 import hashlib
 import http.client
@@ -9,9 +10,11 @@ import mimetypes
 import os
 import re
 import secrets
+import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from ctypes import wintypes
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -41,6 +44,11 @@ VARIANT_SUFFIX = re.compile(
     r"(?:[\s_-]+(?:(?:edited?|edit|final|copy|lr|lightroom|google)(?:[\s_-]*v?\d+)?|v\d+)|\s*\(\d+\))$",
     re.IGNORECASE,
 )
+IMPORT_DOWNLOAD_MODES = {"automatic", "zip", "files"}
+DEFAULT_ZIP_THRESHOLD = 25
+MIN_ZIP_THRESHOLD = 2
+MAX_ZIP_THRESHOLD = 2000
+MAX_CONCURRENT_DOWNLOADS = 10
 
 
 class GooglePhotosError(Exception):
@@ -312,13 +320,29 @@ class GooglePhotosService:
             if not page_token:
                 return items
 
-    def start_import(self, session_id: str, destination: Path | None = None) -> dict:
+    def start_import(
+        self,
+        session_id: str,
+        destination: Path | None = None,
+        download_mode: object = "automatic",
+        zip_threshold: object = DEFAULT_ZIP_THRESHOLD,
+    ) -> dict:
         target = (destination or self.inbox).resolve()
         if not target.is_dir():
             raise GooglePhotosError("Choose an existing local collection folder")
+        mode = str(download_mode).strip().casefold()
+        threshold = int(zip_threshold)
+        if mode not in IMPORT_DOWNLOAD_MODES:
+            raise GooglePhotosError("Download method must be Automatic, Always ZIP, or Never ZIP")
+        if threshold < MIN_ZIP_THRESHOLD or threshold > MAX_ZIP_THRESHOLD:
+            raise GooglePhotosError(
+                f"ZIP threshold must be between {MIN_ZIP_THRESHOLD} and {MAX_ZIP_THRESHOLD}"
+            )
         operation = self._new_operation("import", directory=target)
         threading.Thread(
-            target=self._run_import, args=(operation["id"], session_id, target), daemon=True
+            target=self._run_import,
+            args=(operation["id"], session_id, target, mode, threshold),
+            daemon=True,
         ).start()
         return operation
 
@@ -430,74 +454,121 @@ class GooglePhotosService:
             return "related_variant", related[0]["path"]
         return "new", None
 
-    def _run_import(self, operation_id: str, session_id: str, destination: Path | None = None) -> None:
+    def _download_picked_item(self, index: int, item: dict, token: str, folder: Path) -> dict:
+        media = item.get("mediaFile") or {}
+        filename = _safe_filename(str(media.get("filename", "google-photo")))
+        media_type = str(item.get("type", "PHOTO"))
+        base_url = str(media.get("baseUrl", ""))
+        if media_type not in {"PHOTO", "VIDEO"} or not base_url:
+            raise GooglePhotosError("Google returned an invalid media item")
+        path = folder / f".{index:05d}-{uuid.uuid4().hex}.kira-download"
+        parameter = "dv" if media_type == "VIDEO" else "d"
+        size, digest = self._download_file(f"{base_url}={parameter}", token, path)
+        return {
+            "item": item,
+            "filename": filename,
+            "media_type": media_type,
+            "path": path,
+            "size": size,
+            "sha256": digest,
+            "archive_name": f"{index:05d}/{filename}",
+        }
+
+    def _integrate_download(
+        self, operation_id: str, download: dict, target: Path, existing: list[dict]
+    ) -> None:
+        incoming = Path(download["path"])
+        filename = download["filename"]
+        classification, related_path = self._classify_download(
+            incoming, filename, download["size"], download["sha256"], existing
+        )
+        result = {
+            "filename": filename,
+            "media_type": download["media_type"].casefold(),
+            "google_media_id": str(download["item"].get("id", "")),
+            "classification": classification,
+            "size": download["size"],
+            "sha256": download["sha256"],
+        }
+        if classification == "exact_duplicate":
+            incoming.unlink(missing_ok=True)
+            result.update(status="skipped", duplicate_of=str(related_path), local_path=str(related_path))
+            self._append_result(operation_id, result, True)
+            return
+
+        final = _unique_destination(target, filename, marker="google")
+        os.replace(incoming, final)
+        existing.append(
+            {
+                "path": final,
+                "name": final.name.casefold(),
+                "name_key": _name_key(final.name),
+                "size": download["size"],
+                "sha256": download["sha256"],
+            }
+        )
+        result.update(
+            filename=final.name,
+            status="complete",
+            related_to=str(related_path) if related_path else None,
+            local_path=str(final),
+        )
+        self._append_result(operation_id, result, True)
+
+    def _run_import(
+        self,
+        operation_id: str,
+        session_id: str,
+        destination: Path | None = None,
+        requested_mode: str = "automatic",
+        zip_threshold: int = DEFAULT_ZIP_THRESHOLD,
+    ) -> None:
         try:
             target = (destination or self.inbox).resolve()
             existing = self._existing_media(target)
             items = self._list_picked_items(session_id)
-            self._update_operation(operation_id, status="running", total=len(items))
+            zip_mode = requested_mode == "zip" or (
+                requested_mode == "automatic" and len(items) >= zip_threshold
+            )
+            self._update_operation(
+                operation_id,
+                status="running",
+                total=len(items),
+                download_mode="zip" if zip_mode else "files",
+                zip_threshold=zip_threshold,
+            )
             token = self._access_token()
-            for item in items:
-                media = item.get("mediaFile") or {}
-                filename = _safe_filename(str(media.get("filename", "google-photo")))
-                media_type = str(item.get("type", "PHOTO"))
-                base_url = str(media.get("baseUrl", ""))
-                try:
-                    if media_type not in {"PHOTO", "VIDEO"}:
-                        raise GooglePhotosError("Google returned an unsupported media type")
-                    if not base_url:
-                        raise GooglePhotosError("Google did not provide a download URL")
-                    part = target / f".{uuid.uuid4().hex}.kira-download"
-                    parameter = "dv" if media_type == "VIDEO" else "d"
-                    size, digest = self._download_file(f"{base_url}={parameter}", token, part)
-                    classification, related_path = self._classify_download(part, filename, size, digest, existing)
-                    if classification == "exact_duplicate":
-                        part.unlink(missing_ok=True)
-                        self._append_result(
-                            operation_id,
-                            {
-                                "filename": filename,
-                                "media_type": media_type.casefold(),
-                                "status": "skipped",
-                                "classification": classification,
-                                "duplicate_of": str(related_path),
-                                "size": size,
-                                "sha256": digest,
-                            },
-                            True,
+
+            with tempfile.TemporaryDirectory(prefix=".kira-google-", dir=target) as temporary:
+                temporary_root = Path(temporary)
+                downloads = []
+                if items:
+                    with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=min(MAX_CONCURRENT_DOWNLOADS, len(items))
+                    ) as executor:
+                        downloads = list(
+                            executor.map(
+                                lambda indexed: self._download_picked_item(
+                                    indexed[0], indexed[1], token, temporary_root
+                                ),
+                                enumerate(items),
+                            )
                         )
-                        continue
-                    final = _unique_destination(target, filename, marker="google")
-                    os.replace(part, final)
-                    record = {
-                        "path": final,
-                        "name": final.name.casefold(),
-                        "name_key": _name_key(final.name),
-                        "size": size,
-                        "sha256": digest,
-                    }
-                    existing.append(record)
-                    self._append_result(
-                        operation_id,
-                        {
-                            "filename": final.name,
-                            "media_type": media_type.casefold(),
-                            "status": "complete",
-                            "classification": classification,
-                            "related_to": str(related_path) if related_path else None,
-                            "size": size,
-                            "sha256": digest,
-                        },
-                        True,
-                    )
-                except Exception as exc:
-                    if "part" in locals() and part.exists():
-                        part.unlink(missing_ok=True)
-                    self._append_result(
-                        operation_id,
-                        {"filename": filename, "status": "failed", "error": str(exc)},
-                        False,
-                    )
+
+                if zip_mode and downloads:
+                    archive_path = temporary_root / "google-photos.zip"
+                    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                        for download in downloads:
+                            archive.write(download["path"], download["archive_name"])
+                    extracted = temporary_root / "extracted"
+                    with zipfile.ZipFile(archive_path) as archive:
+                        archive.extractall(extracted)
+                    for download in downloads:
+                        download["path"] = extracted / download["archive_name"]
+
+                for download in downloads:
+                    self._integrate_download(operation_id, download, target, existing)
+
             current = self.operation(operation_id)
             status = "complete" if not current["failed"] else "complete_with_errors"
             self._update_operation(operation_id, status=status)

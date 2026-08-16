@@ -68,6 +68,14 @@ To combine camera and phone media for one theme, first use **Browse folders** an
 
 The resulting folder opens in Kira's normal workspace. Photos show thumbnails; videos show selectable video tiles. Google download links are temporary, so Kira starts downloading as soon as the picker finishes.
 
+The **Download method** control is saved in the dashboard browser:
+
+- **Automatic** uses individual files below the chosen item count (25 by default) and a temporary local ZIP at or above it.
+- **Always use temporary ZIP** packages the completed downloads on the Dell, extracts the batch, and deletes the temporary folder and ZIP.
+- **Never use ZIP** downloads and places each item individually.
+
+Google's Picker API still supplies every item separately; Kira downloads up to 10 items concurrently. The ZIP is local staging, not a bulk archive supplied by Google. Kira's existing operation records retain the imported filenames, Google media IDs, hashes, and local paths. The **Open GG Photos** button opens Google Photos for the manual organization step that Google's API does not allow Kira to perform.
+
 Before keeping a download, Kira compares it with supported media already anywhere under the collection folder:
 
 - A matching SHA-256 hash is a confirmed byte-for-byte duplicate and is skipped, even if its filename differs.
@@ -89,7 +97,8 @@ Google tokens stay on the Dell. On Windows they are encrypted for the current Wi
 4. On the Dell, choose **Browse folders**, open the camera folder, select photos, and compare any number at once.
    - **Move to Unselected** moves checked JPEG/RAW pairs out of consideration without deleting them.
    - **Move to Selected** moves checked pairs into the final culling folder.
-   - Enter a group name and choose **Group to compare** to create as many comparison groups as needed.
+   - Choose an existing comparison group, or choose **New comparison group** and enter a name, then select **Group to compare**.
+   - Kira detects photos whose decoded pixels are exactly identical, even when filenames or metadata differ. When moving one to a folder that already contains it, Kira removes the redundant source copy. A same-name photo with changed pixels is preserved in the group with a `__variant2`-style name.
    - Use **Select all** or **Deselect all** for bulk checking. Folder chips open the inbox, select/unselect folders, or a comparison group. From `unselect`, use **Restore to inbox** to bring a photo back. Empty comparison-group folders are removed automatically.
 5. Choose **JPEG** or **RAW**, then create the edit job. Kira records references to the selected files without duplicating them. On the iPad, open the job and download the edit-sources ZIP.
 6. In the Files app, tap the ZIP once to unpack it.

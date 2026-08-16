@@ -63,9 +63,14 @@ class KiraTransferTests(unittest.TestCase):
         self.assertIn('id="job-pair-code"', html)
         self.assertIn('id="mark-unselect"', html)
         self.assertIn('id="group-selected"', html)
+        self.assertIn('id="compare-group-select"', html)
         self.assertIn('id="select-all"', html)
         self.assertIn('id="clear-picked"', html)
         self.assertIn('id="google-connect"', html)
+        self.assertIn('id="google-download-mode"', html)
+        self.assertIn('id="google-zip-threshold"', html)
+        self.assertIn('id="google-finish"', html)
+        self.assertIn('Open GG Photos', html)
         self.assertIn('id="google-pick"', html)
         self.assertIn('id="google-upload-selected"', html)
 
@@ -122,9 +127,15 @@ class KiraTransferTests(unittest.TestCase):
             def picker_session(self, session_id):
                 return {"id": session_id, "mediaItemsSet": True}
 
-            def start_import(self, session_id, destination=None):
+            def start_import(self, session_id, destination=None, download_mode=None, zip_threshold=None):
                 self.import_destination = destination
-                return {"id": "import-1", "kind": "import", "session_id": session_id}
+                return {
+                    "id": "import-1",
+                    "kind": "import",
+                    "session_id": session_id,
+                    "download_mode": download_mode,
+                    "zip_threshold": zip_threshold,
+                }
 
             def start_upload(self, paths):
                 self.uploaded = paths
@@ -165,10 +176,16 @@ class KiraTransferTests(unittest.TestCase):
         response, imported = self.json_request(
             "POST",
             "/api/google/imports",
-            {"session_id": "picker-1", "destination_directory": str(source)},
+            {
+                "session_id": "picker-1",
+                "destination_directory": str(source),
+                "download_mode": "zip",
+                "zip_threshold": 40,
+            },
         )
         self.assertEqual(response.status, 202)
         self.assertEqual(imported["id"], "import-1")
+        self.assertEqual(imported["download_mode"], "zip")
         self.assertEqual(fake.import_destination, source.resolve())
 
         response, uploaded = self.json_request(
@@ -563,6 +580,9 @@ class KiraTransferTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         group = source / "compare_groups" / "Bridge burst"
         self.assertEqual(grouped["destination"], str(group))
+        self.assertEqual(grouped["destination_group_name"], "Bridge burst")
+        bridge_folder = next(folder for folder in grouped["culling"]["folders"] if folder["role"] == "group")
+        self.assertEqual(bridge_folder["group_name"], "Bridge burst")
         self.assertTrue((group / "BURST_1.ARW").exists())
         self.assertTrue((group / "BURST_1.JPG").exists())
 
@@ -616,6 +636,72 @@ class KiraTransferTests(unittest.TestCase):
         self.assertEqual(restored["destination"], str(source))
         self.assertTrue((source / f"{eliminated_stem}.ARW").exists())
         self.assertTrue((source / f"{eliminated_stem}.JPG").exists())
+
+    def test_culling_deletes_source_when_pixel_identical_photo_already_exists(self) -> None:
+        source = Path(self.temp.name) / "visual-duplicates"
+        group = source / "compare_groups" / "baker"
+        group.mkdir(parents=True)
+        image = Image.new("RGB", (24, 18), (45, 120, 80))
+        inbox_exif = Image.Exif()
+        inbox_exif[0x010E] = "inbox metadata"
+        group_exif = Image.Exif()
+        group_exif[0x010E] = "group metadata"
+        inbox_photo = source / "IMG_100.JPG"
+        grouped_photo = group / "renamed-copy.JPG"
+        image.save(inbox_photo, format="JPEG", quality=96, exif=inbox_exif)
+        image.save(grouped_photo, format="JPEG", quality=96, exif=group_exif)
+        self.assertNotEqual(inbox_photo.read_bytes(), grouped_photo.read_bytes())
+
+        response, raw = self.request("GET", f"/api/local/scan?path={quote(str(source))}")
+        asset = json.loads(raw)["assets"][0]
+        response, result = self.json_request(
+            "POST",
+            "/api/local/cull",
+            {
+                "source_directory": str(source),
+                "asset_ids": [asset["id"]],
+                "action": "group",
+                "group_name": "baker",
+            },
+        )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(result["moved_assets"], 0)
+        self.assertEqual(result["duplicate_assets"], 1)
+        self.assertEqual(len(result["duplicate_files"]), 1)
+        self.assertEqual(result["deleted_duplicate_files"], 1)
+        self.assertFalse(inbox_photo.exists())
+        self.assertTrue(grouped_photo.exists())
+
+    def test_culling_preserves_edited_same_name_photo_as_a_variant(self) -> None:
+        source = Path(self.temp.name) / "same-name-edits"
+        group = source / "compare_groups" / "baker"
+        group.mkdir(parents=True)
+        inbox_photo = source / "IMG_200.JPG"
+        grouped_photo = group / "IMG_200.JPG"
+        Image.new("RGB", (24, 18), (180, 40, 40)).save(inbox_photo, format="JPEG", quality=96)
+        Image.new("RGB", (24, 18), (40, 40, 180)).save(grouped_photo, format="JPEG", quality=96)
+
+        response, raw = self.request("GET", f"/api/local/scan?path={quote(str(source))}")
+        asset = json.loads(raw)["assets"][0]
+        response, result = self.json_request(
+            "POST",
+            "/api/local/cull",
+            {
+                "source_directory": str(source),
+                "asset_ids": [asset["id"]],
+                "action": "group",
+                "group_name": "baker",
+            },
+        )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(result["moved_assets"], 1)
+        self.assertEqual(result["duplicate_assets"], 0)
+        self.assertEqual(result["renamed_files"][0]["destination"], "IMG_200__variant2.JPG")
+        self.assertFalse(inbox_photo.exists())
+        self.assertTrue(grouped_photo.exists())
+        self.assertTrue((group / "IMG_200__variant2.JPG").exists())
 
 
 if __name__ == "__main__":

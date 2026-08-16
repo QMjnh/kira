@@ -110,6 +110,76 @@ class GooglePhotosServiceTests(unittest.TestCase):
         self.assertEqual(finished["files"][0]["classification"], "exact_duplicate")
         self.assertFalse((collection / "phone-name.JPG").exists())
 
+    def test_zip_import_extracts_batch_and_removes_temporary_files(self) -> None:
+        service = self.service()
+        service._list_picked_items = lambda _session_id: [
+            {
+                "id": f"google-{index}",
+                "createTime": f"2026-08-{index + 1:02d}T12:00:00Z",
+                "type": "PHOTO",
+                "mediaFile": {
+                    "filename": f"IMG_{index}.JPG",
+                    "baseUrl": f"https://photo-{index}",
+                },
+            }
+            for index in range(3)
+        ]
+        service._access_token = lambda: "access-token"
+
+        def download(url, _token, destination):
+            content = f"bytes:{url}".encode("utf-8")
+            destination.write_bytes(content)
+            return len(content), hashlib.sha256(content).hexdigest()
+
+        service._download_file = download
+        service._request_json = lambda *_args, **_kwargs: {}
+        operation = service._new_operation("import", directory=service.inbox)
+        service._run_import(
+            operation["id"],
+            "picker-session",
+            service.inbox,
+            "zip",
+            25,
+        )
+        finished = service.operation(operation["id"])
+
+        self.assertEqual(finished["status"], "complete")
+        self.assertEqual(finished["download_mode"], "zip")
+        self.assertEqual(finished["completed"], 3)
+        self.assertEqual(
+            {path.name for path in service.inbox.iterdir()},
+            {"IMG_0.JPG", "IMG_1.JPG", "IMG_2.JPG"},
+        )
+        self.assertEqual(
+            {record["google_media_id"] for record in finished["files"]},
+            {"google-0", "google-1", "google-2"},
+        )
+
+    def test_automatic_import_uses_files_below_custom_threshold(self) -> None:
+        service = self.service()
+        service._list_picked_items = lambda _session_id: [
+            {"id": "one", "type": "PHOTO", "mediaFile": {"filename": "one.jpg", "baseUrl": "https://one"}}
+        ]
+        service._access_token = lambda: "access-token"
+
+        def download(_url, _token, destination):
+            destination.write_bytes(b"one")
+            return 3, hashlib.sha256(b"one").hexdigest()
+
+        service._download_file = download
+        service._request_json = lambda *_args, **_kwargs: {}
+        operation = service._new_operation("import", directory=service.inbox)
+        service._run_import(
+            operation["id"],
+            "picker-session",
+            service.inbox,
+            "automatic",
+            10,
+        )
+
+        finished = service.operation(operation["id"])
+        self.assertEqual(finished["download_mode"], "files")
+
     def test_upload_creates_google_media_item_after_sending_bytes(self) -> None:
         service = self.service()
         photo = self.root / "IMG_2.JPG"

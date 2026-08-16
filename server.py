@@ -60,6 +60,8 @@ VIDEO_EXTENSIONS = {
 }
 MEDIA_EXTENSIONS = PHOTO_EXTENSIONS | VIDEO_EXTENSIONS
 EXPORT_CATEGORIES = {"organized", "raw", "unselected-jpeg", "pre-edit", "edited"}
+MEDIA_IDENTITY_CACHE: dict[tuple[str, int, int, str], tuple[str, str]] = {}
+MEDIA_IDENTITY_CACHE_LOCK = threading.Lock()
 
 
 def utc_now() -> str:
@@ -121,6 +123,44 @@ def sha256_file(path: Path) -> str:
         while chunk := handle.read(CHUNK_COPY_SIZE):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def media_identity(path: Path) -> tuple[str, str]:
+    """Return an exact visual identity for photos and a byte identity otherwise.
+
+    Decoding the pixels deliberately ignores filenames, JPEG encoding, and metadata.
+    This catches visually identical Google Photos downloads while keeping any image
+    whose pixels were actually edited. RAW files and videos use exact file bytes.
+    """
+    stat = path.stat()
+    cache_key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns, path.suffix.casefold())
+    with MEDIA_IDENTITY_CACHE_LOCK:
+        cached = MEDIA_IDENTITY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    identity: tuple[str, str] | None = None
+    if Image is not None and path.suffix.casefold() in PHOTO_EXTENSIONS:
+        try:
+            with Image.open(path) as opened:
+                image = ImageOps.exif_transpose(opened) if ImageOps is not None else opened.copy()
+                mode = "RGBA" if "A" in image.getbands() else "RGB"
+                converted = image.convert(mode)
+                digest = hashlib.sha256()
+                digest.update(f"{converted.width}x{converted.height}\0{mode}\0".encode("ascii"))
+                for top in range(0, converted.height, 256):
+                    strip = converted.crop((0, top, converted.width, min(top + 256, converted.height)))
+                    digest.update(strip.tobytes())
+                identity = ("pixels", digest.hexdigest())
+        except (OSError, ValueError):
+            pass
+    if identity is None:
+        identity = ("bytes", sha256_file(path))
+    with MEDIA_IDENTITY_CACHE_LOCK:
+        if len(MEDIA_IDENTITY_CACHE) >= 4096:
+            MEDIA_IDENTITY_CACHE.clear()
+        MEDIA_IDENTITY_CACHE[cache_key] = identity
+    return identity
 
 
 def natural_key(value: str) -> list[object]:
@@ -215,7 +255,12 @@ def culling_context(current: Path) -> dict:
         except PermissionError:
             groups = []
         folders.extend(
-            {"name": f"Compare: {group.name}", "path": str(group), "role": "group"}
+            {
+                "name": f"Compare: {group.name}",
+                "group_name": group.name,
+                "path": str(group),
+                "role": "group",
+            }
             for group in groups
         )
     return {
@@ -265,25 +310,79 @@ def move_culling_assets(
     destination.mkdir(parents=True, exist_ok=True)
 
     planned: list[tuple[Path, Path]] = []
+    planned_targets: set[Path] = set()
+    duplicate_files: list[dict[str, str]] = []
+    renamed_files: list[dict[str, str]] = []
+    destination_identities: dict[tuple[str, str], Path] = {}
+    try:
+        existing_files = [
+            path
+            for path in destination.iterdir()
+            if path.is_file() and path.suffix.casefold() in MEDIA_EXTENSIONS
+        ]
+    except PermissionError as exc:
+        raise KiraError(HTTPStatus.FORBIDDEN, "Windows denied access to the destination folder") from exc
+    for path in existing_files:
+        destination_identities.setdefault(media_identity(path), path)
+
+    moved_assets = 0
+    duplicate_assets = 0
     for asset in chosen:
         records = asset["raw_files"] + asset["jpeg_files"] + asset.get("video_files", []) + asset["other_files"]
+        unique_records: list[tuple[dict, Path, tuple[str, str]]] = []
         for record in records:
             source = Path(record["path"])
-            target = destination / source.name
+            identity = media_identity(source)
+            duplicate_of = destination_identities.get(identity)
+            if duplicate_of is not None and source.resolve() != duplicate_of.resolve():
+                duplicate_files.append({"source": str(source), "duplicate_of": str(duplicate_of)})
+                continue
+            unique_records.append((record, source, identity))
+
+        if not unique_records:
+            duplicate_assets += 1
+            continue
+
+        direct_targets = [destination / source.name for _, source, _ in unique_records]
+        has_name_conflict = any(
+            target.exists() and source.resolve() != target.resolve()
+            for (_, source, _), target in zip(unique_records, direct_targets)
+        )
+        variant_index = 2
+        targets = direct_targets
+        if has_name_conflict:
+            while True:
+                targets = [
+                    destination / f"{source.stem}__variant{variant_index}{source.suffix}"
+                    for _, source, _ in unique_records
+                ]
+                if not any(target.exists() or target in planned_targets for target in targets):
+                    break
+                variant_index += 1
+
+        asset_planned = False
+        for (_, source, identity), target in zip(unique_records, targets):
             if source.resolve() == target.resolve():
                 continue
-            if target.exists():
-                raise KiraError(
-                    HTTPStatus.CONFLICT,
-                    f"{target.name} already exists in {destination}. Nothing was moved.",
-                )
             planned.append((source, target))
+            planned_targets.add(target)
+            destination_identities.setdefault(identity, target)
+            asset_planned = True
+            if target.name != source.name:
+                renamed_files.append({"source": source.name, "destination": target.name})
+        if asset_planned:
+            moved_assets += 1
 
     moved: list[tuple[Path, Path]] = []
+    deleted_duplicates: list[Path] = []
     try:
         for source, target in planned:
             shutil.move(str(source), str(target))
             moved.append((source, target))
+        for duplicate in duplicate_files:
+            source = Path(duplicate["source"])
+            source.unlink()
+            deleted_duplicates.append(source)
     except OSError as exc:
         for source, target in reversed(moved):
             try:
@@ -291,7 +390,7 @@ def move_culling_assets(
                     shutil.move(str(target), str(source))
             except OSError:
                 pass
-        raise KiraError(HTTPStatus.INTERNAL_SERVER_ERROR, f"Could not move photo group: {exc}") from exc
+        raise KiraError(HTTPStatus.INTERNAL_SERVER_ERROR, f"Could not organize photo group: {exc}") from exc
 
     refresh_directory = current
     group_deleted = False
@@ -307,9 +406,14 @@ def move_culling_assets(
 
     refreshed = scan_photo_directory(str(refresh_directory))
     refreshed["culling"] = culling_context(refresh_directory)
-    refreshed["moved_assets"] = len(chosen)
+    refreshed["moved_assets"] = moved_assets
     refreshed["moved_files"] = len(moved)
+    refreshed["duplicate_assets"] = duplicate_assets
+    refreshed["duplicate_files"] = duplicate_files
+    refreshed["deleted_duplicate_files"] = len(deleted_duplicates)
+    refreshed["renamed_files"] = renamed_files
     refreshed["destination"] = str(destination)
+    refreshed["destination_group_name"] = destination.name if action == "group" else None
     refreshed["group_deleted"] = group_deleted
     return refreshed
 
@@ -1194,6 +1298,8 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
                             resolve_directory(str(body.get("destination_directory", "")))
                             if str(body.get("destination_directory", "")).strip()
                             else None,
+                            body.get("download_mode", "automatic"),
+                            body.get("zip_threshold", 25),
                         ),
                         status=HTTPStatus.ACCEPTED,
                     )
