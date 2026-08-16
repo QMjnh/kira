@@ -14,6 +14,7 @@
     selectedAssets: new Set(),
     compareZoom: 1,
     comparePan: {x: 0, y: 0},
+    googleDownloadSettingsOpen: false,
     google: {configured: false, connected: false},
   };
 
@@ -140,35 +141,77 @@
     el('google-status').textContent = google.connected ? 'Connected' : google.configured ? 'Not connected' : 'Setup required';
     el('google-connect').classList.toggle('hidden', google.connected);
     el('google-pick').classList.toggle('hidden', !google.connected);
-    el('google-finish').classList.toggle('hidden', !google.connected);
     el('google-disconnect').classList.toggle('hidden', !google.connected);
     el('google-connect').disabled = !google.configured;
     el('google-copy').textContent = google.configured
       ? google.connected
-        ? 'Google media can be added to the local collection currently open below. Exact duplicates are skipped.'
-        : 'Connect once, then combine selected Google photos and videos with a local collection.'
+        ? 'Choose media in Google Photos, then save it into the folder below. Exact duplicates are skipped.'
+        : 'Connect once, then choose Google photos and videos to save into a Kira folder.'
       : `Download a Desktop OAuth credential from Google Cloud and save it as ${google.credentials_path}`;
     renderGoogleImportPreferences();
+    renderGoogleOrganizer();
     renderGoogleDestination();
     updateSelectionUi();
+  }
+
+  function renderGoogleOrganizer() {
+    const organizer = state.google.organizer || {};
+    const connected = Boolean(organizer.connected);
+    const organizerStatus = el('google-organizer-status');
+    organizerStatus.textContent = connected
+      ? 'Connected'
+      : organizer.available === false ? 'Client unavailable' : 'Not connected';
+    organizerStatus.title = connected && organizer.account
+      ? `Google account: ${organizer.account}`
+      : '';
+    el('google-organizer-connect').classList.toggle('hidden', connected);
+    el('google-organizer-controls').classList.toggle('hidden', !connected);
+    el('google-organizer-connect-button').disabled = organizer.available === false;
+    if (!el('google-album-title').value) {
+      el('google-album-title').value = localStorage.getItem('kira-google-album-title') || '';
+    }
+    const matchSource = el('google-match-source');
+    matchSource.querySelector('strong').textContent = state.libraryDirectory
+      ? state.libraryDirectory
+      : 'Open a local folder below first.';
+    const matchButton = el('google-match-folder');
+    matchButton.disabled = !connected
+      || !state.libraryDirectory
+      || !el('google-album-title').value.trim();
+    matchButton.textContent = el('google-archive-after-upload').checked
+      ? 'Match folder → album + archive'
+      : 'Match folder → album';
   }
 
   function googleImportPreferences() {
     const threshold = Number.parseInt(el('google-zip-threshold').value, 10);
     return {
       download_mode: el('google-download-mode').value,
-      zip_threshold: Number.isFinite(threshold) ? threshold : 25,
+      zip_threshold: Number.isFinite(threshold) ? threshold : 50,
     };
   }
 
   function renderGoogleImportPreferences() {
     el('google-download-mode').value = localStorage.getItem('kira-google-download-mode') || 'automatic';
-    el('google-zip-threshold').value = localStorage.getItem('kira-google-zip-threshold') || '25';
+    el('google-zip-threshold').value = localStorage.getItem('kira-google-zip-threshold') || '50';
+    const storedDestination = localStorage.getItem('kira-google-destination-folder');
+    el('google-destination-folder').value = storedDestination && storedDestination !== '/inbox'
+      ? storedDestination
+      : (state.google.inbox || '');
     updateGooglePreferenceUi();
   }
 
   function updateGooglePreferenceUi() {
-    el('google-zip-threshold-field').classList.toggle('hidden', el('google-download-mode').value !== 'automatic');
+    const mode = el('google-download-mode').value;
+    const threshold = el('google-zip-threshold').value || '50';
+    el('google-zip-threshold-field').classList.toggle('hidden', mode !== 'automatic');
+    el('google-download-summary').textContent = mode === 'automatic'
+      ? `Automatic · ZIP at ${threshold} items`
+      : mode === 'zip' ? 'Always use temporary ZIP' : 'Never use ZIP';
+    el('google-import-settings').classList.toggle('hidden', !state.googleDownloadSettingsOpen);
+    const toggle = el('google-download-settings-toggle');
+    toggle.setAttribute('aria-expanded', String(state.googleDownloadSettingsOpen));
+    toggle.textContent = state.googleDownloadSettingsOpen ? 'Hide download settings' : 'Download settings';
   }
 
   function saveGoogleImportPreferences() {
@@ -181,9 +224,19 @@
   }
 
   function renderGoogleDestination() {
-    const destination = state.libraryDirectory || state.google.inbox || 'Google Photos inbox';
-    el('google-destination').textContent = destination;
-    el('google-pick').textContent = state.libraryDirectory ? 'Add Google media here' : 'Add Google media to inbox';
+    const destinationFolder = el('google-destination-folder').value.trim() || state.google.inbox || '—';
+    el('google-destination').textContent = destinationFolder;
+    el('google-pick').textContent = 'Add Google media';
+    localStorage.setItem('kira-google-destination-folder', destinationFolder);
+  }
+
+  function googleImportAlbumTitle(destinationFolder) {
+    const value = destinationFolder.trim();
+    const normalized = value.replace(/[\\/]+$/, '').toLowerCase();
+    if (!value || normalized === '/inbox' || normalized === 'inbox' || value === state.google.inbox) {
+      return 'inbox';
+    }
+    return value.split(/[\\/]/).filter(Boolean).pop() || 'inbox';
   }
 
   function wait(milliseconds) {
@@ -221,11 +274,23 @@
     progress.classList.remove('hidden');
     while (true) {
       const operation = await api(`/api/google/operations/${encodeURIComponent(operationId)}`);
-      const processed = operation.completed + operation.duplicates + operation.failed;
+      const processed = operation.kind === 'match_folder'
+        ? Number(operation.scanned || 0)
+        : operation.completed + operation.duplicates + operation.failed;
       const percent = operation.total ? Math.round((processed / operation.total) * 100) : 0;
-      el('google-progress-label').textContent = operation.kind === 'import'
+      el('google-progress-label').textContent = operation.kind === 'match_folder' && operation.phase === 'matching_google_photos'
+        ? 'Scanning Google Photos for matching image content…'
+        : operation.kind === 'match_folder' && operation.phase === 'organizing_google_photos'
+          ? `${operation.archive ? 'Adding matched items to the album and archiving' : 'Adding matched items to the album'}…`
+        : operation.kind === 'import' && operation.phase === 'organizing_google_photos'
+          ? `${operation.archive ? 'Creating the album and archiving' : 'Creating the album'}…`
+        : operation.kind === 'import'
         ? `Checking and importing ${processed} of ${operation.total}…`
-        : `Uploading ${processed} of ${operation.total}…`;
+        : operation.kind === 'match_folder'
+          ? `Matching folder content ${processed} of ${operation.total}…`
+          : operation.kind === 'organize'
+          ? `${operation.archive ? 'Adding to album and archiving' : 'Adding to album'} ${processed} of ${operation.total}…`
+          : `Uploading ${processed} of ${operation.total}…`;
       el('google-progress-value').textContent = `${percent}%`;
       el('google-progress-bar').value = percent;
       if (['complete', 'complete_with_errors', 'failed'].includes(operation.status)) return operation;
@@ -235,13 +300,18 @@
 
   async function importGoogleSelection(sessionId) {
     const preferences = googleImportPreferences();
+    const destinationFolder = el('google-destination-folder').value.trim() || state.google.inbox || '';
+    const albumTitle = googleImportAlbumTitle(destinationFolder);
+    const archive = el('google-import-archive').checked;
     const operation = await api('/api/google/imports', {
       method: 'POST',
       body: JSON.stringify({
         session_id: sessionId,
-        destination_directory: state.libraryDirectory || '',
+        destination_folder: destinationFolder,
         download_mode: preferences.download_mode,
         zip_threshold: preferences.zip_threshold,
+        album_title: archive ? albumTitle : '',
+        archive,
       }),
     });
     const finished = await pollGoogleOperation(operation.id);
@@ -258,6 +328,11 @@
     ];
     if (finished.failed) details.push(`${finished.failed} failed`);
     details.push(finished.download_mode === 'zip' ? 'temporary ZIP extracted and removed' : 'saved as individual files');
+    if (finished.organize_status === 'complete') {
+      details.push(`${finished.organized} added to ${finished.album?.title || 'album'}${finished.archived ? ' and archived' : ''}`);
+    } else if (finished.organize_error) {
+      details.push(`album and Archive failed: ${finished.organize_error}`);
+    }
     el('google-result').textContent = `Import complete: ${details.join(' · ')}`;
     el('google-result').classList.remove('hidden');
     toast(`Google import complete: ${details.join(', ')}.`);
@@ -341,6 +416,7 @@
     renderGroupPicker();
     renderPhotoGrid();
     renderGoogleDestination();
+    renderGoogleOrganizer();
   }
 
   async function openCullFolder(path) {
@@ -766,6 +842,11 @@
     }
   });
 
+  el('google-download-settings-toggle').addEventListener('click', () => {
+    state.googleDownloadSettingsOpen = !state.googleDownloadSettingsOpen;
+    updateGooglePreferenceUi();
+  });
+
   el('google-download-mode').addEventListener('change', () => {
     updateGooglePreferenceUi();
     saveGoogleImportPreferences();
@@ -773,6 +854,7 @@
   el('google-zip-threshold').addEventListener('change', () => {
     saveGoogleImportPreferences();
   });
+  el('google-destination-folder').addEventListener('input', renderGoogleDestination);
 
   el('google-disconnect').addEventListener('click', async () => {
     if (!window.confirm('Disconnect Google Photos from Kira? Imported local files will stay on this computer.')) return;
@@ -782,6 +864,89 @@
       toast('Google Photos disconnected. Imported files were kept.');
     } catch (error) {
       showError(error);
+    }
+  });
+
+  el('google-organizer-connect-button').addEventListener('click', async () => {
+    const cookiesPath = el('google-cookies-path').value.trim();
+    const accountIndex = Number.parseInt(el('google-account-index').value, 10);
+    if (!cookiesPath) {
+      showError(new Error('Choose or enter the exported cookie JSON or cookies.txt path.'));
+      return;
+    }
+    try {
+      await api('/api/google/web-session', {
+        method: 'POST',
+        body: JSON.stringify({cookies_path: cookiesPath, account_index: Number.isFinite(accountIndex) ? accountIndex : 0}),
+      });
+      await refreshGoogleStatus();
+      toast('Google Photos album and Archive automation connected.');
+    } catch (error) {
+      showError(error);
+    }
+  });
+
+  el('google-organizer-disconnect').addEventListener('click', async () => {
+    if (!window.confirm('Remove the encrypted Google Photos web session from Kira?')) return;
+    try {
+      await api('/api/google/web-session', {method: 'DELETE'});
+      await refreshGoogleStatus();
+      toast('Google Photos web session removed.');
+    } catch (error) {
+      showError(error);
+    }
+  });
+
+  el('google-album-title').addEventListener('input', () => {
+    localStorage.setItem('kira-google-album-title', el('google-album-title').value.trim());
+    renderGoogleOrganizer();
+  });
+  el('google-archive-after-upload').addEventListener('change', renderGoogleOrganizer);
+
+  el('google-match-folder').addEventListener('click', async () => {
+    const albumTitle = el('google-album-title').value.trim();
+    const archive = el('google-archive-after-upload').checked;
+    if (!state.libraryDirectory || !albumTitle || !state.google.organizer?.connected) return;
+    const confirmed = window.confirm(
+      `Match every supported file directly inside:\n${state.libraryDirectory}\n\n` +
+      `Confirmed Google Photos matches will be added to “${albumTitle}”` +
+      `${archive ? ' and archived' : ''}. Continue?`
+    );
+    if (!confirmed) return;
+    const button = el('google-match-folder');
+    button.disabled = true;
+    button.textContent = 'Matching folder…';
+    try {
+      const operation = await api('/api/google/match-folder', {
+        method: 'POST',
+        body: JSON.stringify({
+          source_directory: state.libraryDirectory,
+          album_title: albumTitle,
+          archive,
+        }),
+      });
+      const finished = await pollGoogleOperation(operation.id);
+      if (finished.status === 'failed') {
+        throw new Error(finished.error || 'Google Photos folder matching failed.');
+      }
+      if (!finished.matched) {
+        toast(
+          `Checked ${finished.scanned} local files; no content matches were found in Google Photos` +
+          `${finished.failed ? `; ${finished.failed} file${finished.failed === 1 ? '' : 's'} failed and were logged` : ''}.`
+        );
+      } else {
+        toast(
+          `Matched ${finished.matched} Google item${finished.matched === 1 ? '' : 's'} ` +
+          `from ${finished.matched_local_files} local file${finished.matched_local_files === 1 ? '' : 's'}; ` +
+          `${finished.organized} added to ${albumTitle}${finished.archived_count ? ` and ${finished.archived_count} archived` : ''}` +
+          `${finished.failed ? `; ${finished.failed} failed and were logged` : ''}.`
+        );
+      }
+    } catch (error) {
+      showError(error);
+    } finally {
+      el('google-progress').classList.add('hidden');
+      renderGoogleOrganizer();
     }
   });
 

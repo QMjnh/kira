@@ -60,7 +60,7 @@ One-time setup:
 5. Rename it to `google-oauth-client.json` and put it directly beside `server.py` in the Kira application folder, for example `D:\Kira\google-oauth-client.json`. It stays there even if `-DataDir` changes.
 6. Restart Kira and click **Connect Google Photos** on the Dell dashboard.
 
-To combine camera and phone media for one theme, first use **Browse folders** and open the local collection folder (for example `D:\Photos\NYC`). Then click **Add Google media here**, choose photos or videos in Google's window, and click **Done**. Kira downloads new media directly into that open folder. If no local folder is open, it uses:
+To combine camera and phone media for one theme, enter a destination folder in the Google Photos panel, then click **Add Google media** and choose photos or videos in Google's window. The default is `<DataDir>\google-photos-inbox`; the legacy `/inbox` alias still maps to that same folder. You can also enter any absolute local path, such as `D:\Photos\NYC`, and Kira creates it when needed.
 
 ```text
 <DataDir>\google-photos-inbox\
@@ -68,13 +68,13 @@ To combine camera and phone media for one theme, first use **Browse folders** an
 
 The resulting folder opens in Kira's normal workspace. Photos show thumbnails; videos show selectable video tiles. Google download links are temporary, so Kira starts downloading as soon as the picker finishes.
 
-The **Download method** control is saved in the dashboard browser:
+The **Download settings** button reveals controls that are saved in the dashboard browser:
 
-- **Automatic** uses individual files below the chosen item count (25 by default) and a temporary local ZIP at or above it.
+- **Automatic** uses individual files below the chosen item count (50 by default) and a temporary local ZIP at or above it.
 - **Always use temporary ZIP** packages the completed downloads on the Dell, extracts the batch, and deletes the temporary folder and ZIP.
 - **Never use ZIP** downloads and places each item individually.
 
-Google's Picker API still supplies every item separately; Kira downloads up to 10 items concurrently. The ZIP is local staging, not a bulk archive supplied by Google. Kira's existing operation records retain the imported filenames, Google media IDs, hashes, and local paths. The **Open GG Photos** button opens Google Photos for the manual organization step that Google's API does not allow Kira to perform.
+Google's Picker API still supplies every item separately; Kira downloads up to 10 items concurrently. The ZIP is local staging, not a bulk archive supplied by Google. Kira's existing operation records retain the imported filenames, Google media IDs, hashes, and local paths.
 
 Before keeping a download, Kira compares it with supported media already anywhere under the collection folder:
 
@@ -85,9 +85,24 @@ Before keeping a download, Kira compares it with supported media already anywher
 
 The import summary shows each category. “Possible edit” is intentionally a conservative label: Kira can prove identical bytes, but a changed file with the same name may be an edit, metadata change, or recompression.
 
-To upload, open a local folder in Kira, select photo/video tiles, and click **Upload media to Google Photos**. Kira uploads selected JPEGs and supported videos. Selected videos can also be included in an iPad edit job in their original format; the JPEG/RAW selector applies only to photos. Uploads are additive: Kira does not delete or modify existing Google Photos items.
+The **Create the folder-named album and archive** option is checked by default. After downloading, Kira creates or reuses an album named after the destination folder and archives the selected Google media. This requires the separate Google Photos web session used by the album/Archive automation; uncheck the option to download without that step.
 
-Google tokens stay on the Dell. On Windows they are encrypted for the current Windows user with DPAPI. **Disconnect** revokes Google access and removes Kira's token while keeping already-imported local files.
+To upload, open a local folder in Kira, select photo/video tiles, and click **Upload media to Google Photos**. Kira uploads selected JPEGs and supported videos. Selected videos can also be included in an iPad edit job in their original format; the JPEG/RAW selector applies only to photos.
+
+To find copies of a local folder that already exist in Google Photos, add them to an album, and archive them without opening Google Photos:
+
+1. Use **Browse folders**, open the local folder, and click **Use this folder**.
+2. Export either a browser cookie JSON file or Netscape-format `cookies.txt` from a private browser session signed into Google Photos. Close that private window immediately after exporting so the session is not reused in the browser.
+3. In **Match this folder in Google Photos**, enter the local path to the JSON or `cookies.txt` export and the Google account index (`0` unless the exported browser session contains multiple accounts), then click **Import session**.
+4. Enter the album name, leave **Archive matched items after adding** checked, and click **Match folder → album + archive**. Confirm the action. Kira uses an existing exact-name album or creates it, adds only confirmed matches, and then archives them.
+
+Matching first uses the SHA-1 of the actual file bytes through Google Photos' remote-match endpoint. Photos that Google re-encoded are then shortlisted by dimensions and filename/capture metadata and accepted only when their decoded visual content matches; filenames alone never count as a match. This keeps renamed byte-identical files working while recovering re-encoded Google Photos downloads without treating unrelated same-name files as matches.
+
+Matching failures are isolated before mutation: Kira records and skips unreadable or uninspectable local images, then sends all valid Google media IDs in one album-add batch and one Archive batch. Every error is saved in the Google operation record, shown in the completion summary, and printed to the Kira backend terminal.
+
+Kira encrypts the imported web session with Windows DPAPI and removes the temporary plaintext copy after each request. The organizer is deliberately limited to album assignment and Archive; it has no trash or permanent-delete operation. It uses the pinned MIT-licensed [`google_photos_web_client`](https://github.com/xob0t/google_photos_web_client), which calls Google Photos' undocumented web endpoints. Google can change those endpoints or invalidate the session without notice, so use this feature only with an account you are comfortable testing.
+
+Google OAuth tokens and the separate web session stay on the Dell. On Windows they are encrypted for the current Windows user with DPAPI. **Disconnect** revokes OAuth access; **Remove web session** deletes the album/Archive session. Both actions keep already-imported local files.
 
 ## iPad and Lightroom workflow
 

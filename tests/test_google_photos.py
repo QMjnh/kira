@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
-from google_photos import GooglePhotosService, PICKER_SCOPE, UPLOAD_SCOPE
+from google_photos import GooglePhotosService, PICKER_SCOPE, UPLOAD_SCOPE, _google_remote_hash
 
 
 class GooglePhotosServiceTests(unittest.TestCase):
@@ -50,6 +53,15 @@ class GooglePhotosServiceTests(unittest.TestCase):
         self.assertEqual(service.credentials_path, self.app_root / "google-oauth-client.json")
         self.assertEqual(service.token_path, self.data_root / "google-token.json")
         self.assertTrue(service.status()["configured"])
+
+    def test_import_destination_uses_inbox_root_and_accepts_external_absolute_path(self) -> None:
+        service = self.service()
+        self.assertEqual(service.resolve_import_destination("/inbox"), service.inbox)
+        self.assertFalse((service.inbox / "inbox").exists())
+
+        external = self.root / "outside-collection"
+        self.assertEqual(service.resolve_import_destination(str(external)), external.resolve())
+        self.assertTrue(external.is_dir())
 
     def test_import_supports_photos_and_videos_and_keeps_changed_same_name(self) -> None:
         service = self.service()
@@ -207,6 +219,162 @@ class GooglePhotosServiceTests(unittest.TestCase):
         operation = service._new_operation("upload", total=1)
         service._run_upload(operation["id"], [video])
         self.assertEqual(service.operation(operation["id"])["completed"], 1)
+
+    def test_organize_operation_persists_album_and_archive_results(self) -> None:
+        service = self.service()
+        service.web = SimpleNamespace(
+            organize=lambda media_keys, album_title, archive: {
+                "album": {"title": album_title, "media_key": "album-1"},
+                "archived": archive,
+                "items": [
+                    {
+                        "google_media_key": media_key,
+                        "google_dedup_key": f"dedup:{media_key}",
+                        "album_added": True,
+                        "archived": archive,
+                        "status": "complete",
+                    }
+                    for media_key in media_keys
+                ],
+            }
+        )
+        operation = service._new_operation("organize", total=2)
+        service._run_organize(operation["id"], ["media-1", "media-2"], "Trips", True)
+        finished = service.operation(operation["id"])
+
+        self.assertEqual(finished["status"], "complete")
+        self.assertEqual(finished["completed"], 2)
+        self.assertEqual(finished["album"], {"title": "Trips", "media_key": "album-1"})
+        self.assertTrue(finished["archived"])
+        self.assertEqual(finished["files"][0]["google_dedup_key"], "dedup:media-1")
+
+    def test_match_folder_uses_file_content_hashes_then_organizes_matches(self) -> None:
+        service = self.service()
+        first = self.root / "first.jpg"
+        second = self.root / "renamed.jpg"
+        different = self.root / "different.jpg"
+        first.write_bytes(b"same-content")
+        second.write_bytes(b"same-content")
+        different.write_bytes(b"different-content")
+        expected_hash = _google_remote_hash(first)
+        requested_hashes = []
+
+        def find_remote_matches(hashes):
+            requested_hashes.extend(hashes)
+            return [
+                {
+                    "content_hash": expected_hash,
+                    "media_key": "google-media-1",
+                    "dedup_key": "google-dedup-1",
+                }
+            ]
+
+        def organize(media_keys, album_title, archive, resolved_album=None):
+            return {
+                "album": {"title": album_title, "media_key": "album-1"},
+                "archived": archive,
+                "items": [
+                    {
+                        "google_media_key": media_keys[0],
+                        "google_dedup_key": "google-dedup-1",
+                        "album_added": True,
+                        "archived": archive,
+                        "status": "complete",
+                    }
+                ],
+            }
+
+        service.web = SimpleNamespace(
+            find_remote_matches=find_remote_matches,
+            find_visual_matches=lambda _paths: ([], []),
+            ensure_album=lambda album_title: {
+                "title": album_title,
+                "media_key": "album-1",
+                "shared": False,
+            },
+            organize=organize,
+        )
+        operation = service._new_operation("match_folder", total=3)
+        service._run_match_folder(operation["id"], [first, second, different], "Local match", True)
+        finished = service.operation(operation["id"])
+
+        self.assertEqual(finished["status"], "complete")
+        self.assertEqual(len(requested_hashes), 2)
+        self.assertEqual(finished["matched"], 1)
+        self.assertEqual(finished["matched_local_files"], 2)
+        self.assertEqual(finished["unmatched"], 1)
+        self.assertEqual(finished["files"][0]["local_files"], [str(first), str(second)])
+        self.assertTrue(finished["archived"])
+
+    def test_match_folder_logs_local_failure_and_batches_valid_matches(self) -> None:
+        service = self.service()
+        rejected = self.root / "rejected.jpg"
+        successful = self.root / "successful.jpg"
+        unreadable = self.root / "missing.jpg"
+        rejected.write_bytes(b"rejected-content")
+        successful.write_bytes(b"successful-content")
+        rejected_hash = _google_remote_hash(rejected)
+        successful_hash = _google_remote_hash(successful)
+        organize_calls = []
+
+        def organize(media_keys, album_title, archive, resolved_album=None):
+            organize_calls.append(list(media_keys))
+            return {
+                "album": {"title": album_title, "media_key": "album-1"},
+                "archived": archive,
+                "items": [
+                    {
+                        "google_media_key": media_key,
+                        "google_dedup_key": f"dedup:{media_key}",
+                        "album_added": True,
+                        "archived": archive,
+                        "status": "complete",
+                    }
+                    for media_key in media_keys
+                ],
+            }
+
+        service.web = SimpleNamespace(
+            find_remote_matches=lambda _hashes: [
+                {
+                    "content_hash": rejected_hash,
+                    "media_key": "google-rejected",
+                    "dedup_key": "dedup-rejected",
+                },
+                {
+                    "content_hash": successful_hash,
+                    "media_key": "google-successful",
+                    "dedup_key": "dedup-successful",
+                },
+            ],
+            find_visual_matches=lambda _paths: ([], []),
+            ensure_album=lambda album_title: {
+                "title": album_title,
+                "media_key": "album-1",
+                "shared": False,
+            },
+            organize=organize,
+        )
+        operation = service._new_operation("match_folder", total=3)
+        terminal = io.StringIO()
+        with redirect_stdout(terminal):
+            service._run_match_folder(
+                operation["id"],
+                [unreadable, rejected, successful],
+                "Resilient album",
+                True,
+            )
+        finished = service.operation(operation["id"])
+
+        self.assertEqual(finished["status"], "complete_with_errors")
+        self.assertEqual(finished["failed"], 1)
+        self.assertEqual(finished["organized"], 2)
+        self.assertEqual(organize_calls, [["google-rejected", "google-successful"]])
+        self.assertIn("missing.jpg", terminal.getvalue())
+        self.assertEqual(
+            [item["stage"] for item in finished["files"] if item["status"] == "failed"],
+            ["local_hash"],
+        )
 
 
 if __name__ == "__main__":

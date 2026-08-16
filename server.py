@@ -38,7 +38,7 @@ except ImportError:  # Kira can still run, but previews fall back to full JPEGs.
 
 
 APP_NAME = "Kira"
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.9.6"
 CHUNK_COPY_SIZE = 4 * 1024 * 1024
 MAX_JSON_BODY = 1024 * 1024
 INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -1277,6 +1277,76 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
                     self._discard_optional_body()
                     self._send_json(self.server.google_photos.disconnect())
                     return
+                if segments == ["api", "google", "web-session"] and method == "POST":
+                    body = self._read_json()
+                    cookies_path = str(body.get("cookies_path", "")).strip()
+                    if not cookies_path:
+                        raise KiraError(HTTPStatus.BAD_REQUEST, "cookies_path is required")
+                    try:
+                        account_index = int(body.get("account_index", 0))
+                    except (TypeError, ValueError) as exc:
+                        raise KiraError(
+                            HTTPStatus.BAD_REQUEST,
+                            "account_index must be a number between 0 and 99",
+                        ) from exc
+                    self._send_json(
+                        self.server.google_photos.import_web_session(
+                            Path(cookies_path), account_index
+                        )
+                    )
+                    return
+                if segments == ["api", "google", "web-session"] and method == "DELETE":
+                    self._discard_optional_body()
+                    self._send_json(self.server.google_photos.disconnect_web_session())
+                    return
+                if segments == ["api", "google", "albums"] and method == "GET":
+                    self._send_json(self.server.google_photos.albums())
+                    return
+                if segments == ["api", "google", "match-folder"] and method == "POST":
+                    body = self._read_json()
+                    album_title = str(body.get("album_title", "")).strip()
+                    if not album_title:
+                        raise KiraError(HTTPStatus.BAD_REQUEST, "album_title is required")
+                    if not isinstance(body.get("archive"), bool):
+                        raise KiraError(HTTPStatus.BAD_REQUEST, "archive must be an explicit JSON boolean")
+                    scan = scan_photo_directory(str(body.get("source_directory", "")))
+                    paths = [
+                        Path(item["path"])
+                        for asset in scan["assets"]
+                        for group in ("raw_files", "jpeg_files", "video_files", "other_files")
+                        for item in asset[group]
+                    ]
+                    operation = self.server.google_photos.start_match_folder(
+                        paths,
+                        album_title,
+                        body["archive"],
+                    )
+                    if operation.get("status") == "failed":
+                        raise KiraError(
+                            HTTPStatus.INTERNAL_SERVER_ERROR,
+                            operation.get("error") or "Google Photos folder matching failed",
+                        )
+                    self._send_json(operation)
+                    return
+                if segments == ["api", "google", "organize"] and method == "POST":
+                    body = self._read_json()
+                    media_ids = body.get("media_ids", [])
+                    if not isinstance(media_ids, list):
+                        raise KiraError(HTTPStatus.BAD_REQUEST, "media_ids must be a list")
+                    album_title = str(body.get("album_title", "")).strip()
+                    if not album_title:
+                        raise KiraError(HTTPStatus.BAD_REQUEST, "album_title is required")
+                    if not isinstance(body.get("archive"), bool):
+                        raise KiraError(HTTPStatus.BAD_REQUEST, "archive must be an explicit JSON boolean")
+                    self._send_json(
+                        self.server.google_photos.start_organize(
+                            media_ids,
+                            album_title,
+                            body["archive"],
+                        ),
+                        status=HTTPStatus.ACCEPTED,
+                    )
+                    return
                 if segments == ["api", "google", "picker", "sessions"] and method == "POST":
                     body = self._read_json()
                     self._send_json(
@@ -1292,17 +1362,33 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
                     session_id = str(body.get("session_id", "")).strip()
                     if not session_id:
                         raise KiraError(HTTPStatus.BAD_REQUEST, "Google Picker session is required")
-                    self._send_json(
-                        self.server.google_photos.start_import(
+                    archive = body.get("archive", True)
+                    if not isinstance(archive, bool):
+                        raise KiraError(HTTPStatus.BAD_REQUEST, "archive must be an explicit JSON boolean")
+                    if "destination_folder" in body or "album_title" in body or "archive" in body:
+                        destination_folder = str(body.get("destination_folder", "/inbox")).strip()
+                        destination = (
+                            self.server.google_photos.resolve_import_destination(destination_folder)
+                            if destination_folder
+                            else None
+                        )
+                        operation = self.server.google_photos.start_import(
                             session_id,
-                            resolve_directory(str(body.get("destination_directory", "")))
-                            if str(body.get("destination_directory", "")).strip()
-                            else None,
+                            destination,
                             body.get("download_mode", "automatic"),
-                            body.get("zip_threshold", 25),
-                        ),
-                        status=HTTPStatus.ACCEPTED,
-                    )
+                            body.get("zip_threshold", 50),
+                            str(body.get("album_title", "")).strip() or None,
+                            archive,
+                        )
+                    else:
+                        legacy_destination = str(body.get("destination_directory", "")).strip()
+                        operation = self.server.google_photos.start_import(
+                            session_id,
+                            resolve_directory(legacy_destination) if legacy_destination else None,
+                            body.get("download_mode", "automatic"),
+                            body.get("zip_threshold", 50),
+                        )
+                    self._send_json(operation, status=HTTPStatus.ACCEPTED)
                     return
                 if segments == ["api", "google", "uploads"] and method == "POST":
                     body = self._read_json()
@@ -1474,6 +1560,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
                     self.close_connection = True
             self._send_json({"error": exc.message, **exc.extra}, status=exc.status)
         except GooglePhotosError as exc:
+            print(f"[Google Photos] {method} {path}: {' '.join(str(exc).splitlines())}", flush=True)
             if path == "/api/google/oauth/callback" or (path == "/" and "state" in query):
                 self._send_html(
                     "<!doctype html><meta charset='utf-8'><title>Kira</title>"

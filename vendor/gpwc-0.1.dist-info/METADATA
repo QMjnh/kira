@@ -1,0 +1,12 @@
+Metadata-Version: 2.5
+Name: gpwc
+Version: 0.1
+Summary: Reverse engineered Google Photos Web API client
+Project-URL: Homepage, https://github.com/xob0t/google_photos_web_client
+Author: xob0t
+License-File: LICENCE
+Requires-Python: >=3.10
+Requires-Dist: lxml
+Requires-Dist: requests
+Provides-Extra: dev
+Requires-Dist: ruff; extra == 'dev'
