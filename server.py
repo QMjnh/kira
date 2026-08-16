@@ -29,6 +29,7 @@ if VENDOR_DIR.exists():
 
 import qrcode
 import qrcode.image.svg
+from google_photos import GooglePhotosError, GooglePhotosService
 try:
     from PIL import Image, ImageOps
 except ImportError:  # Kira can still run, but previews fall back to full JPEGs.
@@ -37,12 +38,12 @@ except ImportError:  # Kira can still run, but previews fall back to full JPEGs.
 
 
 APP_NAME = "Kira"
-APP_VERSION = "0.5.1"
+APP_VERSION = "0.7.0"
 CHUNK_COPY_SIZE = 4 * 1024 * 1024
 MAX_JSON_BODY = 1024 * 1024
 INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 EDIT_SUFFIX = re.compile(
-    r"(?:[\s_-]+(?:edited?|edit|final|copy|lr|lightroom))(?:[\s_-]*v?\d+)?$",
+    r"(?:[\s_-]+(?:(?:edited?|edit|final|copy|lr|lightroom|google)(?:[\s_-]*v?\d+)?|v\d+)|\s*\(\d+\))$",
     re.IGNORECASE,
 )
 RAW_EXTENSIONS = {
@@ -53,7 +54,14 @@ RAW_EXTENSIONS = {
 JPEG_EXTENSIONS = {".jpg", ".jpeg"}
 PREVIEW_EXTENSIONS = JPEG_EXTENSIONS | {".png", ".webp", ".avif"}
 PHOTO_EXTENSIONS = RAW_EXTENSIONS | PREVIEW_EXTENSIONS | {".tif", ".tiff", ".jxl", ".heic", ".heif"}
+VIDEO_EXTENSIONS = {
+    ".3g2", ".3gp", ".asf", ".avi", ".divx", ".m2t", ".m2ts", ".m4v",
+    ".mkv", ".mmv", ".mod", ".mov", ".mp4", ".mpg", ".mts", ".tod", ".wmv",
+}
+MEDIA_EXTENSIONS = PHOTO_EXTENSIONS | VIDEO_EXTENSIONS
 EXPORT_CATEGORIES = {"organized", "raw", "unselected-jpeg", "pre-edit", "edited"}
+MEDIA_IDENTITY_CACHE: dict[tuple[str, int, int, str], tuple[str, str]] = {}
+MEDIA_IDENTITY_CACHE_LOCK = threading.Lock()
 
 
 def utc_now() -> str:
@@ -115,6 +123,44 @@ def sha256_file(path: Path) -> str:
         while chunk := handle.read(CHUNK_COPY_SIZE):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def media_identity(path: Path) -> tuple[str, str]:
+    """Return an exact visual identity for photos and a byte identity otherwise.
+
+    Decoding the pixels deliberately ignores filenames, JPEG encoding, and metadata.
+    This catches visually identical Google Photos downloads while keeping any image
+    whose pixels were actually edited. RAW files and videos use exact file bytes.
+    """
+    stat = path.stat()
+    cache_key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns, path.suffix.casefold())
+    with MEDIA_IDENTITY_CACHE_LOCK:
+        cached = MEDIA_IDENTITY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    identity: tuple[str, str] | None = None
+    if Image is not None and path.suffix.casefold() in PHOTO_EXTENSIONS:
+        try:
+            with Image.open(path) as opened:
+                image = ImageOps.exif_transpose(opened) if ImageOps is not None else opened.copy()
+                mode = "RGBA" if "A" in image.getbands() else "RGB"
+                converted = image.convert(mode)
+                digest = hashlib.sha256()
+                digest.update(f"{converted.width}x{converted.height}\0{mode}\0".encode("ascii"))
+                for top in range(0, converted.height, 256):
+                    strip = converted.crop((0, top, converted.width, min(top + 256, converted.height)))
+                    digest.update(strip.tobytes())
+                identity = ("pixels", digest.hexdigest())
+        except (OSError, ValueError):
+            pass
+    if identity is None:
+        identity = ("bytes", sha256_file(path))
+    with MEDIA_IDENTITY_CACHE_LOCK:
+        if len(MEDIA_IDENTITY_CACHE) >= 4096:
+            MEDIA_IDENTITY_CACHE.clear()
+        MEDIA_IDENTITY_CACHE[cache_key] = identity
+    return identity
 
 
 def natural_key(value: str) -> list[object]:
@@ -209,7 +255,12 @@ def culling_context(current: Path) -> dict:
         except PermissionError:
             groups = []
         folders.extend(
-            {"name": f"Compare: {group.name}", "path": str(group), "role": "group"}
+            {
+                "name": f"Compare: {group.name}",
+                "group_name": group.name,
+                "path": str(group),
+                "role": "group",
+            }
             for group in groups
         )
     return {
@@ -259,25 +310,79 @@ def move_culling_assets(
     destination.mkdir(parents=True, exist_ok=True)
 
     planned: list[tuple[Path, Path]] = []
+    planned_targets: set[Path] = set()
+    duplicate_files: list[dict[str, str]] = []
+    renamed_files: list[dict[str, str]] = []
+    destination_identities: dict[tuple[str, str], Path] = {}
+    try:
+        existing_files = [
+            path
+            for path in destination.iterdir()
+            if path.is_file() and path.suffix.casefold() in MEDIA_EXTENSIONS
+        ]
+    except PermissionError as exc:
+        raise KiraError(HTTPStatus.FORBIDDEN, "Windows denied access to the destination folder") from exc
+    for path in existing_files:
+        destination_identities.setdefault(media_identity(path), path)
+
+    moved_assets = 0
+    duplicate_assets = 0
     for asset in chosen:
-        records = asset["raw_files"] + asset["jpeg_files"] + asset["other_files"]
+        records = asset["raw_files"] + asset["jpeg_files"] + asset.get("video_files", []) + asset["other_files"]
+        unique_records: list[tuple[dict, Path, tuple[str, str]]] = []
         for record in records:
             source = Path(record["path"])
-            target = destination / source.name
+            identity = media_identity(source)
+            duplicate_of = destination_identities.get(identity)
+            if duplicate_of is not None and source.resolve() != duplicate_of.resolve():
+                duplicate_files.append({"source": str(source), "duplicate_of": str(duplicate_of)})
+                continue
+            unique_records.append((record, source, identity))
+
+        if not unique_records:
+            duplicate_assets += 1
+            continue
+
+        direct_targets = [destination / source.name for _, source, _ in unique_records]
+        has_name_conflict = any(
+            target.exists() and source.resolve() != target.resolve()
+            for (_, source, _), target in zip(unique_records, direct_targets)
+        )
+        variant_index = 2
+        targets = direct_targets
+        if has_name_conflict:
+            while True:
+                targets = [
+                    destination / f"{source.stem}__variant{variant_index}{source.suffix}"
+                    for _, source, _ in unique_records
+                ]
+                if not any(target.exists() or target in planned_targets for target in targets):
+                    break
+                variant_index += 1
+
+        asset_planned = False
+        for (_, source, identity), target in zip(unique_records, targets):
             if source.resolve() == target.resolve():
                 continue
-            if target.exists():
-                raise KiraError(
-                    HTTPStatus.CONFLICT,
-                    f"{target.name} already exists in {destination}. Nothing was moved.",
-                )
             planned.append((source, target))
+            planned_targets.add(target)
+            destination_identities.setdefault(identity, target)
+            asset_planned = True
+            if target.name != source.name:
+                renamed_files.append({"source": source.name, "destination": target.name})
+        if asset_planned:
+            moved_assets += 1
 
     moved: list[tuple[Path, Path]] = []
+    deleted_duplicates: list[Path] = []
     try:
         for source, target in planned:
             shutil.move(str(source), str(target))
             moved.append((source, target))
+        for duplicate in duplicate_files:
+            source = Path(duplicate["source"])
+            source.unlink()
+            deleted_duplicates.append(source)
     except OSError as exc:
         for source, target in reversed(moved):
             try:
@@ -285,7 +390,7 @@ def move_culling_assets(
                     shutil.move(str(target), str(source))
             except OSError:
                 pass
-        raise KiraError(HTTPStatus.INTERNAL_SERVER_ERROR, f"Could not move photo group: {exc}") from exc
+        raise KiraError(HTTPStatus.INTERNAL_SERVER_ERROR, f"Could not organize photo group: {exc}") from exc
 
     refresh_directory = current
     group_deleted = False
@@ -301,9 +406,14 @@ def move_culling_assets(
 
     refreshed = scan_photo_directory(str(refresh_directory))
     refreshed["culling"] = culling_context(refresh_directory)
-    refreshed["moved_assets"] = len(chosen)
+    refreshed["moved_assets"] = moved_assets
     refreshed["moved_files"] = len(moved)
+    refreshed["duplicate_assets"] = duplicate_assets
+    refreshed["duplicate_files"] = duplicate_files
+    refreshed["deleted_duplicate_files"] = len(deleted_duplicates)
+    refreshed["renamed_files"] = renamed_files
     refreshed["destination"] = str(destination)
+    refreshed["destination_group_name"] = destination.name if action == "group" else None
     refreshed["group_deleted"] = group_deleted
     return refreshed
 
@@ -313,21 +423,30 @@ def scan_photo_directory(value: str) -> dict:
     groups: dict[str, dict] = {}
     try:
         files = sorted(
-            (item for item in current.iterdir() if item.is_file() and item.suffix.casefold() in PHOTO_EXTENSIONS),
+            (item for item in current.iterdir() if item.is_file() and item.suffix.casefold() in MEDIA_EXTENSIONS),
             key=lambda item: natural_key(item.name),
         )
     except PermissionError as exc:
         raise KiraError(HTTPStatus.FORBIDDEN, "Windows denied access to this folder") from exc
 
     for path in files:
-        stem_key = path.stem.casefold()
+        stem_key = match_key(path.name)
         group = groups.setdefault(
             stem_key,
-            {"stem": path.stem, "raw_paths": [], "jpeg_paths": [], "preview_paths": [], "other_paths": []},
+            {
+                "stem": path.stem,
+                "raw_paths": [],
+                "jpeg_paths": [],
+                "video_paths": [],
+                "preview_paths": [],
+                "other_paths": [],
+            },
         )
         suffix = path.suffix.casefold()
         if suffix in RAW_EXTENSIONS:
             group["raw_paths"].append(path)
+        elif suffix in VIDEO_EXTENSIONS:
+            group["video_paths"].append(path)
         elif suffix in JPEG_EXTENSIONS:
             group["jpeg_paths"].append(path)
             group["preview_paths"].append(path)
@@ -339,7 +458,7 @@ def scan_photo_directory(value: str) -> dict:
 
     assets: list[dict] = []
     for group in groups.values():
-        all_paths = group["raw_paths"] + group["jpeg_paths"] + group["other_paths"]
+        all_paths = group["raw_paths"] + group["jpeg_paths"] + group["video_paths"] + group["other_paths"]
         asset_id = hashlib.sha256(f"{current}\0{group['stem'].casefold()}".encode("utf-8")).hexdigest()[:16]
         preview = group["preview_paths"][0] if group["preview_paths"] else None
         file_stats = {path: path.stat() for path in all_paths}
@@ -349,6 +468,7 @@ def scan_photo_directory(value: str) -> dict:
                 "stem": group["stem"],
                 "raw_files": [{"filename": path.name, "path": str(path), "size": file_stats[path].st_size} for path in group["raw_paths"]],
                 "jpeg_files": [{"filename": path.name, "path": str(path), "size": file_stats[path].st_size} for path in group["jpeg_paths"]],
+                "video_files": [{"filename": path.name, "path": str(path), "size": file_stats[path].st_size} for path in group["video_paths"]],
                 "other_files": [{"filename": path.name, "path": str(path), "size": file_stats[path].st_size} for path in group["other_paths"]],
                 "preview_path": str(preview) if preview else None,
                 "preview_version": file_stats[preview].st_mtime_ns if preview else None,
@@ -577,35 +697,44 @@ class KiraStore:
                     "selected": asset["id"] in selected,
                     "raw_files": asset["raw_files"],
                     "jpeg_files": asset["jpeg_files"],
+                    "video_files": asset.get("video_files", []),
                     "other_files": asset["other_files"],
                 }
                 manifest["assets"].append(stored_asset)
                 if not stored_asset["selected"]:
                     continue
-                candidates = asset["raw_files"] if source_format == "raw" else asset["jpeg_files"]
-                if not candidates:
+                photo_candidates = asset["raw_files"] if source_format == "raw" else asset["jpeg_files"]
+                has_photo = bool(asset["raw_files"] or asset["jpeg_files"])
+                if has_photo and not photo_candidates:
                     shutil.rmtree(self._job_dir(job_id))
                     label = "RAW" if source_format == "raw" else "JPEG"
                     raise KiraError(
                         HTTPStatus.BAD_REQUEST,
                         f"{asset['stem']} does not have a {label} file. Change the edit source or deselect it.",
                     )
-                source = Path(candidates[0]["path"])
-                record = {
-                    "id": uuid.uuid4().hex[:12],
-                    "asset_id": asset["id"],
-                    "filename": source.name,
-                    "original_filename": source.name,
-                    "source_path": str(source),
-                    "referenced": True,
-                    "size": source.stat().st_size,
-                    # Hash while building the transfer ZIP so large sources are
-                    # read once instead of once here and again for packaging.
-                    "sha256": None,
-                    "created_at": utc_now(),
-                }
-                manifest["files"].append(record)
-                stored_asset["edit_file_id"] = record["id"]
+                sources = ([photo_candidates[0]] if photo_candidates else []) + asset.get("video_files", [])
+                if not sources:
+                    shutil.rmtree(self._job_dir(job_id))
+                    raise KiraError(HTTPStatus.BAD_REQUEST, f"{asset['stem']} has no transferable media")
+                stored_asset["edit_file_ids"] = []
+                for candidate in sources:
+                    source = Path(candidate["path"])
+                    record = {
+                        "id": uuid.uuid4().hex[:12],
+                        "asset_id": asset["id"],
+                        "filename": source.name,
+                        "original_filename": source.name,
+                        "source_path": str(source),
+                        "referenced": True,
+                        "size": source.stat().st_size,
+                        # Hash while building the transfer ZIP so large sources are
+                        # read once instead of once here and again for packaging.
+                        "sha256": None,
+                        "created_at": utc_now(),
+                    }
+                    manifest["files"].append(record)
+                    stored_asset["edit_file_ids"].append(record["id"])
+                stored_asset["edit_file_id"] = stored_asset["edit_file_ids"][0]
             self._save_manifest(manifest)
             return self.job_summary(manifest)
 
@@ -1077,6 +1206,7 @@ class KiraHTTPServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], store: KiraStore, static_root: Path) -> None:
         self.store = store
         self.static_root = static_root
+        self.google_photos = GooglePhotosService(store.root, static_root.parent)
         super().__init__(address, KiraRequestHandler)
 
 
@@ -1108,6 +1238,9 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
         try:
+            if path == "/" and method == "GET" and "state" in query and ("code" in query or "error" in query):
+                self._google_oauth_callback(query)
+                return
             if path in {"/", "/index.html", "/app.js", "/styles.css"} and method in {"GET", "HEAD"}:
                 self._serve_static(path, method == "HEAD")
                 return
@@ -1123,9 +1256,81 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/pair" and method == "POST":
                 self._pair()
                 return
+            if path == "/api/google/oauth/callback" and method == "GET":
+                self._google_oauth_callback(query)
+                return
 
             self._require_auth(query)
             segments = [unquote(segment) for segment in path.strip("/").split("/")]
+            if segments[:2] == ["api", "google"]:
+                self._require_local()
+                if segments == ["api", "google", "status"] and method == "GET":
+                    self._send_json(self.server.google_photos.status())
+                    return
+                if segments == ["api", "google", "oauth", "start"] and method == "POST":
+                    self._discard_optional_body()
+                    port = self.server.server_address[1]
+                    redirect_uri = f"http://127.0.0.1:{port}"
+                    self._send_json(self.server.google_photos.start_oauth(redirect_uri))
+                    return
+                if segments == ["api", "google", "disconnect"] and method == "POST":
+                    self._discard_optional_body()
+                    self._send_json(self.server.google_photos.disconnect())
+                    return
+                if segments == ["api", "google", "picker", "sessions"] and method == "POST":
+                    body = self._read_json()
+                    self._send_json(
+                        self.server.google_photos.create_picker_session(int(body.get("max_items", 2000))),
+                        status=HTTPStatus.CREATED,
+                    )
+                    return
+                if len(segments) == 5 and segments[:4] == ["api", "google", "picker", "sessions"] and method == "GET":
+                    self._send_json(self.server.google_photos.picker_session(segments[4]))
+                    return
+                if segments == ["api", "google", "imports"] and method == "POST":
+                    body = self._read_json()
+                    session_id = str(body.get("session_id", "")).strip()
+                    if not session_id:
+                        raise KiraError(HTTPStatus.BAD_REQUEST, "Google Picker session is required")
+                    self._send_json(
+                        self.server.google_photos.start_import(
+                            session_id,
+                            resolve_directory(str(body.get("destination_directory", "")))
+                            if str(body.get("destination_directory", "")).strip()
+                            else None,
+                            body.get("download_mode", "automatic"),
+                            body.get("zip_threshold", 25),
+                        ),
+                        status=HTTPStatus.ACCEPTED,
+                    )
+                    return
+                if segments == ["api", "google", "uploads"] and method == "POST":
+                    body = self._read_json()
+                    asset_ids = body.get("asset_ids", [])
+                    if not isinstance(asset_ids, list):
+                        raise KiraError(HTTPStatus.BAD_REQUEST, "asset_ids must be a list")
+                    scan = scan_photo_directory(str(body.get("source_directory", "")))
+                    selected = {str(asset_id) for asset_id in asset_ids}
+                    chosen = [asset for asset in scan["assets"] if asset["id"] in selected]
+                    if not chosen or len(chosen) != len(selected):
+                        raise KiraError(HTTPStatus.CONFLICT, "The folder changed; scan it again before uploading")
+                    paths = [
+                        Path(item["path"])
+                        for asset in chosen
+                        for item in asset["jpeg_files"] + asset.get("video_files", [])
+                    ]
+                    if not paths:
+                        raise KiraError(HTTPStatus.BAD_REQUEST, "Select at least one JPEG or video")
+                    self._send_json(
+                        self.server.google_photos.start_upload(paths),
+                        status=HTTPStatus.ACCEPTED,
+                    )
+                    return
+                if len(segments) == 4 and segments[:3] == ["api", "google", "operations"] and method == "GET":
+                    self._send_json(self.server.google_photos.operation(segments[3]))
+                    return
+                self._method_not_allowed()
+                return
             if segments == ["api", "local", "browse"] and method == "GET":
                 self._require_local()
                 self._send_json(browse_directories(query.get("path", [""])[0]))
@@ -1268,6 +1473,15 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
                 except (OSError, ValueError):
                     self.close_connection = True
             self._send_json({"error": exc.message, **exc.extra}, status=exc.status)
+        except GooglePhotosError as exc:
+            if path == "/api/google/oauth/callback" or (path == "/" and "state" in query):
+                self._send_html(
+                    "<!doctype html><meta charset='utf-8'><title>Kira</title>"
+                    f"<body style='font:16px system-ui;padding:40px'><h1>Could not connect</h1><p>{self._html_escape(str(exc))}</p></body>",
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+            else:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_GATEWAY)
         except (ValueError, TypeError, json.JSONDecodeError):
             self._send_json({"error": "Invalid request"}, status=HTTPStatus.BAD_REQUEST)
         except (BrokenPipeError, ConnectionResetError):
@@ -1281,6 +1495,22 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
             return ipaddress.ip_address(self.client_address[0]).is_loopback
         except ValueError:
             return False
+
+    def _google_oauth_callback(self, query: dict[str, list[str]]) -> None:
+        self._require_local()
+        error = query.get("error", [""])[0]
+        if error:
+            raise GooglePhotosError(f"Google sign-in was cancelled: {error}")
+        self.server.google_photos.finish_oauth(
+            query.get("code", [""])[0], query.get("state", [""])[0]
+        )
+        self._send_html(
+            "<!doctype html><meta charset='utf-8'><title>Kira</title>"
+            "<body style='font:16px system-ui;padding:40px'>"
+            "<h1>Google Photos connected</h1>"
+            "<p>You can close this window and return to Kira.</p>"
+            "<script>setTimeout(() => window.close(), 1200)</script></body>"
+        )
 
     def _require_local(self) -> None:
         if not self._is_loopback():
@@ -1391,6 +1621,21 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if not head_only:
             self.wfile.write(data)
+
+    @staticmethod
+    def _html_escape(value: str) -> str:
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+    def _send_html(self, html: str, status: int = HTTPStatus.OK) -> None:
+        encoded = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(encoded)
 
     def _serve_file(
         self,

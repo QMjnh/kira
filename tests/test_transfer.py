@@ -63,8 +63,16 @@ class KiraTransferTests(unittest.TestCase):
         self.assertIn('id="job-pair-code"', html)
         self.assertIn('id="mark-unselect"', html)
         self.assertIn('id="group-selected"', html)
+        self.assertIn('id="compare-group-select"', html)
         self.assertIn('id="select-all"', html)
         self.assertIn('id="clear-picked"', html)
+        self.assertIn('id="google-connect"', html)
+        self.assertIn('id="google-download-mode"', html)
+        self.assertIn('id="google-zip-threshold"', html)
+        self.assertIn('id="google-finish"', html)
+        self.assertIn('Open GG Photos', html)
+        self.assertIn('id="google-pick"', html)
+        self.assertIn('id="google-upload-selected"', html)
 
         self.connection.request("GET", "/app.js")
         response = self.connection.getresponse()
@@ -87,6 +95,124 @@ class KiraTransferTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(response.getheader("Content-Type"), "image/svg+xml; charset=utf-8")
         self.assertIn(b"<svg", qr_svg)
+
+    def test_google_photos_routes_use_local_server_side_service(self) -> None:
+        source = Path(self.temp.name) / "google-upload-source"
+        source.mkdir()
+        (source / "IMG_9000.JPG").write_bytes(b"jpeg-for-google")
+        (source / "clip.mp4").write_bytes(b"video-for-google")
+        response, raw = self.request("GET", f"/api/local/scan?path={quote(str(source))}")
+        assets = json.loads(raw)["assets"]
+        photo_asset = next(asset for asset in assets if asset["jpeg_files"])
+        video_asset = next(asset for asset in assets if asset["video_files"])
+
+        class FakeGooglePhotos:
+            def __init__(self):
+                self.uploaded = []
+                self.finished = None
+                self.import_destination = None
+
+            def status(self):
+                return {"configured": True, "connected": True, "inbox": "fake-inbox"}
+
+            def start_oauth(self, redirect_uri):
+                return {"authorization_url": f"https://accounts.example/auth?redirect={redirect_uri}"}
+
+            def finish_oauth(self, code, state):
+                self.finished = (code, state)
+
+            def create_picker_session(self, max_items):
+                return {"id": "picker-1", "pickerUri": "https://photos.example/pick", "max": max_items}
+
+            def picker_session(self, session_id):
+                return {"id": session_id, "mediaItemsSet": True}
+
+            def start_import(self, session_id, destination=None, download_mode=None, zip_threshold=None):
+                self.import_destination = destination
+                return {
+                    "id": "import-1",
+                    "kind": "import",
+                    "session_id": session_id,
+                    "download_mode": download_mode,
+                    "zip_threshold": zip_threshold,
+                }
+
+            def start_upload(self, paths):
+                self.uploaded = paths
+                return {"id": "upload-1", "kind": "upload"}
+
+            def operation(self, operation_id):
+                return {"id": operation_id, "status": "complete", "completed": 1, "failed": 0}
+
+            def disconnect(self):
+                return {"connected": False}
+
+        fake = FakeGooglePhotos()
+        self.server.google_photos = fake
+
+        response, status = self.request("GET", "/api/google/status")
+        self.assertEqual(response.status, 200)
+        self.assertTrue(json.loads(status)["connected"])
+
+        response, oauth = self.json_request("POST", "/api/google/oauth/start", {})
+        self.assertEqual(response.status, 200)
+        self.assertIn(f"redirect=http://127.0.0.1:{self.server.server_address[1]}", oauth["authorization_url"])
+
+        self.connection.request("GET", "/?code=oauth-code&state=oauth-state")
+        callback = self.connection.getresponse()
+        callback_html = callback.read().decode("utf-8")
+        self.assertEqual(callback.status, 200)
+        self.assertIn("Google Photos connected", callback_html)
+        self.assertEqual(fake.finished, ("oauth-code", "oauth-state"))
+
+        response, picker = self.json_request("POST", "/api/google/picker/sessions", {"max_items": 25})
+        self.assertEqual(response.status, 201)
+        self.assertEqual(picker["max"], 25)
+
+        response, session = self.request("GET", "/api/google/picker/sessions/picker-1")
+        self.assertEqual(response.status, 200)
+        self.assertTrue(json.loads(session)["mediaItemsSet"])
+
+        response, imported = self.json_request(
+            "POST",
+            "/api/google/imports",
+            {
+                "session_id": "picker-1",
+                "destination_directory": str(source),
+                "download_mode": "zip",
+                "zip_threshold": 40,
+            },
+        )
+        self.assertEqual(response.status, 202)
+        self.assertEqual(imported["id"], "import-1")
+        self.assertEqual(imported["download_mode"], "zip")
+        self.assertEqual(fake.import_destination, source.resolve())
+
+        response, uploaded = self.json_request(
+            "POST",
+            "/api/google/uploads",
+            {"source_directory": str(source), "asset_ids": [photo_asset["id"], video_asset["id"]]},
+        )
+        self.assertEqual(response.status, 202)
+        self.assertEqual(uploaded["id"], "upload-1")
+        self.assertEqual(set(fake.uploaded), {source / "IMG_9000.JPG", source / "clip.mp4"})
+
+        response, operation = self.request("GET", "/api/google/operations/upload-1")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(operation)["status"], "complete")
+
+    def test_google_import_name_variants_stay_in_one_asset_group(self) -> None:
+        source = Path(self.temp.name) / "mixed-collection"
+        source.mkdir()
+        (source / "IMG_1000.JPG").write_bytes(b"local")
+        (source / "IMG_1000__google2.JPG").write_bytes(b"google-edit")
+        (source / "IMG_1000-final.JPG").write_bytes(b"final-edit")
+        response, raw = self.request("GET", f"/api/local/scan?path={quote(str(source))}")
+        scan = json.loads(raw)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(scan["assets"]), 1)
+        self.assertEqual(len(scan["assets"][0]["jpeg_files"]), 3)
 
     def upload(self, job_id: str, kind: str, filename: str, content: bytes, last_modified: int = 1):
         response, started = self.json_request(
@@ -348,6 +474,32 @@ class KiraTransferTests(unittest.TestCase):
             __import__("hashlib").sha256(b"camera-jpeg").hexdigest(),
         )
 
+    def test_video_only_selection_is_bundled_for_ipad(self) -> None:
+        source = Path(self.temp.name) / "video-source"
+        source.mkdir()
+        (source / "NYC_0001.MOV").write_bytes(b"original-video")
+
+        response, raw = self.request("GET", f"/api/local/scan?path={quote(str(source))}")
+        self.assertEqual(response.status, 200)
+        asset = json.loads(raw)["assets"][0]
+        self.assertEqual(asset["video_files"][0]["filename"], "NYC_0001.MOV")
+        response, job = self.json_request(
+            "POST",
+            "/api/jobs/from-selection",
+            {
+                "name": "NYC video",
+                "source_directory": str(source),
+                "selected_ids": [asset["id"]],
+                "source_format": "jpeg",
+            },
+        )
+        self.assertEqual(response.status, 201)
+        response, bundle = self.request("GET", f"/api/jobs/{job['id']}/bundle.zip")
+        self.assertEqual(response.status, 200)
+        with zipfile.ZipFile(BytesIO(bundle)) as archive:
+            self.assertEqual(archive.namelist(), ["NYC_0001.MOV"])
+            self.assertEqual(archive.read("NYC_0001.MOV"), b"original-video")
+
     def test_returned_individual_edit_is_stored_in_source_and_survives_job_deletion(self) -> None:
         source = Path(self.temp.name) / "individual-return"
         source.mkdir()
@@ -428,6 +580,9 @@ class KiraTransferTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         group = source / "compare_groups" / "Bridge burst"
         self.assertEqual(grouped["destination"], str(group))
+        self.assertEqual(grouped["destination_group_name"], "Bridge burst")
+        bridge_folder = next(folder for folder in grouped["culling"]["folders"] if folder["role"] == "group")
+        self.assertEqual(bridge_folder["group_name"], "Bridge burst")
         self.assertTrue((group / "BURST_1.ARW").exists())
         self.assertTrue((group / "BURST_1.JPG").exists())
 
@@ -481,6 +636,72 @@ class KiraTransferTests(unittest.TestCase):
         self.assertEqual(restored["destination"], str(source))
         self.assertTrue((source / f"{eliminated_stem}.ARW").exists())
         self.assertTrue((source / f"{eliminated_stem}.JPG").exists())
+
+    def test_culling_deletes_source_when_pixel_identical_photo_already_exists(self) -> None:
+        source = Path(self.temp.name) / "visual-duplicates"
+        group = source / "compare_groups" / "baker"
+        group.mkdir(parents=True)
+        image = Image.new("RGB", (24, 18), (45, 120, 80))
+        inbox_exif = Image.Exif()
+        inbox_exif[0x010E] = "inbox metadata"
+        group_exif = Image.Exif()
+        group_exif[0x010E] = "group metadata"
+        inbox_photo = source / "IMG_100.JPG"
+        grouped_photo = group / "renamed-copy.JPG"
+        image.save(inbox_photo, format="JPEG", quality=96, exif=inbox_exif)
+        image.save(grouped_photo, format="JPEG", quality=96, exif=group_exif)
+        self.assertNotEqual(inbox_photo.read_bytes(), grouped_photo.read_bytes())
+
+        response, raw = self.request("GET", f"/api/local/scan?path={quote(str(source))}")
+        asset = json.loads(raw)["assets"][0]
+        response, result = self.json_request(
+            "POST",
+            "/api/local/cull",
+            {
+                "source_directory": str(source),
+                "asset_ids": [asset["id"]],
+                "action": "group",
+                "group_name": "baker",
+            },
+        )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(result["moved_assets"], 0)
+        self.assertEqual(result["duplicate_assets"], 1)
+        self.assertEqual(len(result["duplicate_files"]), 1)
+        self.assertEqual(result["deleted_duplicate_files"], 1)
+        self.assertFalse(inbox_photo.exists())
+        self.assertTrue(grouped_photo.exists())
+
+    def test_culling_preserves_edited_same_name_photo_as_a_variant(self) -> None:
+        source = Path(self.temp.name) / "same-name-edits"
+        group = source / "compare_groups" / "baker"
+        group.mkdir(parents=True)
+        inbox_photo = source / "IMG_200.JPG"
+        grouped_photo = group / "IMG_200.JPG"
+        Image.new("RGB", (24, 18), (180, 40, 40)).save(inbox_photo, format="JPEG", quality=96)
+        Image.new("RGB", (24, 18), (40, 40, 180)).save(grouped_photo, format="JPEG", quality=96)
+
+        response, raw = self.request("GET", f"/api/local/scan?path={quote(str(source))}")
+        asset = json.loads(raw)["assets"][0]
+        response, result = self.json_request(
+            "POST",
+            "/api/local/cull",
+            {
+                "source_directory": str(source),
+                "asset_ids": [asset["id"]],
+                "action": "group",
+                "group_name": "baker",
+            },
+        )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(result["moved_assets"], 1)
+        self.assertEqual(result["duplicate_assets"], 0)
+        self.assertEqual(result["renamed_files"][0]["destination"], "IMG_200__variant2.JPG")
+        self.assertFalse(inbox_photo.exists())
+        self.assertTrue(grouped_photo.exists())
+        self.assertTrue((group / "IMG_200__variant2.JPG").exists())
 
 
 if __name__ == "__main__":

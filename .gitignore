@@ -3,3 +3,7 @@ __pycache__/
 .pytest_cache/
 kira-data/
 test_data_delete/
+google-oauth-client.json
+google-token.json
+client_secret_923460144176-pha8rkqrcb6jlcl1v66go4s12s47vqjf.apps.googleusercontent.com.json
+.venv
