@@ -60,7 +60,7 @@ One-time setup:
 5. Rename it to `google-oauth-client.json` and put it directly beside `server.py` in the Kira application folder, for example `D:\Kira\google-oauth-client.json`. It stays there even if `-DataDir` changes.
 6. Restart Kira and click **Connect Google Photos** on the Dell dashboard.
 
-To combine camera and phone media for one theme, enter a destination folder in the Google Photos panel (the default is `/inbox`), then click **Add Google media** and choose photos or videos in Google's window. `/inbox` maps to Kira's Google Photos inbox; paths such as `/inbox/NYC` create a subfolder beneath it. Kira downloads new media into that folder.
+To combine camera and phone media for one theme, enter a destination folder in the Google Photos panel, then click **Add Google media** and choose photos or videos in Google's window. The default is `<DataDir>\google-photos-inbox`; the legacy `/inbox` alias still maps to that same folder. You can also enter any absolute local path, such as `D:\Photos\NYC`, and Kira creates it when needed.
 
 ```text
 <DataDir>\google-photos-inbox\
@@ -68,7 +68,7 @@ To combine camera and phone media for one theme, enter a destination folder in t
 
 The resulting folder opens in Kira's normal workspace. Photos show thumbnails; videos show selectable video tiles. Google download links are temporary, so Kira starts downloading as soon as the picker finishes.
 
-The **Download method** control is saved in the dashboard browser:
+The **Download settings** button reveals controls that are saved in the dashboard browser:
 
 - **Automatic** uses individual files below the chosen item count (50 by default) and a temporary local ZIP at or above it.
 - **Always use temporary ZIP** packages the completed downloads on the Dell, extracts the batch, and deletes the temporary folder and ZIP.

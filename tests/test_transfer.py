@@ -69,6 +69,7 @@ class KiraTransferTests(unittest.TestCase):
         self.assertIn('id="google-connect"', html)
         self.assertIn('id="google-download-mode"', html)
         self.assertIn('id="google-zip-threshold"', html)
+        self.assertIn('id="google-download-settings-toggle"', html)
         self.assertNotIn('id="google-finish"', html)
         self.assertIn('id="google-destination-folder"', html)
         self.assertIn('id="google-import-archive"', html)

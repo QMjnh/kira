@@ -57,23 +57,29 @@
           </div>
           <p id="google-copy" class="panel-copy">Choose Google photos and videos, then save them into the folder below.</p>
           <div class="google-destination">
-            <label for="google-destination-folder"><span>Import into folder</span><input id="google-destination-folder" type="text" value="/inbox" placeholder="/inbox"></label>
-            <strong id="google-destination">Google Photos inbox</strong>
+            <label for="google-destination-folder"><span>Import destination</span><input id="google-destination-folder" type="text" value="" placeholder="D:\KiraData\google-photos-inbox" autocomplete="off"></label>
+            <div class="google-destination-preview"><span>Google media will be saved to</span><strong id="google-destination">—</strong></div>
           </div>
-          <div id="google-import-settings" class="google-import-settings">
-            <label>
-              <span>Download method</span>
-              <select id="google-download-mode">
-                <option value="automatic">Automatic</option>
-                <option value="zip">Always use temporary ZIP</option>
-                <option value="files">Never use ZIP</option>
-              </select>
-            </label>
-            <label id="google-zip-threshold-field">
-              <span>Automatic ZIP at</span>
-              <span class="number-with-unit"><input id="google-zip-threshold" type="number" min="2" max="2000" step="1" value="50"><span>items</span></span>
-            </label>
-            <p>Google transfers media individually. ZIP mode packages completed downloads temporarily on this Dell, extracts them as one verified batch, then deletes the ZIP.</p>
+          <div class="google-import-settings-shell">
+            <div class="google-import-settings-summary">
+              <div><span>Download method</span><strong id="google-download-summary">Automatic · ZIP at 50 items</strong></div>
+              <button id="google-download-settings-toggle" class="quiet-button" type="button" aria-expanded="false" aria-controls="google-import-settings">Download settings</button>
+            </div>
+            <div id="google-import-settings" class="google-import-settings hidden">
+              <label>
+                <span>Download method</span>
+                <select id="google-download-mode">
+                  <option value="automatic">Automatic</option>
+                  <option value="zip">Always use temporary ZIP</option>
+                  <option value="files">Never use ZIP</option>
+                </select>
+              </label>
+              <label id="google-zip-threshold-field">
+                <span>Automatic ZIP at</span>
+                <span class="number-with-unit"><input id="google-zip-threshold" type="number" min="2" max="2000" step="1" value="50"><span>items</span></span>
+              </label>
+              <p>Google transfers media individually. ZIP mode packages completed downloads temporarily on this Dell, extracts them as one verified batch, then deletes the ZIP.</p>
+            </div>
           </div>
           <div class="google-actions">
             <button id="google-connect" class="primary-button" type="button">Connect Google Photos</button>
@@ -83,17 +89,17 @@
           <label class="google-import-archive-option"><input id="google-import-archive" type="checkbox" checked><span>Create the folder-named album and archive media after downloading</span></label>
           <div id="google-organizer" class="google-organizer">
             <div class="google-organizer-heading">
-              <strong>Match this folder in Google Photos</strong>
+              <div><span class="google-section-kicker">Google Photos organizer</span><strong>Match a local folder in Google Photos</strong></div>
               <span id="google-organizer-status" class="google-status">Not connected</span>
             </div>
-            <p>Kira matches the open local folder against existing Google Photos by cryptographic file content—not filename—then adds confirmed matches to an album.</p>
+            <p class="google-organizer-description">Kira checks the open local folder against Google Photos using cryptographic file content—not filenames—then adds confirmed matches to an album.</p>
             <div id="google-organizer-connect" class="google-organizer-fields">
               <label><span>Cookie export path</span><input id="google-cookies-path" type="text" placeholder="C:\Users\you\Downloads\photos.google.com.json"></label>
               <label><span>Google account index</span><input id="google-account-index" type="number" min="0" max="99" value="0"></label>
               <button id="google-organizer-connect-button" class="quiet-button" type="button">Import session</button>
             </div>
             <div id="google-organizer-controls" class="google-organizer-fields hidden">
-              <div id="google-match-source" class="google-match-source">Open a local folder below first.</div>
+              <div id="google-match-source" class="google-match-source"><span>Source folder</span><strong>Open a local folder below first.</strong></div>
               <div class="google-organizer-control-row">
                 <label><span>Album name for matches</span><input id="google-album-title" type="text" maxlength="500" placeholder="Album name"></label>
                 <label class="google-archive-option"><input id="google-archive-after-upload" type="checkbox" checked><span>Archive matched items after adding</span></label>

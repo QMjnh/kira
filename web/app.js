@@ -14,6 +14,7 @@
     selectedAssets: new Set(),
     compareZoom: 1,
     comparePan: {x: 0, y: 0},
+    googleDownloadSettingsOpen: false,
     google: {configured: false, connected: false},
   };
 
@@ -169,8 +170,9 @@
     if (!el('google-album-title').value) {
       el('google-album-title').value = localStorage.getItem('kira-google-album-title') || '';
     }
-    el('google-match-source').textContent = state.libraryDirectory
-      ? `Local folder: ${state.libraryDirectory}`
+    const matchSource = el('google-match-source');
+    matchSource.querySelector('strong').textContent = state.libraryDirectory
+      ? state.libraryDirectory
       : 'Open a local folder below first.';
     const matchButton = el('google-match-folder');
     matchButton.disabled = !connected
@@ -192,12 +194,24 @@
   function renderGoogleImportPreferences() {
     el('google-download-mode').value = localStorage.getItem('kira-google-download-mode') || 'automatic';
     el('google-zip-threshold').value = localStorage.getItem('kira-google-zip-threshold') || '50';
-    el('google-destination-folder').value = localStorage.getItem('kira-google-destination-folder') || '/inbox';
+    const storedDestination = localStorage.getItem('kira-google-destination-folder');
+    el('google-destination-folder').value = storedDestination && storedDestination !== '/inbox'
+      ? storedDestination
+      : (state.google.inbox || '');
     updateGooglePreferenceUi();
   }
 
   function updateGooglePreferenceUi() {
-    el('google-zip-threshold-field').classList.toggle('hidden', el('google-download-mode').value !== 'automatic');
+    const mode = el('google-download-mode').value;
+    const threshold = el('google-zip-threshold').value || '50';
+    el('google-zip-threshold-field').classList.toggle('hidden', mode !== 'automatic');
+    el('google-download-summary').textContent = mode === 'automatic'
+      ? `Automatic · ZIP at ${threshold} items`
+      : mode === 'zip' ? 'Always use temporary ZIP' : 'Never use ZIP';
+    el('google-import-settings').classList.toggle('hidden', !state.googleDownloadSettingsOpen);
+    const toggle = el('google-download-settings-toggle');
+    toggle.setAttribute('aria-expanded', String(state.googleDownloadSettingsOpen));
+    toggle.textContent = state.googleDownloadSettingsOpen ? 'Hide download settings' : 'Download settings';
   }
 
   function saveGoogleImportPreferences() {
@@ -210,14 +224,19 @@
   }
 
   function renderGoogleDestination() {
-    const destinationFolder = el('google-destination-folder').value.trim() || '/inbox';
-    const destinationSuffix = destinationFolder.replace(/^\/?inbox/i, '').replace(/^\/+/, '');
-    const destination = destinationSuffix
-      ? `Google Photos inbox/${destinationSuffix}`
-      : (state.google.inbox || 'Google Photos inbox');
-    el('google-destination').textContent = destination;
+    const destinationFolder = el('google-destination-folder').value.trim() || state.google.inbox || '—';
+    el('google-destination').textContent = destinationFolder;
     el('google-pick').textContent = 'Add Google media';
     localStorage.setItem('kira-google-destination-folder', destinationFolder);
+  }
+
+  function googleImportAlbumTitle(destinationFolder) {
+    const value = destinationFolder.trim();
+    const normalized = value.replace(/[\\/]+$/, '').toLowerCase();
+    if (!value || normalized === '/inbox' || normalized === 'inbox' || value === state.google.inbox) {
+      return 'inbox';
+    }
+    return value.split(/[\\/]/).filter(Boolean).pop() || 'inbox';
   }
 
   function wait(milliseconds) {
@@ -281,8 +300,8 @@
 
   async function importGoogleSelection(sessionId) {
     const preferences = googleImportPreferences();
-    const destinationFolder = el('google-destination-folder').value.trim() || '/inbox';
-    const albumTitle = destinationFolder.split('/').filter(Boolean).pop() || 'inbox';
+    const destinationFolder = el('google-destination-folder').value.trim() || state.google.inbox || '';
+    const albumTitle = googleImportAlbumTitle(destinationFolder);
     const archive = el('google-import-archive').checked;
     const operation = await api('/api/google/imports', {
       method: 'POST',
@@ -821,6 +840,11 @@
     } finally {
       el('google-progress').classList.add('hidden');
     }
+  });
+
+  el('google-download-settings-toggle').addEventListener('click', () => {
+    state.googleDownloadSettingsOpen = !state.googleDownloadSettingsOpen;
+    updateGooglePreferenceUi();
   });
 
   el('google-download-mode').addEventListener('change', () => {

@@ -54,6 +54,15 @@ class GooglePhotosServiceTests(unittest.TestCase):
         self.assertEqual(service.token_path, self.data_root / "google-token.json")
         self.assertTrue(service.status()["configured"])
 
+    def test_import_destination_uses_inbox_root_and_accepts_external_absolute_path(self) -> None:
+        service = self.service()
+        self.assertEqual(service.resolve_import_destination("/inbox"), service.inbox)
+        self.assertFalse((service.inbox / "inbox").exists())
+
+        external = self.root / "outside-collection"
+        self.assertEqual(service.resolve_import_destination(str(external)), external.resolve())
+        self.assertTrue(external.is_dir())
+
     def test_import_supports_photos_and_videos_and_keeps_changed_same_name(self) -> None:
         service = self.service()
         service._list_picked_items = lambda _session_id: [

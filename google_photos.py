@@ -193,20 +193,21 @@ class GooglePhotosService:
         }
 
     def resolve_import_destination(self, folder: str) -> Path:
-        """Resolve the user-facing /inbox path inside Kira's Google Photos inbox."""
-        value = str(folder or "/inbox").strip().replace("\\", "/")
-        if not value:
-            value = "/inbox"
-        parts = [part for part in value.split("/") if part and part != "."]
-        if parts and parts[0].casefold() == "inbox":
-            parts = parts[1:]
-        if any(part == ".." for part in parts):
-            raise GooglePhotosError("The import folder must stay inside /inbox")
-        target = (self.inbox.joinpath(*parts)).resolve()
-        try:
-            target.relative_to(self.inbox.resolve())
-        except ValueError as exc:
-            raise GooglePhotosError("The import folder must stay inside /inbox") from exc
+        """Resolve an import destination, accepting the legacy /inbox alias."""
+        value = str(folder or "").strip().replace("\\", "/")
+        normalized = value.casefold().rstrip("/")
+        if not value or normalized in {"", ".", "/inbox", "inbox"}:
+            target = self.inbox
+        elif normalized.startswith("/inbox/") or normalized.startswith("inbox/"):
+            parts = [part for part in value.split("/") if part and part != "."]
+            target = self.inbox.joinpath(*parts[1:])
+        else:
+            # Imports may be placed in an existing collection outside Kira's
+            # data directory when a fully qualified path is supplied.
+            candidate = Path(value)
+            target = candidate if candidate.is_absolute() else self.inbox / candidate
+
+        target = target.resolve()
         target.mkdir(parents=True, exist_ok=True)
         return target
 
