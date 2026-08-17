@@ -12,6 +12,12 @@
     libraryAssets: [],
     culling: null,
     selectedAssets: new Set(),
+    libraryPanes: {
+      left: {directory: '', assets: [], culling: null, selectedAssets: new Set()},
+      right: {directory: '', assets: [], culling: null, selectedAssets: new Set()},
+    },
+    activePaneId: 'left',
+    browserTargetPane: 'left',
     compareZoom: 1,
     comparePan: {x: 0, y: 0},
     googleDownloadSettingsOpen: false,
@@ -111,16 +117,21 @@
     state.jobs = response.jobs;
     setConnected(state.desktop ? 'Dell server running' : 'Connected to Dell');
     showOnly(dashboardView);
+    el('desktop-services').classList.toggle('hidden', !state.desktop);
     el('desktop-setup').classList.toggle('hidden', !state.desktop);
     el('create-job-card').classList.toggle('hidden', !state.desktop);
     el('google-photos-card').classList.toggle('hidden', !state.desktop);
+    el('photo-workspace').classList.toggle('hidden', !state.desktop);
     if (state.desktop && state.bootstrap) {
       el('ipad-url').textContent = state.bootstrap.ipad_url;
       el('pair-code-display').textContent = state.bootstrap.pair_code;
       el('data-dir').textContent = state.bootstrap.data_dir;
       el('pair-qr').src = `${state.bootstrap.pair_qr_url}?v=${Date.now()}`;
     }
-    if (state.desktop) await refreshGoogleStatus();
+    if (state.desktop) {
+      renderPhotoGrid();
+      await refreshGoogleStatus();
+    }
     renderJobs();
   }
 
@@ -203,15 +214,11 @@
 
   function updateGooglePreferenceUi() {
     const mode = el('google-download-mode').value;
-    const threshold = el('google-zip-threshold').value || '50';
     el('google-zip-threshold-field').classList.toggle('hidden', mode !== 'automatic');
-    el('google-download-summary').textContent = mode === 'automatic'
-      ? `Automatic · ZIP at ${threshold} items`
-      : mode === 'zip' ? 'Always use temporary ZIP' : 'Never use ZIP';
     el('google-import-settings').classList.toggle('hidden', !state.googleDownloadSettingsOpen);
     const toggle = el('google-download-settings-toggle');
     toggle.setAttribute('aria-expanded', String(state.googleDownloadSettingsOpen));
-    toggle.textContent = state.googleDownloadSettingsOpen ? 'Hide download settings' : 'Download settings';
+    toggle.classList.toggle('is-open', state.googleDownloadSettingsOpen);
   }
 
   function saveGoogleImportPreferences() {
@@ -317,7 +324,7 @@
     const finished = await pollGoogleOperation(operation.id);
     if (finished.status === 'failed') throw new Error(finished.error || 'Google Photos import failed.');
     const result = await api(`/api/local/scan?path=${encodeURIComponent(finished.directory)}`);
-    applyLibraryScan(result);
+    applyLibraryScan(result, state.activePaneId);
     el('photo-workspace').classList.remove('hidden');
     el('folder-browser').classList.add('hidden');
     const details = [
@@ -399,30 +406,100 @@
   async function scanLibraryFolder() {
     if (!state.browserPath) return;
     const result = await api(`/api/local/scan?path=${encodeURIComponent(state.browserPath)}`);
-    applyLibraryScan(result);
+    applyLibraryScan(result, state.browserTargetPane);
     el('photo-workspace').classList.remove('hidden');
     el('folder-browser').classList.add('hidden');
     if (!result.assets.length) toast('No supported photos were found in that folder.');
   }
 
-  function applyLibraryScan(result) {
-    state.libraryDirectory = result.directory;
-    // Culling is JPEG-driven: RAW-only files stay out of the visual workspace,
-    // while a same-stem RAW remains available as the selected transfer source.
-    state.libraryAssets = result.assets.filter((asset) => asset.jpeg_files.length > 0 || (asset.video_files || []).length > 0);
-    state.culling = result.culling || null;
-    state.selectedAssets = new Set();
+  function folderLabel(path) {
+    const normalized = path.replace(/[\\/]+$/, '');
+    return normalized.split(/[\\/]/).pop() || path;
+  }
+
+  function paneFor(paneId = state.activePaneId) {
+    return state.libraryPanes[paneId];
+  }
+
+  function paneSummary(pane) {
+    const photoCount = pane.assets.filter((asset) => asset.jpeg_files.length).length;
+    const videoCount = pane.assets.filter((asset) => (asset.video_files || []).length).length;
+    if (!pane.directory) return 'No folder open';
+    return `${photoCount} photo group${photoCount === 1 ? '' : 's'} · ${videoCount} video group${videoCount === 1 ? '' : 's'}`;
+  }
+
+  function renderPaneHeaders() {
+    const leftPane = paneFor('left');
+    const rightPane = paneFor('right');
+    const hasComparison = Boolean(rightPane.directory);
+    el('library-split').classList.toggle('single-pane', !hasComparison);
+    el('library-pane-right').classList.toggle('hidden', !hasComparison);
+    el('library-split').querySelector('.split-move-actions').classList.toggle('hidden', !hasComparison);
+    el('browse-folders').classList.toggle('hidden', Boolean(leftPane.directory));
+    el('browse-folders-right').classList.toggle('hidden', !leftPane.directory);
+    el('browse-folders-right').textContent = hasComparison ? 'Change comparison' : 'Compare a folder';
+    ['left', 'right'].forEach((paneId) => {
+      const pane = paneFor(paneId);
+      const name = pane.directory ? folderLabel(pane.directory) : 'Choose a folder';
+      el(`library-pane-${paneId}`).classList.toggle('active', paneId === state.activePaneId);
+      el(`${paneId}-folder-name`).textContent = name;
+      const pathButton = el(`${paneId}-folder-path`);
+      pathButton.textContent = pane.directory || 'No folder open';
+      pathButton.title = pane.directory ? `Browse from ${pane.directory}` : '';
+      pathButton.disabled = !pane.directory;
+      el(`photo-count-${paneId}`).textContent = paneSummary(pane);
+      el(`selection-count-${paneId}`).textContent = `${pane.selectedAssets.size} selected`;
+    });
+    const active = paneFor();
+    el('create-job-card').querySelectorAll('.folder-dependent').forEach((node) => {
+      node.classList.toggle('hidden', !active.directory);
+    });
+    el('photo-count').textContent = active.directory
+      ? `${paneSummary(active)}${hasComparison ? ' · click either folder to make it active' : ''}`
+      : 'Open a folder to begin.';
+  }
+
+  async function openFolderBrowserForPane(paneId) {
+    state.browserTargetPane = paneId;
+    el('folder-browser').classList.remove('hidden');
+    await browseDirectory(paneFor(paneId).directory || '');
+    el('folder-browser').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  }
+
+  function setActivePane(paneId) {
+    if (!state.libraryPanes[paneId]) return;
+    state.activePaneId = paneId;
+    const pane = paneFor(paneId);
+    state.libraryDirectory = pane.directory;
+    state.libraryAssets = pane.assets;
+    state.culling = pane.culling;
+    state.selectedAssets = pane.selectedAssets;
+    state.browserPath = pane.directory;
+    renderPaneHeaders();
     renderCullFolders();
     renderGroupPicker();
-    renderPhotoGrid();
     renderGoogleDestination();
     renderGoogleOrganizer();
+    updateSelectionUi();
+  }
+
+  function applyLibraryScan(result, paneId = state.activePaneId) {
+    const pane = paneFor(paneId);
+    // Culling is JPEG-driven: RAW-only files stay out of the visual workspace,
+    // while a same-stem RAW remains available as the selected transfer source.
+    pane.directory = result.directory;
+    pane.assets = result.assets.filter((asset) => asset.jpeg_files.length > 0 || (asset.video_files || []).length > 0);
+    pane.culling = result.culling || null;
+    pane.selectedAssets.clear();
+    state.browserTargetPane = paneId;
+    setActivePane(paneId);
+    renderPhotoGrid();
   }
 
   async function openCullFolder(path) {
     state.browserPath = path;
     const result = await api(`/api/local/scan?path=${encodeURIComponent(path)}`);
-    applyLibraryScan(result);
+    applyLibraryScan(result, state.activePaneId);
   }
 
   function renderCullFolders() {
@@ -486,16 +563,26 @@
     return `/api/local/preview?path=${encodeURIComponent(path)}&size=${size}&v=${encodeURIComponent(version || '')}&token=${encodeURIComponent(state.token)}`;
   }
 
-  function renderPhotoGrid() {
-    const grid = el('photo-grid');
+  function renderPanePhotoGrid(paneId) {
+    const pane = paneFor(paneId);
+    const grid = el(`photo-grid-${paneId}`);
     grid.replaceChildren();
+    if (!pane.directory) {
+      grid.innerHTML = '<p class="pane-empty panel-copy">Open a folder to compare it here.</p>';
+      return;
+    }
+    if (!pane.assets.length) {
+      grid.innerHTML = '<p class="pane-empty panel-copy">No supported media in this folder.</p>';
+      return;
+    }
     const fragment = document.createDocumentFragment();
-    state.libraryAssets.forEach((asset) => {
-      const selected = state.selectedAssets.has(asset.id);
+    pane.assets.forEach((asset) => {
+      const selected = pane.selectedAssets.has(asset.id);
       const button = document.createElement('button');
       button.type = 'button';
       button.className = `photo-tile${selected ? ' selected' : ''}`;
       button.setAttribute('aria-pressed', String(selected));
+      button.dataset.assetId = asset.id;
       const media = asset.preview_path
         ? `<img src="${escapeHtml(previewUrl(asset.preview_path, 480, asset.preview_version))}" alt="${escapeHtml(asset.stem)}" loading="lazy" decoding="async">`
         : '<span class="photo-placeholder video-placeholder"><span>▶</span>Video</span>';
@@ -504,34 +591,46 @@
       if ((asset.video_files || []).length) formatTags.push(`<span class="format-tag">VIDEO${asset.video_files.length > 1 ? ` ×${asset.video_files.length}` : ''}</span>`);
       const tags = formatTags.join('');
       button.innerHTML = `${media}<span class="pick-check">${selected ? '✓' : '+'}</span><span class="photo-tile-info"><strong>${escapeHtml(asset.stem)}</strong><span class="format-tags">${tags}</span></span>`;
-      button.addEventListener('click', () => toggleAsset(asset.id, button));
+      button.addEventListener('click', () => {
+        setActivePane(paneId);
+        toggleAsset(asset.id, button, paneId);
+      });
       fragment.appendChild(button);
     });
     grid.appendChild(fragment);
-    const videoCount = state.libraryAssets.filter((asset) => (asset.video_files || []).length).length;
-    const photoCount = state.libraryAssets.filter((asset) => asset.jpeg_files.length).length;
-    el('photo-count').textContent = `${photoCount} photo group${photoCount === 1 ? '' : 's'} · ${videoCount} video group${videoCount === 1 ? '' : 's'} · same-name files stay grouped`;
+  }
+
+  function renderPhotoGrid() {
+    renderPanePhotoGrid('left');
+    renderPanePhotoGrid('right');
+    renderPaneHeaders();
     updateSelectionUi();
   }
 
-  function toggleAsset(assetId, tile) {
-    if (state.selectedAssets.has(assetId)) state.selectedAssets.delete(assetId);
-    else state.selectedAssets.add(assetId);
-    const selected = state.selectedAssets.has(assetId);
+  function toggleAsset(assetId, tile, paneId = state.activePaneId) {
+    const pane = paneFor(paneId);
+    if (pane.selectedAssets.has(assetId)) pane.selectedAssets.delete(assetId);
+    else pane.selectedAssets.add(assetId);
+    state.selectedAssets = pane.selectedAssets;
+    const selected = pane.selectedAssets.has(assetId);
     tile.classList.toggle('selected', selected);
     tile.setAttribute('aria-pressed', String(selected));
     tile.querySelector('.pick-check').textContent = selected ? '✓' : '+';
+    renderPaneHeaders();
     updateSelectionUi();
   }
 
   function syncSelectionTiles() {
-    document.querySelectorAll('#photo-grid .photo-tile').forEach((tile, index) => {
-      const asset = state.libraryAssets[index];
-      const selected = Boolean(asset && state.selectedAssets.has(asset.id));
-      tile.classList.toggle('selected', selected);
-      tile.setAttribute('aria-pressed', String(selected));
-      tile.querySelector('.pick-check').textContent = selected ? '✓' : '+';
+    ['left', 'right'].forEach((paneId) => {
+      const pane = paneFor(paneId);
+      document.querySelectorAll(`#photo-grid-${paneId} .photo-tile`).forEach((tile) => {
+        const selected = pane.selectedAssets.has(tile.dataset.assetId);
+        tile.classList.toggle('selected', selected);
+        tile.setAttribute('aria-pressed', String(selected));
+        tile.querySelector('.pick-check').textContent = selected ? '✓' : '+';
+      });
     });
+    renderPaneHeaders();
   }
 
   function updateSelectionUi() {
@@ -547,6 +646,10 @@
     el('restore-inbox').disabled = count === 0;
     el('group-selected').disabled = count === 0 || !selectedComparisonGroupName();
     el('google-upload-selected').disabled = count === 0 || !state.google.connected;
+    const left = paneFor('left');
+    const right = paneFor('right');
+    el('move-selected-left').disabled = !left.directory || !right.directory || left.selectedAssets.size === 0;
+    el('move-selected-right').disabled = !left.directory || !right.directory || right.selectedAssets.size === 0;
   }
 
   async function moveSelectedAssets(action) {
@@ -588,6 +691,33 @@
       toast(error.message);
     } finally {
       groupButton.textContent = 'Group to compare';
+      updateSelectionUi();
+    }
+  }
+
+  async function moveSelectedAssetsBetweenDirectories(sourcePaneId, destinationPaneId) {
+    const sourcePane = paneFor(sourcePaneId);
+    const destinationPane = paneFor(destinationPaneId);
+    if (!sourcePane.directory || !destinationPane.directory || !sourcePane.selectedAssets.size) return;
+    if (!window.confirm(`Move the selected photo groups from the ${sourcePaneId} folder to the ${destinationPaneId} folder?`)) return;
+    const button = sourcePaneId === 'left' ? el('move-selected-left') : el('move-selected-right');
+    button.disabled = true;
+    try {
+      const result = await api('/api/local/move', {
+        method: 'POST',
+        body: JSON.stringify({
+          source_directory: sourcePane.directory,
+          destination_directory: destinationPane.directory,
+          asset_ids: Array.from(sourcePane.selectedAssets),
+        }),
+      });
+      applyLibraryScan(result.source, sourcePaneId);
+      applyLibraryScan(result.destination, destinationPaneId);
+      setActivePane(sourcePaneId);
+      updateSelectionUi();
+      toast(`${result.moved_assets} photo group${result.moved_assets === 1 ? '' : 's'} moved from ${sourcePaneId} to ${destinationPaneId}.`);
+    } catch (error) {
+      toast(error.message);
       updateSelectionUi();
     }
   }
@@ -973,13 +1103,21 @@
     }
   });
 
-  el('browse-folders').addEventListener('click', async () => {
-    el('folder-browser').classList.remove('hidden');
-    await browseDirectory(state.libraryDirectory || '');
+  el('browse-folders').addEventListener('click', () => openFolderBrowserForPane('left').catch(showError));
+  el('browse-folders-right').addEventListener('click', () => openFolderBrowserForPane('right').catch(showError));
+  el('left-folder-path').addEventListener('click', () => openFolderBrowserForPane('left').catch(showError));
+  el('right-folder-path').addEventListener('click', () => openFolderBrowserForPane('right').catch(showError));
+  ['left', 'right'].forEach((paneId) => {
+    el(`library-pane-${paneId}`).addEventListener('click', (event) => {
+      if (!event.target.closest('button')) setActivePane(paneId);
+    });
   });
 
   el('folder-up').addEventListener('click', () => browseDirectory(state.browserParent || '').catch(showError));
+  el('close-folder-browser').addEventListener('click', () => el('folder-browser').classList.add('hidden'));
   el('use-folder').addEventListener('click', () => scanLibraryFolder().catch(showError));
+  el('move-selected-left').addEventListener('click', () => moveSelectedAssetsBetweenDirectories('left', 'right'));
+  el('move-selected-right').addEventListener('click', () => moveSelectedAssetsBetweenDirectories('right', 'left'));
   el('mark-unselect').addEventListener('click', () => moveSelectedAssets('unselect'));
   el('mark-select').addEventListener('click', () => moveSelectedAssets('select'));
   el('restore-inbox').addEventListener('click', () => moveSelectedAssets('restore'));
@@ -992,7 +1130,8 @@
     updateSelectionUi();
   });
   el('select-all').addEventListener('click', () => {
-    state.selectedAssets = new Set(state.libraryAssets.map((asset) => asset.id));
+    state.selectedAssets.clear();
+    state.libraryAssets.forEach((asset) => state.selectedAssets.add(asset.id));
     syncSelectionTiles();
     updateSelectionUi();
   });

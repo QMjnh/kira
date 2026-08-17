@@ -10,11 +10,13 @@
 <body>
   <div id="app" class="app-shell">
     <header class="topbar">
-      <a class="brand" href="/" aria-label="Kira home">
-        <span class="brand-mark" aria-hidden="true">K</span>
-        <span>Kira</span>
-      </a>
-      <div id="connection-state" class="connection-state"><span></span>Connecting…</div>
+      <div class="topbar-inner">
+        <a class="brand" href="/" aria-label="Kira home">
+          <span class="brand-mark" aria-hidden="true">K</span>
+          <span class="brand-copy"><strong>Kira</strong><small>Local photo workflow</small></span>
+        </a>
+        <div id="connection-state" class="connection-state"><span></span>Connecting…</div>
+      </div>
     </header>
 
     <main>
@@ -33,11 +35,19 @@
       </section>
 
       <section id="dashboard-view" class="dashboard hidden">
+        <section id="desktop-services" class="desktop-services hidden" aria-labelledby="services-title">
+          <header class="dashboard-section-heading">
+            <div>
+              <div class="eyebrow">Import &amp; connect</div>
+              <h2 id="services-title">Bring photos in. Send edits out.</h2>
+            </div>
+            <p>Optional connections stay out of the way until you need them.</p>
+          </header>
         <section id="desktop-setup" class="setup-card hidden">
           <div>
             <div class="eyebrow">Send without cloud storage</div>
-            <h1>Transfer directly to your iPad</h1>
-            <p>Open the Camera app on your iPad and scan this code. Kira opens already paired—no password to type.</p>
+            <h2>Send directly to your iPad</h2>
+            <p>Scan once with the iPad Camera. Kira opens already paired—no password to type.</p>
             <div class="qr-wrap">
               <img id="pair-qr" alt="QR code that opens and pairs Kira on the iPad">
               <span>Scan with iPad Camera</span>
@@ -59,27 +69,25 @@
           <div class="google-destination">
             <label for="google-destination-folder"><span>Import destination</span><input id="google-destination-folder" type="text" value="" placeholder="D:\KiraData\google-photos-inbox" autocomplete="off"></label>
             <div class="google-destination-preview"><span>Google media will be saved to</span><strong id="google-destination">—</strong></div>
+            <button id="google-download-settings-toggle" class="disclosure-button" type="button" aria-expanded="false" aria-controls="google-import-settings">
+              <span>Download settings</span>
+              <svg class="disclosure-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7.5 5 5 5-5"/></svg>
+            </button>
           </div>
-          <div class="google-import-settings-shell">
-            <div class="google-import-settings-summary">
-              <div><span>Download method</span><strong id="google-download-summary">Automatic · ZIP at 50 items</strong></div>
-              <button id="google-download-settings-toggle" class="quiet-button" type="button" aria-expanded="false" aria-controls="google-import-settings">Download settings</button>
-            </div>
-            <div id="google-import-settings" class="google-import-settings hidden">
-              <label>
-                <span>Download method</span>
-                <select id="google-download-mode">
-                  <option value="automatic">Automatic</option>
-                  <option value="zip">Always use temporary ZIP</option>
-                  <option value="files">Never use ZIP</option>
-                </select>
-              </label>
-              <label id="google-zip-threshold-field">
-                <span>Automatic ZIP at</span>
-                <span class="number-with-unit"><input id="google-zip-threshold" type="number" min="2" max="2000" step="1" value="50"><span>items</span></span>
-              </label>
-              <p>Google transfers media individually. ZIP mode packages completed downloads temporarily on this Dell, extracts them as one verified batch, then deletes the ZIP.</p>
-            </div>
+          <div id="google-import-settings" class="google-import-settings hidden">
+            <label>
+              <span>Download method</span>
+              <select id="google-download-mode">
+                <option value="automatic">Automatic</option>
+                <option value="zip">Always use temporary ZIP</option>
+                <option value="files">Never use ZIP</option>
+              </select>
+            </label>
+            <label id="google-zip-threshold-field">
+              <span>Automatic ZIP at</span>
+              <span class="number-with-unit"><input id="google-zip-threshold" type="number" min="2" max="2000" step="1" value="50"><span>items</span></span>
+            </label>
+            <p>Google transfers media individually. ZIP mode packages completed downloads temporarily on this Dell, extracts them as one verified batch, then deletes the ZIP.</p>
           </div>
           <div class="google-actions">
             <button id="google-connect" class="primary-button" type="button">Connect Google Photos</button>
@@ -87,54 +95,45 @@
             <button id="google-disconnect" class="quiet-button hidden" type="button">Disconnect</button>
           </div>
           <label class="google-import-archive-option"><input id="google-import-archive" type="checkbox" checked><span>Create the folder-named album and archive media after downloading</span></label>
-          <div id="google-organizer" class="google-organizer">
-            <div class="google-organizer-heading">
+          <details id="google-organizer" class="google-organizer">
+            <summary class="google-organizer-heading">
               <div><span class="google-section-kicker">Google Photos organizer</span><strong>Match a local folder in Google Photos</strong></div>
-              <span id="google-organizer-status" class="google-status">Not connected</span>
-            </div>
-            <p class="google-organizer-description">Kira checks the open local folder against Google Photos using cryptographic file content—not filenames—then adds confirmed matches to an album.</p>
-            <div id="google-organizer-connect" class="google-organizer-fields">
-              <label><span>Cookie export path</span><input id="google-cookies-path" type="text" placeholder="C:\Users\you\Downloads\photos.google.com.json"></label>
-              <label><span>Google account index</span><input id="google-account-index" type="number" min="0" max="99" value="0"></label>
-              <button id="google-organizer-connect-button" class="quiet-button" type="button">Import session</button>
-            </div>
-            <div id="google-organizer-controls" class="google-organizer-fields hidden">
-              <div id="google-match-source" class="google-match-source"><span>Source folder</span><strong>Open a local folder below first.</strong></div>
-              <div class="google-organizer-control-row">
-                <label><span>Album name for matches</span><input id="google-album-title" type="text" maxlength="500" placeholder="Album name"></label>
-                <label class="google-archive-option"><input id="google-archive-after-upload" type="checkbox" checked><span>Archive matched items after adding</span></label>
-                <button id="google-match-folder" class="primary-button" type="button" disabled>Match folder → album + archive</button>
+              <span class="google-organizer-summary-meta"><span id="google-organizer-status" class="google-status">Not connected</span><svg class="disclosure-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7.5 5 5 5-5"/></svg></span>
+            </summary>
+            <div class="google-organizer-body">
+              <p class="google-organizer-description">Kira checks the open local folder against Google Photos using cryptographic file content—not filenames—then adds confirmed matches to an album.</p>
+              <div id="google-organizer-connect" class="google-organizer-fields">
+                <label><span>Cookie export path</span><input id="google-cookies-path" type="text" placeholder="C:\Users\you\Downloads\photos.google.com.json"></label>
+                <label><span>Google account index</span><input id="google-account-index" type="number" min="0" max="99" value="0"></label>
+                <button id="google-organizer-connect-button" class="quiet-button" type="button">Import session</button>
               </div>
-              <div class="google-organizer-footer">
-                <button id="google-organizer-disconnect" class="link-button quiet-button" type="button">Remove web session</button>
+              <div id="google-organizer-controls" class="google-organizer-fields hidden">
+                <div id="google-match-source" class="google-match-source"><span>Source folder</span><strong>Open a local folder below first.</strong></div>
+                <div class="google-organizer-control-row">
+                  <label><span>Album name for matches</span><input id="google-album-title" type="text" maxlength="500" placeholder="Album name"></label>
+                  <label class="google-archive-option"><input id="google-archive-after-upload" type="checkbox" checked><span>Archive matched items after adding</span></label>
+                  <button id="google-match-folder" class="primary-button" type="button" disabled>Match folder → album + archive</button>
+                </div>
+                <div class="google-organizer-footer">
+                  <button id="google-organizer-disconnect" class="link-button quiet-button" type="button">Remove web session</button>
+                </div>
               </div>
             </div>
-          </div>
+          </details>
           <div id="google-progress" class="transfer-progress hidden" aria-live="polite">
             <div class="progress-label"><span id="google-progress-label">Preparing…</span><span id="google-progress-value">0%</span></div>
             <progress id="google-progress-bar" max="100" value="0"></progress>
           </div>
           <div id="google-result" class="google-result hidden" role="status"></div>
         </section>
+        </section>
 
         <section id="create-job-card" class="panel library-panel hidden">
           <div class="panel-heading">
-            <div><div class="eyebrow">Laptop library</div><h2>Choose photos</h2></div>
-            <button id="browse-folders" class="quiet-button" type="button">Browse folders</button>
-          </div>
-          <div id="folder-browser" class="folder-browser hidden">
-            <div class="folder-browser-bar">
-              <button id="folder-up" class="quiet-button" type="button">↑ Up</button>
-              <nav id="folder-path" class="folder-breadcrumbs" aria-label="Current folder">Choose a drive or folder</nav>
-              <button id="use-folder" class="primary-button" type="button" disabled>Use this folder</button>
-            </div>
-            <div id="folder-list" class="folder-list"></div>
+            <div><div class="eyebrow">Laptop library</div><h2>Compare folders</h2></div>
           </div>
           <div id="photo-workspace" class="photo-workspace hidden">
-            <div class="photo-toolbar">
-              <div><small id="photo-count">—</small></div>
-            </div>
-            <div class="cull-actions" aria-label="Organize selected photos">
+            <div class="cull-actions folder-dependent hidden" aria-label="Organize selected photos">
               <div class="cull-action-buttons">
                 <button id="mark-unselect" class="quiet-button" type="button" disabled>Move to Unselected</button>
                 <button id="mark-select" class="primary-button" type="button" disabled>Move to Selected</button>
@@ -149,17 +148,52 @@
                 <button id="group-selected" class="quiet-button" type="button" disabled>Group to compare</button>
               </div>
             </div>
-            <div class="cull-folder-row">
+            <div id="folder-browser" class="folder-browser hidden">
+              <div class="folder-browser-bar">
+                <button id="folder-up" class="quiet-button" type="button">↑ Up</button>
+                <nav id="folder-path" class="folder-breadcrumbs" aria-label="Current folder">Choose a drive or folder</nav>
+              </div>
+              <div id="folder-list" class="folder-list"></div>
+              <div class="folder-browser-footer">
+                <button id="close-folder-browser" class="quiet-button" type="button">Cancel</button>
+                <button id="use-folder" class="primary-button" type="button" disabled>Open this folder</button>
+              </div>
+            </div>
+            <div id="library-split" class="library-split single-pane">
+              <section id="library-pane-left" class="library-pane active" aria-labelledby="left-folder-name">
+                <header class="library-pane-header">
+                  <div class="library-pane-title"><div class="eyebrow">Folder</div><h3 id="left-folder-name">Choose a folder</h3><button id="left-folder-path" class="folder-path-link" type="button" disabled>No folder open</button></div>
+                  <div class="library-pane-actions">
+                    <button id="browse-folders" class="quiet-button compact-button" type="button">Open folder</button>
+                    <button id="browse-folders-right" class="quiet-button compact-button hidden" type="button">Compare a folder</button>
+                  </div>
+                </header>
+                <div class="pane-photo-toolbar"><small id="photo-count-left">No folder open</small><span id="selection-count-left">0 selected</span></div>
+                <div id="photo-grid-left" class="photo-grid"></div>
+              </section>
+              <div class="split-move-actions hidden" aria-label="Move selected photos between folders">
+                <button id="move-selected-left" class="primary-button compact-button arrow-button" type="button" aria-label="Move selected photos to the right folder" title="Move selected to right" disabled>→</button>
+                <button id="move-selected-right" class="quiet-button compact-button arrow-button" type="button" aria-label="Move selected photos to the left folder" title="Move selected to left" disabled>←</button>
+              </div>
+              <section id="library-pane-right" class="library-pane hidden" aria-labelledby="right-folder-name">
+                <header class="library-pane-header">
+                  <div class="library-pane-title"><div class="eyebrow">Comparison folder</div><h3 id="right-folder-name">Choose a folder</h3><button id="right-folder-path" class="folder-path-link" type="button" disabled>No folder open</button></div>
+                </header>
+                <div class="pane-photo-toolbar"><small id="photo-count-right">No folder open</small><span id="selection-count-right">0 selected</span></div>
+                <div id="photo-grid-right" class="photo-grid"></div>
+              </section>
+            </div>
+            <div class="cull-folder-row folder-dependent hidden">
               <nav id="cull-folders" class="cull-folders" aria-label="Culling folders"></nav>
               <div class="photo-toolbar-actions">
-                <button id="select-all" class="quiet-button compact-button" type="button">Select all</button>
-                <button id="clear-picked" class="quiet-button compact-button" type="button">Deselect all</button>
+                <button id="select-all" class="quiet-button compact-button" type="button">Select all in active pane</button>
+                <button id="clear-picked" class="quiet-button compact-button" type="button">Deselect active pane</button>
                 <button id="compare-picked" class="quiet-button compact-button" type="button" disabled>Compare selected</button>
                 <button id="google-upload-selected" class="quiet-button compact-button" type="button" disabled>Upload media to Google Photos</button>
               </div>
             </div>
-            <div id="photo-grid" class="photo-grid"></div>
-            <form id="selection-job-form" class="selection-job-form">
+            <small id="photo-count" class="photo-count-summary folder-dependent hidden">Click either folder pane to make it active.</small>
+            <form id="selection-job-form" class="selection-job-form folder-dependent hidden">
               <label><span>Job name</span><input id="job-name" name="name" type="text" maxlength="120" placeholder="Lake Michigan · Aug 12" required></label>
               <label><span>Send photos to iPad as</span><select id="edit-source-format" name="source-format">
                 <option value="jpeg" selected>JPEG · videos stay original</option>
@@ -171,7 +205,7 @@
           </div>
         </section>
 
-        <section class="jobs-section">
+        <section class="jobs-section panel">
           <div class="section-heading">
             <div><div class="eyebrow">Transfer queue</div><h2>Edit jobs</h2></div>
             <button id="refresh-jobs" class="quiet-button" type="button">Refresh</button>

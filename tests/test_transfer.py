@@ -75,6 +75,15 @@ class KiraTransferTests(unittest.TestCase):
         self.assertIn('id="google-import-archive"', html)
         self.assertIn('id="google-pick"', html)
         self.assertIn('id="google-upload-selected"', html)
+        self.assertIn('id="library-pane-left"', html)
+        self.assertIn('id="library-pane-right"', html)
+        self.assertIn('id="left-folder-path"', html)
+        self.assertIn('id="right-folder-path"', html)
+        self.assertIn('>Open folder</button>', html)
+        self.assertIn('>Compare a folder</button>', html)
+        self.assertIn('id="close-folder-browser"', html)
+        self.assertIn('id="move-selected-left"', html)
+        self.assertIn('id="move-selected-right"', html)
 
         self.connection.request("GET", "/app.js")
         response = self.connection.getresponse()
@@ -520,6 +529,59 @@ class KiraTransferTests(unittest.TestCase):
         self.assertTrue((source / "selected" / "raw" / "IMG_0001.CR3").exists())
         self.assertTrue((source / "selected" / "IMG_0001.jpg").exists())
         self.assertTrue(report.exists())
+
+    def test_local_move_transfers_a_photo_group_between_open_folders(self) -> None:
+        source = Path(self.temp.name) / "source"
+        destination = Path(self.temp.name) / "destination"
+        source.mkdir()
+        destination.mkdir()
+        (source / "IMG_0007.CR3").write_bytes(b"raw")
+        (source / "IMG_0007.JPG").write_bytes(b"preview")
+        (source / "IMG_0007.MP4").write_bytes(b"video")
+
+        response, raw = self.request("GET", f"/api/local/scan?path={quote(str(source))}")
+        self.assertEqual(response.status, 200)
+        asset = json.loads(raw)["assets"][0]
+        response, moved = self.json_request(
+            "POST",
+            "/api/local/move",
+            {
+                "source_directory": str(source),
+                "destination_directory": str(destination),
+                "asset_ids": [asset["id"]],
+            },
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(moved["moved_assets"], 1)
+        self.assertEqual(len(moved["source"]["assets"]), 0)
+        self.assertEqual(moved["destination"]["assets"][0]["stem"], "IMG_0007")
+        self.assertEqual((destination / "IMG_0007.CR3").read_bytes(), b"raw")
+        self.assertEqual((destination / "IMG_0007.JPG").read_bytes(), b"preview")
+        self.assertEqual((destination / "IMG_0007.MP4").read_bytes(), b"video")
+
+    def test_local_move_rejects_destination_collisions_without_partial_move(self) -> None:
+        source = Path(self.temp.name) / "source-collision"
+        destination = Path(self.temp.name) / "destination-collision"
+        source.mkdir()
+        destination.mkdir()
+        (source / "IMG_0008.JPG").write_bytes(b"source")
+        (destination / "IMG_0008.JPG").write_bytes(b"destination")
+
+        _, raw = self.request("GET", f"/api/local/scan?path={quote(str(source))}")
+        asset = json.loads(raw)["assets"][0]
+        response, body = self.json_request(
+            "POST",
+            "/api/local/move",
+            {
+                "source_directory": str(source),
+                "destination_directory": str(destination),
+                "asset_ids": [asset["id"]],
+            },
+        )
+        self.assertEqual(response.status, 409)
+        self.assertIn("already exists", body["error"])
+        self.assertEqual((source / "IMG_0008.JPG").read_bytes(), b"source")
+        self.assertEqual((destination / "IMG_0008.JPG").read_bytes(), b"destination")
 
     def test_jpeg_edit_source_is_referenced_and_bundled_without_copy(self) -> None:
         source = Path(self.temp.name) / "jpeg-source"

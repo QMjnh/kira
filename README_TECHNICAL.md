@@ -44,7 +44,7 @@ The server uses `ThreadingHTTPServer`. It discovers the laptop address that owns
 
 Kira works against an existing camera/source directory. Creating an edit job records paths and metadata for the selected source files; it does not first copy the whole selection into Kira’s data directory.
 
-The culling view presents JPEG-backed photo groups. A JPEG and RAW file with the same stem are treated as a pair: the JPEG provides the preview, while the paired RAW remains available as the transfer source. RAW-only files are not rendered in the culling or comparison UI.
+The culling view presents JPEG-backed photo groups. A JPEG and RAW file with the same stem are treated as a pair: the JPEG provides the preview, while the paired RAW remains available as the transfer source. RAW-only files are not rendered in the culling or comparison UI. Two folders can stay open side by side in the laptop library; each pane keeps its own scan and selection state. Selected photo groups can be moved between panes, with all matching RAW, JPEG, video, and other supported files moved together.
 
 Checked groups can be moved, reversibly, into these folders below the source root:
 
@@ -96,3 +96,4 @@ Moving to encrypted transport requires HTTPS/TLS plus a certificate the iPad tru
 - File and job writes use atomic JSON updates where applicable.
 - Source folders are reorganized only when **Finish & organize source folder** is explicitly requested.
 - Culling moves are reversible and reject destination-name collisions rather than overwriting photos.
+- Cross-folder moves use `POST /api/local/move`, reject destination-name collisions, and return fresh scans for both the source and destination folders.

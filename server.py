@@ -418,6 +418,61 @@ def move_culling_assets(
     return refreshed
 
 
+def move_assets_between_directories(
+    source_directory: str,
+    destination_directory: str,
+    asset_ids: list[str],
+) -> dict:
+    source = resolve_directory(source_directory)
+    destination = resolve_directory(destination_directory)
+    if source == destination:
+        raise KiraError(HTTPStatus.BAD_REQUEST, "Choose a different destination folder")
+
+    scan = scan_photo_directory(str(source))
+    selected = {str(asset_id) for asset_id in asset_ids}
+    chosen = [asset for asset in scan["assets"] if asset["id"] in selected]
+    if not chosen:
+        raise KiraError(HTTPStatus.BAD_REQUEST, "Select at least one photo")
+    if len(chosen) != len(selected):
+        raise KiraError(HTTPStatus.CONFLICT, "The folder changed; scan it again before moving photos")
+
+    planned: list[tuple[Path, Path]] = []
+    for asset in chosen:
+        records = asset["raw_files"] + asset["jpeg_files"] + asset.get("video_files", []) + asset["other_files"]
+        for record in records:
+            file_source = Path(record["path"])
+            file_target = destination / file_source.name
+            if file_source.resolve() == file_target.resolve():
+                continue
+            if file_target.exists():
+                raise KiraError(
+                    HTTPStatus.CONFLICT,
+                    f"{file_target.name} already exists in {destination}. Nothing was moved.",
+                )
+            planned.append((file_source, file_target))
+
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for file_source, file_target in planned:
+            shutil.move(str(file_source), str(file_target))
+            moved.append((file_source, file_target))
+    except OSError as exc:
+        for file_source, file_target in reversed(moved):
+            try:
+                if file_target.exists() and not file_source.exists():
+                    shutil.move(str(file_target), str(file_source))
+            except OSError:
+                pass
+        raise KiraError(HTTPStatus.INTERNAL_SERVER_ERROR, f"Could not move photo group: {exc}") from exc
+
+    return {
+        "source": scan_photo_directory(str(source)),
+        "destination": scan_photo_directory(str(destination)),
+        "moved_assets": len(chosen),
+        "moved_files": len(moved),
+    }
+
+
 def scan_photo_directory(value: str) -> dict:
     current = resolve_directory(value)
     groups: dict[str, dict] = {}
@@ -1437,6 +1492,20 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
                         [str(asset_id) for asset_id in asset_ids],
                         str(body.get("action", "")),
                         str(body.get("group_name", "")),
+                    )
+                )
+                return
+            if segments == ["api", "local", "move"] and method == "POST":
+                self._require_local()
+                body = self._read_json()
+                asset_ids = body.get("asset_ids", [])
+                if not isinstance(asset_ids, list):
+                    raise KiraError(HTTPStatus.BAD_REQUEST, "asset_ids must be a list")
+                self._send_json(
+                    move_assets_between_directories(
+                        str(body.get("source_directory", "")),
+                        str(body.get("destination_directory", "")),
+                        [str(asset_id) for asset_id in asset_ids],
                     )
                 )
                 return
