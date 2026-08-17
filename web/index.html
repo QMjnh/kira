@@ -44,20 +44,24 @@
             <p>Optional connections stay out of the way until you need them.</p>
           </header>
         <section id="desktop-setup" class="setup-card hidden">
-          <div>
+          <div class="setup-intro">
             <div class="eyebrow">Send without cloud storage</div>
             <h2>Send directly to your iPad</h2>
             <p>Scan once with the iPad Camera. Kira opens already paired—no password to type.</p>
-            <div class="qr-wrap">
-              <img id="pair-qr" alt="QR code that opens and pairs Kira on the iPad">
-              <span>Scan with iPad Camera</span>
-            </div>
           </div>
-          <dl class="connection-details">
-            <div><dt>Manual address</dt><dd id="ipad-url">—</dd></div>
-            <div><dt>Fallback pairing code</dt><dd id="pair-code-display">—</dd></div>
-            <div><dt>Hard-drive folder</dt><dd id="data-dir">—</dd></div>
-          </dl>
+          <div class="setup-transfer-row">
+            <div class="qr-column">
+              <div class="qr-wrap">
+                <img id="pair-qr" alt="QR code that opens and pairs Kira on the iPad">
+              </div>
+              <span class="qr-caption">Scan with iPad Camera</span>
+            </div>
+            <dl class="connection-details">
+              <div><dt>Manual address</dt><dd id="ipad-url">—</dd></div>
+              <div><dt>Fallback pairing code</dt><dd id="pair-code-display">—</dd></div>
+              <div><dt>Hard-drive folder</dt><dd id="data-dir">—</dd></div>
+            </dl>
+          </div>
         </section>
 
         <section id="google-photos-card" class="panel google-photos-card hidden">
