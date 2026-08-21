@@ -146,7 +146,10 @@ class KiraTransferTests(unittest.TestCase):
             def picker_session(self, session_id):
                 return {"id": session_id, "mediaItemsSet": True}
 
-            def start_import(self, session_id, destination=None, download_mode=None, zip_threshold=None):
+            def resolve_import_destination(self, folder):
+                return Path(folder).resolve() if folder else None
+
+            def start_import(self, session_id, destination=None, download_mode=None, zip_threshold=None, album_title=None, archive=None):
                 self.import_destination = destination
                 return {
                     "id": "import-1",
@@ -222,9 +225,10 @@ class KiraTransferTests(unittest.TestCase):
             "/api/google/imports",
             {
                 "session_id": "picker-1",
-                "destination_directory": str(source),
+                "destination_folder": str(source),
                 "download_mode": "zip",
                 "zip_threshold": 40,
+                "archive": False,
             },
         )
         self.assertEqual(response.status, 202)
@@ -367,11 +371,28 @@ class KiraTransferTests(unittest.TestCase):
         self.assertEqual(scanned.status, 200)
         self.assertEqual(payload["token"], self.token)
 
-    def test_original_round_trip_range_and_bundle(self) -> None:
-        job_id = self.create_job()
+    def test_source_round_trip_range_and_bundle(self) -> None:
+        source = Path(self.temp.name) / "range-source"
+        source.mkdir()
         content = (b"raw-photo-bytes-" * 1000) + b"end"
-        record = self.upload(job_id, "originals", "IMG_4218.CR3", content)
-        self.assertEqual(record["sha256"], __import__("hashlib").sha256(content).hexdigest())
+        (source / "IMG_4218.CR3").write_bytes(content)
+
+        response, raw = self.request("GET", f"/api/local/scan?path={quote(str(source))}")
+        self.assertEqual(response.status, 200)
+        asset = json.loads(raw)["assets"][0]
+        response, job = self.json_request(
+            "POST",
+            "/api/jobs/from-selection",
+            {
+                "name": "Range Test",
+                "source_directory": str(source),
+                "selected_ids": [asset["id"]],
+                "source_format": "raw",
+            },
+        )
+        self.assertEqual(response.status, 201)
+        job_id = job["id"]
+        record = self.server.store.get_job(job_id)["files"][0]
 
         response, downloaded = self.request(
             "GET",
@@ -388,8 +409,27 @@ class KiraTransferTests(unittest.TestCase):
             self.assertEqual(archive.read("IMG_4218.CR3"), content)
 
     def test_return_matches_original_by_filename_stem(self) -> None:
-        job_id = self.create_job()
-        original = self.upload(job_id, "originals", "IMG_4218.CR3", b"raw-data")
+        source = Path(self.temp.name) / "match-source"
+        source.mkdir()
+        (source / "IMG_4218.CR3").write_bytes(b"raw-data")
+
+        response, raw = self.request("GET", f"/api/local/scan?path={quote(str(source))}")
+        self.assertEqual(response.status, 200)
+        asset = json.loads(raw)["assets"][0]
+        response, job = self.json_request(
+            "POST",
+            "/api/jobs/from-selection",
+            {
+                "name": "Match Test",
+                "source_directory": str(source),
+                "selected_ids": [asset["id"]],
+                "source_format": "raw",
+            },
+        )
+        self.assertEqual(response.status, 201)
+        job_id = job["id"]
+        original = self.server.store.get_job(job_id)["files"][0]
+
         returned = self.upload(job_id, "returns", "IMG_4218.jpg", b"edited-jpeg", last_modified=2)
         self.assertEqual(returned["match_status"], "matched")
         self.assertEqual(returned["matched_file_id"], original["id"])
@@ -405,7 +445,7 @@ class KiraTransferTests(unittest.TestCase):
         _, started = self.json_request(
             "POST",
             f"/api/jobs/{job_id}/uploads/start",
-            {"kind": "originals", "filename": "resume.nef", "size": len(content), "last_modified": 9},
+            {"kind": "returns", "filename": "resume.nef", "size": len(content), "last_modified": 9},
         )
         upload_id = started["upload_id"]
         response, _ = self.request(
@@ -418,7 +458,7 @@ class KiraTransferTests(unittest.TestCase):
         _, resumed = self.json_request(
             "POST",
             f"/api/jobs/{job_id}/uploads/start",
-            {"kind": "originals", "filename": "resume.nef", "size": len(content), "last_modified": 9},
+            {"kind": "returns", "filename": "resume.nef", "size": len(content), "last_modified": 9},
         )
         self.assertEqual(resumed["offset"], 4)
 
@@ -427,7 +467,7 @@ class KiraTransferTests(unittest.TestCase):
         _, started = self.json_request(
             "POST",
             f"/api/jobs/{job_id}/uploads/start",
-            {"kind": "originals", "filename": "conflict.cr3", "size": 8, "last_modified": 10},
+            {"kind": "returns", "filename": "conflict.cr3", "size": 8, "last_modified": 10},
         )
         upload_id = started["upload_id"]
         response, _ = self.request(
@@ -450,7 +490,7 @@ class KiraTransferTests(unittest.TestCase):
         response, resumed = self.json_request(
             "POST",
             f"/api/jobs/{job_id}/uploads/start",
-            {"kind": "originals", "filename": "conflict.cr3", "size": 8, "last_modified": 10},
+            {"kind": "returns", "filename": "conflict.cr3", "size": 8, "last_modified": 10},
         )
         self.assertEqual(response.status, 200)
         self.assertEqual(resumed["offset"], 4)
@@ -490,7 +530,6 @@ class KiraTransferTests(unittest.TestCase):
         self.assertTrue(manifest["files"][0]["referenced"])
         self.assertEqual(Path(manifest["files"][0]["source_path"]), source / "IMG_0001.CR3")
         self.assertIsNone(manifest["files"][0]["sha256"])
-        self.assertFalse((self.server.store._job_dir(job_id) / "originals" / "IMG_0001.CR3").exists())
 
         lightroom_zip = BytesIO()
         with zipfile.ZipFile(lightroom_zip, "w") as archive:
@@ -607,7 +646,6 @@ class KiraTransferTests(unittest.TestCase):
         self.assertEqual(manifest["files"][0]["filename"], "DSC_0100.JPG")
         self.assertEqual(manifest["files"][0]["source_path"], str(source / "DSC_0100.JPG"))
         self.assertIsNone(manifest["files"][0]["sha256"])
-        self.assertFalse((self.server.store._job_dir(job["id"]) / "originals" / "DSC_0100.JPG").exists())
 
         response, bundle = self.request("GET", f"/api/jobs/{job['id']}/bundle.zip")
         self.assertEqual(response.status, 200)

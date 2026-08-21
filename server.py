@@ -17,6 +17,7 @@ import uuid
 import webbrowser
 import zipfile
 from datetime import datetime, timezone
+from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -59,9 +60,6 @@ VIDEO_EXTENSIONS = {
     ".mkv", ".mmv", ".mod", ".mov", ".mp4", ".mpg", ".mts", ".tod", ".wmv",
 }
 MEDIA_EXTENSIONS = PHOTO_EXTENSIONS | VIDEO_EXTENSIONS
-EXPORT_CATEGORIES = {"organized", "raw", "unselected-jpeg", "pre-edit", "edited"}
-MEDIA_IDENTITY_CACHE: dict[tuple[str, int, int, str], tuple[str, str]] = {}
-MEDIA_IDENTITY_CACHE_LOCK = threading.Lock()
 
 
 def utc_now() -> str:
@@ -125,22 +123,11 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def media_identity(path: Path) -> tuple[str, str]:
-    """Return an exact visual identity for photos and a byte identity otherwise.
-
-    Decoding the pixels deliberately ignores filenames, JPEG encoding, and metadata.
-    This catches visually identical Google Photos downloads while keeping any image
-    whose pixels were actually edited. RAW files and videos use exact file bytes.
-    """
-    stat = path.stat()
-    cache_key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns, path.suffix.casefold())
-    with MEDIA_IDENTITY_CACHE_LOCK:
-        cached = MEDIA_IDENTITY_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-
+@lru_cache(maxsize=4096)
+def _media_identity(resolved: str, size: int, mtime_ns: int, suffix: str) -> tuple[str, str]:
+    path = Path(resolved)
     identity: tuple[str, str] | None = None
-    if Image is not None and path.suffix.casefold() in PHOTO_EXTENSIONS:
+    if Image is not None and suffix in PHOTO_EXTENSIONS:
         try:
             with Image.open(path) as opened:
                 image = ImageOps.exif_transpose(opened) if ImageOps is not None else opened.copy()
@@ -156,11 +143,20 @@ def media_identity(path: Path) -> tuple[str, str]:
             pass
     if identity is None:
         identity = ("bytes", sha256_file(path))
-    with MEDIA_IDENTITY_CACHE_LOCK:
-        if len(MEDIA_IDENTITY_CACHE) >= 4096:
-            MEDIA_IDENTITY_CACHE.clear()
-        MEDIA_IDENTITY_CACHE[cache_key] = identity
     return identity
+
+
+def media_identity(path: Path) -> tuple[str, str]:
+    """Return an exact visual identity for photos and a byte identity otherwise.
+
+    Decoding the pixels deliberately ignores filenames, JPEG encoding, and metadata.
+    This catches visually identical Google Photos downloads while keeping any image
+    whose pixels were actually edited. RAW files and videos use exact file bytes.
+    """
+    stat = path.stat()
+    return _media_identity(
+        str(path.resolve()), stat.st_size, stat.st_mtime_ns, path.suffix.casefold()
+    )
 
 
 def natural_key(value: str) -> list[object]:
@@ -534,23 +530,6 @@ def scan_photo_directory(value: str) -> dict:
     return {"directory": str(current), "assets": assets, "culling": culling_context(current)}
 
 
-def unique_archive_name(used: set[str], folder: str, filename: str) -> str:
-    clean = safe_filename(filename)
-    candidate = f"{folder}/{clean}"
-    if candidate.casefold() not in used:
-        used.add(candidate.casefold())
-        return candidate
-    stem = Path(clean).stem
-    suffix = Path(clean).suffix
-    index = 2
-    while True:
-        candidate = f"{folder}/{stem}__v{index}{suffix}"
-        if candidate.casefold() not in used:
-            used.add(candidate.casefold())
-            return candidate
-        index += 1
-
-
 def discover_local_ip() -> str:
     candidates: list[str] = []
     try:
@@ -801,8 +780,8 @@ class KiraStore:
         size: int,
         last_modified: int,
     ) -> dict:
-        if kind not in {"originals", "returns"}:
-            raise KiraError(HTTPStatus.BAD_REQUEST, "Upload kind must be originals or returns")
+        if kind != "returns":
+            raise KiraError(HTTPStatus.BAD_REQUEST, "Upload kind must be returns")
         if size < 0:
             raise KiraError(HTTPStatus.BAD_REQUEST, "File size is invalid")
         self._load_manifest(job_id)
@@ -909,7 +888,7 @@ class KiraStore:
                     digest.update(chunk)
 
             manifest = self._load_manifest(job_id)
-            if metadata["kind"] == "returns" and manifest.get("source_directory"):
+            if manifest.get("source_directory"):
                 source_root = resolve_directory(str(manifest["source_directory"]))
                 edited_folder = source_root / "selected"
                 if Path(metadata["filename"]).suffix.casefold() == ".zip":
@@ -918,7 +897,7 @@ class KiraStore:
                     folder = edited_folder
                 folder.mkdir(parents=True, exist_ok=True)
             else:
-                folder = self._job_dir(job_id) / metadata["kind"]
+                folder = self._job_dir(job_id) / "returns"
                 folder.mkdir(parents=True, exist_ok=True)
             destination = unique_destination(folder, metadata["filename"])
             os.replace(part_path, destination)
@@ -932,16 +911,10 @@ class KiraStore:
                 "created_at": utc_now(),
             }
 
-            if metadata["kind"] == "returns":
-                self._attach_return_match(manifest, record)
-                manifest["returns"].append(record)
-                if manifest.get("source_directory"):
-                    manifest["postprocess"] = {"status": "pending"}
-            else:
-                manifest["files"].append(record)
-                cache = self._job_dir(job_id) / ".cache" / "originals.zip"
-                if cache.exists():
-                    cache.unlink()
+            self._attach_return_match(manifest, record)
+            manifest["returns"].append(record)
+            if manifest.get("source_directory"):
+                manifest["postprocess"] = {"status": "pending"}
             self._save_manifest(manifest)
             metadata["status"] = "complete"
             metadata["record"] = record
@@ -966,8 +939,8 @@ class KiraStore:
         collection_name = "files" if kind == "originals" else "returns"
         for record in manifest[collection_name]:
             if record["id"] == record_id:
-                stored_path = record.get("source_path") if kind == "originals" else record.get("storage_path")
-                path = Path(stored_path) if stored_path else self._job_dir(job_id) / kind / record["filename"]
+                stored_path = record["source_path"] if kind == "originals" else record["storage_path"]
+                path = Path(stored_path)
                 if not path.exists():
                     raise KiraError(HTTPStatus.NOT_FOUND, "File is missing from disk")
                 return path, record
@@ -985,7 +958,7 @@ class KiraStore:
             sources: list[tuple[dict, Path, os.stat_result]] = []
             signature_parts: list[str] = []
             for record in manifest["files"]:
-                source = Path(record["source_path"]) if record.get("source_path") else self._job_dir(job_id) / "originals" / record["filename"]
+                source = Path(record["source_path"])
                 if not source.exists():
                     raise KiraError(HTTPStatus.NOT_FOUND, f"Source file is missing: {record['filename']}")
                 stat = source.stat()
@@ -1011,76 +984,6 @@ class KiraStore:
                     self._save_manifest(manifest)
             return cache_path, f"{safe_filename(manifest['name'])}-originals.zip"
 
-    def create_export_bundle(self, job_id: str, category: str) -> tuple[Path, str]:
-        if category not in EXPORT_CATEGORIES:
-            raise KiraError(HTTPStatus.NOT_FOUND, "Export category not found")
-        with self.lock:
-            manifest = self._load_manifest(job_id)
-            cache_path = self._job_dir(job_id) / ".cache" / f"export-{category}.zip"
-            temp = cache_path.with_suffix(".zip.tmp")
-            used: set[str] = set()
-            missing: list[str] = []
-            written = 0
-
-            def add_file(archive: zipfile.ZipFile, source: Path, folder: str, filename: str) -> None:
-                nonlocal written
-                if not source.exists() or not source.is_file():
-                    missing.append(str(source))
-                    return
-                archive.write(source, arcname=unique_archive_name(used, folder, filename))
-                written += 1
-
-            with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
-                assets = manifest.get("assets", [])
-                if assets:
-                    for asset in assets:
-                        if category in {"organized", "raw"}:
-                            for item in asset.get("raw_files", []):
-                                add_file(archive, Path(item["path"]), "raw", item["filename"])
-                        if asset.get("selected") and category in {"organized", "pre-edit"}:
-                            for item in asset.get("jpeg_files", []):
-                                add_file(archive, Path(item["path"]), "selected_jpeg/pre-edit", item["filename"])
-                        if not asset.get("selected") and category in {"organized", "unselected-jpeg"}:
-                            for item in asset.get("jpeg_files", []):
-                                add_file(archive, Path(item["path"]), "unselected_jpeg", item["filename"])
-                else:
-                    # Legacy jobs only know the edit-source files.
-                    for record in manifest.get("files", []):
-                        source = self._job_dir(job_id) / "originals" / record["filename"]
-                        if source.suffix.casefold() in RAW_EXTENSIONS and category in {"organized", "raw"}:
-                            add_file(archive, source, "raw", record["filename"])
-                        elif category in {"organized", "pre-edit"}:
-                            add_file(archive, source, "selected_jpeg/pre-edit", record["filename"])
-
-                if category in {"organized", "edited"}:
-                    for record in manifest.get("returns", []):
-                        source = self._job_dir(job_id) / "returns" / record["filename"]
-                        folder = "selected_jpeg/edited"
-                        if record.get("match_status") != "matched":
-                            folder += "/unmatched"
-                        add_file(archive, source, folder, record["filename"])
-
-                report = [
-                    f"Kira organized export: {manifest['name']}",
-                    f"Created: {utc_now()}",
-                    f"Category: {category}",
-                    f"Files written: {written}",
-                ]
-                if missing:
-                    report.extend(["", "Missing source files:", *missing])
-                if not written:
-                    report.extend(["", "No files were available for this category."])
-                archive.writestr("KIRA-EXPORT.txt", "\n".join(report) + "\n")
-            os.replace(temp, cache_path)
-            label = {
-                "organized": "organized",
-                "raw": "raw",
-                "unselected-jpeg": "unselected-jpeg",
-                "pre-edit": "selected-pre-edit",
-                "edited": "selected-edited",
-            }[category]
-            return cache_path, f"{safe_filename(manifest['name'])}-{label}.zip"
-
     def organize_source_folder(self, job_id: str) -> dict:
         with self.lock:
             manifest = self._load_manifest(job_id)
@@ -1092,7 +995,7 @@ class KiraStore:
                 )
             source_root = resolve_directory(str(source_value))
             previous = manifest.get("postprocess", {})
-            if previous.get("status") == "complete" and previous.get("layout_version") == 2:
+            if previous.get("status") == "complete":
                 report_path = Path(str(previous.get("report_path", "")))
                 if report_path.exists():
                     return previous
@@ -1220,7 +1123,6 @@ class KiraStore:
                 "kira_job_id": job_id,
                 "job_name": manifest["name"],
                 "completed_at": completed_at,
-                "layout_version": 2,
                 "source_directory": str(source_root),
                 "folders": {key: str(value) for key, value in destinations.items()},
                 "moved": moved,
@@ -1230,7 +1132,6 @@ class KiraStore:
             atomic_json_write(report_path, report)
             result = {
                 "status": "complete" if not errors else "complete_with_warnings",
-                "layout_version": 2,
                 "completed_at": completed_at,
                 "source_directory": str(source_root),
                 "report_path": str(report_path),
@@ -1310,9 +1211,6 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/pair" and method == "POST":
                 self._pair()
-                return
-            if path == "/api/google/oauth/callback" and method == "GET":
-                self._google_oauth_callback(query)
                 return
 
             self._require_auth(query)
@@ -1420,29 +1318,17 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
                     archive = body.get("archive", True)
                     if not isinstance(archive, bool):
                         raise KiraError(HTTPStatus.BAD_REQUEST, "archive must be an explicit JSON boolean")
-                    if "destination_folder" in body or "album_title" in body or "archive" in body:
-                        destination_folder = str(body.get("destination_folder", "/inbox")).strip()
-                        destination = (
-                            self.server.google_photos.resolve_import_destination(destination_folder)
-                            if destination_folder
-                            else None
-                        )
-                        operation = self.server.google_photos.start_import(
-                            session_id,
-                            destination,
-                            body.get("download_mode", "automatic"),
-                            body.get("zip_threshold", 50),
-                            str(body.get("album_title", "")).strip() or None,
-                            archive,
-                        )
-                    else:
-                        legacy_destination = str(body.get("destination_directory", "")).strip()
-                        operation = self.server.google_photos.start_import(
-                            session_id,
-                            resolve_directory(legacy_destination) if legacy_destination else None,
-                            body.get("download_mode", "automatic"),
-                            body.get("zip_threshold", 50),
-                        )
+                    destination_folder = str(body.get("destination_folder", "")).strip()
+                    operation = self.server.google_photos.start_import(
+                        session_id,
+                        self.server.google_photos.resolve_import_destination(destination_folder)
+                        if destination_folder
+                        else None,
+                        body.get("download_mode", "automatic"),
+                        body.get("zip_threshold", 50),
+                        str(body.get("album_title", "")).strip() or None,
+                        archive,
+                    )
                     self._send_json(operation, status=HTTPStatus.ACCEPTED)
                     return
                 if segments == ["api", "google", "uploads"] and method == "POST":
@@ -1603,16 +1489,6 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
                     file_path, filename = self.server.store.create_bundle(job_id)
                     self._serve_file(file_path, filename, method == "HEAD", content_type="application/zip")
                     return
-                if (
-                    len(segments) == 5
-                    and segments[3] == "exports"
-                    and segments[4].endswith(".zip")
-                    and method in {"GET", "HEAD"}
-                ):
-                    category = segments[4][:-4]
-                    file_path, filename = self.server.store.create_export_bundle(job_id, category)
-                    self._serve_file(file_path, filename, method == "HEAD", content_type="application/zip")
-                    return
 
             raise KiraError(HTTPStatus.NOT_FOUND, "Not found")
         except KiraError as exc:
@@ -1630,7 +1506,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": exc.message, **exc.extra}, status=exc.status)
         except GooglePhotosError as exc:
             print(f"[Google Photos] {method} {path}: {' '.join(str(exc).splitlines())}", flush=True)
-            if path == "/api/google/oauth/callback" or (path == "/" and "state" in query):
+            if path == "/" and "state" in query:
                 self._send_html(
                     "<!doctype html><meta charset='utf-8'><title>Kira</title>"
                     f"<body style='font:16px system-ui;padding:40px'><h1>Could not connect</h1><p>{self._html_escape(str(exc))}</p></body>",

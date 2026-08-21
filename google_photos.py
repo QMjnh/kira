@@ -193,17 +193,12 @@ class GooglePhotosService:
         }
 
     def resolve_import_destination(self, folder: str) -> Path:
-        """Resolve an import destination, accepting the legacy /inbox alias."""
-        value = str(folder or "").strip().replace("\\", "/")
-        normalized = value.casefold().rstrip("/")
-        if not value or normalized in {"", ".", "/inbox", "inbox"}:
+        """Resolve an import destination: empty means the inbox, absolute
+        paths are used as-is, anything else is relative to the inbox."""
+        value = str(folder or "").strip()
+        if not value:
             target = self.inbox
-        elif normalized.startswith("/inbox/") or normalized.startswith("inbox/"):
-            parts = [part for part in value.split("/") if part and part != "."]
-            target = self.inbox.joinpath(*parts[1:])
         else:
-            # Imports may be placed in an existing collection outside Kira's
-            # data directory when a fully qualified path is supplied.
             candidate = Path(value)
             target = candidate if candidate.is_absolute() else self.inbox / candidate
 
