@@ -30,12 +30,8 @@ if VENDOR_DIR.exists():
 
 import qrcode
 import qrcode.image.svg
+from PIL import Image, ImageOps
 from google_photos import GooglePhotosError, GooglePhotosService
-try:
-    from PIL import Image, ImageOps
-except ImportError:  # Kira can still run, but previews fall back to full JPEGs.
-    Image = None
-    ImageOps = None
 
 
 APP_NAME = "Kira"
@@ -87,9 +83,7 @@ def safe_filename(value: str) -> str:
 
 
 def safe_download_name(value: str) -> str:
-    cleaned = safe_filename(value)
-    ascii_name = cleaned.encode("ascii", "ignore").decode("ascii") or "download"
-    return ascii_name.replace('"', "_")
+    return safe_filename(value).encode("ascii", "ignore").decode("ascii") or "download"
 
 
 def match_key(filename: str) -> str:
@@ -127,7 +121,7 @@ def sha256_file(path: Path) -> str:
 def _media_identity(resolved: str, size: int, mtime_ns: int, suffix: str) -> tuple[str, str]:
     path = Path(resolved)
     identity: tuple[str, str] | None = None
-    if Image is not None and suffix in PHOTO_EXTENSIONS:
+    if suffix in PHOTO_EXTENSIONS:
         try:
             with Image.open(path) as opened:
                 image = ImageOps.exif_transpose(opened) if ImageOps is not None else opened.copy()
@@ -620,8 +614,6 @@ class KiraStore:
         atomic_json_write(self._manifest_path(manifest["id"]), manifest)
 
     def preview_thumbnail(self, source: Path, requested_size: int) -> Path:
-        if Image is None or ImageOps is None:
-            return source
         size = 1600 if requested_size > 640 else 480
         stat = source.stat()
         cache_key = hashlib.sha256(
