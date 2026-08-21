@@ -601,6 +601,10 @@ class GooglePhotosService:
             "path": path,
             "size": size,
             "sha256": digest,
+            # Picker IDs are scoped to the Picker API and cannot be used by the
+            # Google Photos web client.  Preserve Google's content-hash format
+            # so the corresponding web media key can be resolved after import.
+            "google_content_hash": _google_remote_hash(path),
             "archive_name": f"{index:05d}/{filename}",
         }
 
@@ -616,6 +620,7 @@ class GooglePhotosService:
             "filename": filename,
             "media_type": download["media_type"].casefold(),
             "google_media_id": str(download["item"].get("id", "")),
+            "google_content_hash": download["google_content_hash"],
             "classification": classification,
             "size": download["size"],
             "sha256": download["sha256"],
@@ -644,6 +649,64 @@ class GooglePhotosService:
             local_path=str(final),
         )
         self._append_result(operation_id, result, True)
+
+    def _resolve_import_media_keys(self, files: list[dict]) -> tuple[list[str], int, int]:
+        """Resolve Picker downloads to the internal media keys used by the web client."""
+        imported = [
+            item
+            for item in files
+            if item.get("status") in {"complete", "skipped"}
+            and str(item.get("google_content_hash", "")).strip()
+        ]
+        hashes = list(
+            dict.fromkeys(str(item["google_content_hash"]).strip() for item in imported)
+        )
+        if not hashes:
+            return [], 0, 0
+
+        matches = self.web.find_remote_matches(hashes)
+        matched_hashes = {
+            str(match.get("content_hash", "")).strip()
+            for match in matches
+            if str(match.get("media_key", "")).strip()
+        }
+        media_keys = list(
+            dict.fromkeys(
+                str(match.get("media_key", "")).strip()
+                for match in matches
+                if str(match.get("content_hash", "")).strip() in hashes
+                and str(match.get("media_key", "")).strip()
+            )
+        )
+        matched_items = sum(
+            str(item["google_content_hash"]).strip() in matched_hashes for item in imported
+        )
+
+        unresolved_photos = [
+            Path(str(item.get("local_path", "")))
+            for item in imported
+            if str(item["google_content_hash"]).strip() not in matched_hashes
+            and item.get("media_type") == "photo"
+            and str(item.get("local_path", "")).strip()
+        ]
+        visual_matcher = getattr(self.web, "find_visual_matches", None)
+        if unresolved_photos and callable(visual_matcher):
+            visual_matches, _visual_errors = visual_matcher(unresolved_photos)
+            visually_matched_paths = {
+                str(path)
+                for match in visual_matches
+                if str(match.get("media_key", "")).strip()
+                for path in match.get("local_files", [])
+            }
+            media_keys.extend(
+                str(match.get("media_key", "")).strip()
+                for match in visual_matches
+                if str(match.get("media_key", "")).strip()
+            )
+            media_keys = list(dict.fromkeys(media_keys))
+            matched_items += sum(str(path) in visually_matched_paths for path in unresolved_photos)
+
+        return media_keys, matched_items, len(imported)
 
     def _run_import(
         self,
@@ -725,34 +788,39 @@ class GooglePhotosService:
             status = "complete" if not current["failed"] else "complete_with_errors"
             if album_title and current["files"]:
                 self._update_operation(operation_id, phase="organizing_google_photos", organize_status="running")
-                media_ids = list(
-                    dict.fromkeys(
-                        str(item.get("google_media_id", "")).strip()
-                        for item in current["files"]
-                        if item.get("status") in {"complete", "skipped"}
-                        and str(item.get("google_media_id", "")).strip()
+                matched_items = 0
+                try:
+                    media_keys, matched_items, importable_items = self._resolve_import_media_keys(
+                        current["files"]
                     )
-                )
-                if media_ids:
-                    try:
-                        organized = self.web.organize(media_ids, album_title, archive)
-                        self._update_operation(
-                            operation_id,
-                            album=organized["album"],
-                            archived=bool(organized["archived"]),
-                            organized=len(organized["items"]),
-                            organize_status="complete",
+                    if not media_keys:
+                        raise GooglePhotosError(
+                            "Downloaded media could not be matched back to Google Photos for "
+                            "album and Archive"
                         )
-                    except Exception as exc:
-                        self._log_operation_error(operation_id, exc, "automatic album and Archive")
-                        self._update_operation(
-                            operation_id,
-                            organize_status="failed",
-                            organize_error=str(exc),
-                        )
+                    organized = self.web.organize(media_keys, album_title, archive)
+                    unmatched_items = importable_items - matched_items
+                    self._update_operation(
+                        operation_id,
+                        album=organized["album"],
+                        archived=bool(organized["archived"]),
+                        organized=len(organized["items"]),
+                        organize_matched=matched_items,
+                        organize_unmatched=unmatched_items,
+                        organize_status="partial" if unmatched_items else "complete",
+                    )
+                    if unmatched_items:
                         status = "complete_with_errors"
-                else:
-                    self._update_operation(operation_id, organize_status="skipped", organized=0)
+                except Exception as exc:
+                    self._log_operation_error(operation_id, exc, "automatic album and Archive")
+                    self._update_operation(
+                        operation_id,
+                        organize_status="failed",
+                        organize_error=str(exc),
+                        organize_matched=matched_items,
+                        organized=0,
+                    )
+                    status = "complete_with_errors"
             self._update_operation(operation_id, status=status)
             try:
                 self._request_json(

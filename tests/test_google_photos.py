@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -191,6 +192,178 @@ class GooglePhotosServiceTests(unittest.TestCase):
 
         finished = service.operation(operation["id"])
         self.assertEqual(finished["download_mode"], "files")
+
+    def test_automatic_album_resolves_picker_ids_to_web_media_keys_by_content(self) -> None:
+        service = self.service()
+        content = b"picker-original-bytes"
+        expected_hash = base64.b64encode(hashlib.sha1(content).digest()).decode("ascii")
+        service._list_picked_items = lambda _session_id: [
+            {
+                "id": "picker-only-AFc71b",
+                "type": "PHOTO",
+                "mediaFile": {"filename": "selected.jpg", "baseUrl": "https://selected"},
+            }
+        ]
+        service._access_token = lambda: "access-token"
+
+        def download(_url, _token, destination):
+            destination.write_bytes(content)
+            return len(content), hashlib.sha256(content).hexdigest()
+
+        requested_hashes = []
+        organized_keys = []
+
+        def find_remote_matches(hashes):
+            requested_hashes.extend(hashes)
+            return [
+                {
+                    "content_hash": expected_hash,
+                    "media_key": "web-media-key",
+                    "dedup_key": "web-dedup-key",
+                }
+            ]
+
+        def organize(media_keys, album_title, archive):
+            organized_keys.extend(media_keys)
+            return {
+                "album": {"title": album_title, "media_key": "album-key"},
+                "archived": archive,
+                "items": [{"google_media_key": media_keys[0], "status": "complete"}],
+            }
+
+        service._download_file = download
+        service._request_json = lambda *_args, **_kwargs: {}
+        service.web = SimpleNamespace(
+            find_remote_matches=find_remote_matches,
+            organize=organize,
+        )
+        operation = service._new_operation("import", directory=service.inbox)
+        service._run_import(
+            operation["id"],
+            "picker-session",
+            service.inbox,
+            album_title="Imported trip",
+            archive=True,
+        )
+        finished = service.operation(operation["id"])
+
+        self.assertEqual(requested_hashes, [expected_hash])
+        self.assertEqual(organized_keys, ["web-media-key"])
+        self.assertNotIn("picker-only-AFc71b", organized_keys)
+        self.assertEqual(finished["organize_status"], "complete")
+        self.assertEqual(finished["organize_matched"], 1)
+        self.assertEqual(finished["organized"], 1)
+        self.assertTrue(finished["archived"])
+
+    def test_automatic_album_resolves_an_exact_duplicate_before_removing_download(self) -> None:
+        service = self.service()
+        content = b"already-downloaded-original"
+        existing = service.inbox / "existing.jpg"
+        existing.write_bytes(content)
+        expected_hash = base64.b64encode(hashlib.sha1(content).digest()).decode("ascii")
+        service._list_picked_items = lambda _session_id: [
+            {
+                "id": "picker-duplicate",
+                "type": "PHOTO",
+                "mediaFile": {"filename": "selected.jpg", "baseUrl": "https://selected"},
+            }
+        ]
+        service._access_token = lambda: "access-token"
+
+        def download(_url, _token, destination):
+            destination.write_bytes(content)
+            return len(content), hashlib.sha256(content).hexdigest()
+
+        organized_keys = []
+        service._download_file = download
+        service._request_json = lambda *_args, **_kwargs: {}
+        service.web = SimpleNamespace(
+            find_remote_matches=lambda hashes: [
+                {
+                    "content_hash": hashes[0],
+                    "media_key": "web-duplicate-key",
+                    "dedup_key": "dedup-key",
+                }
+            ],
+            organize=lambda media_keys, album_title, archive: (
+                organized_keys.extend(media_keys)
+                or {
+                    "album": {"title": album_title, "media_key": "album-key"},
+                    "archived": archive,
+                    "items": [{"google_media_key": media_keys[0], "status": "complete"}],
+                }
+            ),
+        )
+        operation = service._new_operation("import", directory=service.inbox)
+        service._run_import(
+            operation["id"],
+            "picker-session",
+            service.inbox,
+            album_title="Duplicates",
+            archive=True,
+        )
+        finished = service.operation(operation["id"])
+
+        self.assertEqual(finished["duplicates"], 1)
+        self.assertEqual(finished["files"][0]["google_content_hash"], expected_hash)
+        self.assertEqual(organized_keys, ["web-duplicate-key"])
+        self.assertEqual(finished["organize_status"], "complete")
+
+    def test_automatic_album_organizes_matches_and_reports_unmatched_downloads(self) -> None:
+        service = self.service()
+        contents = {"one.jpg": b"one", "two.jpg": b"two"}
+        service._list_picked_items = lambda _session_id: [
+            {
+                "id": f"picker-{name}",
+                "type": "PHOTO",
+                "mediaFile": {"filename": name, "baseUrl": f"https://{name}"},
+            }
+            for name in contents
+        ]
+        service._access_token = lambda: "access-token"
+
+        def download(url, _token, destination):
+            name = url.removeprefix("https://").removesuffix("=d")
+            content = contents[name]
+            destination.write_bytes(content)
+            return len(content), hashlib.sha256(content).hexdigest()
+
+        first_hash = base64.b64encode(hashlib.sha1(contents["one.jpg"]).digest()).decode("ascii")
+        organize_calls = []
+
+        def organize(media_keys, album_title, archive):
+            organize_calls.append(list(media_keys))
+            return {
+                "album": {"title": album_title, "media_key": "album-key"},
+                "archived": archive,
+                "items": [{"google_media_key": media_keys[0], "status": "complete"}],
+            }
+
+        service._download_file = download
+        service._request_json = lambda *_args, **_kwargs: {}
+        service.web = SimpleNamespace(
+            find_remote_matches=lambda _hashes: [
+                {"content_hash": first_hash, "media_key": "web-one", "dedup_key": "dedup-one"}
+            ],
+            find_visual_matches=lambda _paths: ([], []),
+            organize=organize,
+        )
+        operation = service._new_operation("import", directory=service.inbox)
+        service._run_import(
+            operation["id"],
+            "picker-session",
+            service.inbox,
+            album_title="Incomplete",
+            archive=True,
+        )
+        finished = service.operation(operation["id"])
+
+        self.assertEqual(organize_calls, [["web-one"]])
+        self.assertEqual(finished["status"], "complete_with_errors")
+        self.assertEqual(finished["organize_status"], "partial")
+        self.assertEqual(finished["organize_matched"], 1)
+        self.assertEqual(finished["organize_unmatched"], 1)
+        self.assertEqual(finished["organized"], 1)
 
     def test_upload_creates_google_media_item_after_sending_bytes(self) -> None:
         service = self.service()

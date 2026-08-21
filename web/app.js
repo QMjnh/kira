@@ -337,6 +337,11 @@
     details.push(finished.download_mode === 'zip' ? 'temporary ZIP extracted and removed' : 'saved as individual files');
     if (finished.organize_status === 'complete') {
       details.push(`${finished.organized} added to ${finished.album?.title || 'album'}${finished.archived ? ' and archived' : ''}`);
+    } else if (finished.organize_status === 'partial') {
+      details.push(
+        `${finished.organized} added to ${finished.album?.title || 'album'}${finished.archived ? ' and archived' : ''}; ` +
+        `${finished.organize_unmatched} downloaded item${finished.organize_unmatched === 1 ? '' : 's'} could not be matched in Google Photos`,
+      );
     } else if (finished.organize_error) {
       details.push(`album and Archive failed: ${finished.organize_error}`);
     }
