@@ -77,11 +77,11 @@ class KiraTransferTests(unittest.TestCase):
         self.assertIn('id="google-upload-selected"', html)
         self.assertIn('id="library-pane-left"', html)
         self.assertIn('id="library-pane-right"', html)
-        self.assertIn('id="left-folder-path"', html)
-        self.assertIn('id="right-folder-path"', html)
-        self.assertIn('>Open folder</button>', html)
+        self.assertIn('id="left-folder-up"', html)
+        self.assertIn('id="right-folder-list"', html)
+        self.assertIn('id="left-new-folder"', html)
+        self.assertIn('id="left-reveal"', html)
         self.assertIn('>Compare a folder</button>', html)
-        self.assertIn('id="close-folder-browser"', html)
         self.assertIn('id="move-selected-left"', html)
         self.assertIn('id="move-selected-right"', html)
 
@@ -621,6 +621,52 @@ class KiraTransferTests(unittest.TestCase):
         self.assertIn("already exists", body["error"])
         self.assertEqual((source / "IMG_0008.JPG").read_bytes(), b"source")
         self.assertEqual((destination / "IMG_0008.JPG").read_bytes(), b"destination")
+
+    def test_folder_management_endpoints(self) -> None:
+        parent = Path(self.temp.name) / "manage"
+        parent.mkdir()
+        (parent / "trip").mkdir()
+        drive_root = Path(self.temp.name).anchor
+
+        response, created = self.json_request(
+            "POST", "/api/local/mkdir", {"parent_path": str(parent), "name": "new folder"}
+        )
+        self.assertEqual(response.status, 201)
+        self.assertTrue((parent / "new folder").is_dir())
+        response, _ = self.json_request(
+            "POST", "/api/local/mkdir", {"parent_path": str(parent), "name": "new folder"}
+        )
+        self.assertEqual(response.status, 409)
+        response, _ = self.json_request(
+            "POST", "/api/local/mkdir", {"parent_path": str(parent), "name": "con"}
+        )
+        self.assertEqual(response.status, 400)
+
+        response, renamed = self.json_request(
+            "POST", "/api/local/rename", {"path": str(parent / "trip"), "name": "vacation"}
+        )
+        self.assertEqual(response.status, 200)
+        self.assertFalse((parent / "trip").exists())
+        self.assertTrue((parent / "vacation").is_dir())
+        (parent / "clash").mkdir()
+        response, _ = self.json_request(
+            "POST", "/api/local/rename", {"path": str(parent / "vacation"), "name": "clash"}
+        )
+        self.assertEqual(response.status, 409)
+        response, body = self.json_request(
+            "POST", "/api/local/rename", {"path": drive_root, "name": "nope"}
+        )
+        self.assertEqual(response.status, 400)
+
+        doomed = parent / "doomed"
+        doomed.mkdir()
+        response, deleted = self.json_request("POST", "/api/local/delete", {"path": str(doomed)})
+        self.assertEqual(response.status, 200)
+        self.assertFalse(doomed.exists())
+
+        missing = Path(self.temp.name) / "manage" / "ghost"
+        response, _ = self.json_request("POST", "/api/local/delete", {"path": str(missing)})
+        self.assertEqual(response.status, 404)
 
     def test_jpeg_edit_source_is_referenced_and_bundled_without_copy(self) -> None:
         source = Path(self.temp.name) / "jpeg-source"

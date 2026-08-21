@@ -6,18 +6,16 @@
     bootstrap: null,
     jobs: [],
     currentJob: null,
-    browserPath: '',
-    browserParent: null,
     libraryDirectory: '',
     libraryAssets: [],
     culling: null,
     selectedAssets: new Set(),
+    rightPaneOpen: false,
     libraryPanes: {
-      left: {directory: '', assets: [], culling: null, selectedAssets: new Set()},
-      right: {directory: '', assets: [], culling: null, selectedAssets: new Set()},
+      left: {directory: '', assets: [], culling: null, selectedAssets: new Set(), parent: null, breadcrumbs: [], directories: []},
+      right: {directory: '', assets: [], culling: null, selectedAssets: new Set(), parent: null, breadcrumbs: [], directories: []},
     },
     activePaneId: 'left',
-    browserTargetPane: 'left',
     compareZoom: 1,
     comparePan: {x: 0, y: 0},
     googleDownloadSettingsOpen: false,
@@ -131,6 +129,7 @@
     if (state.desktop) {
       renderPhotoGrid();
       await refreshGoogleStatus();
+      await navigatePane('left', '').catch(showError);
     }
     renderJobs();
   }
@@ -325,8 +324,7 @@
     if (finished.status === 'failed') throw new Error(finished.error || 'Google Photos import failed.');
     const result = await api(`/api/local/scan?path=${encodeURIComponent(finished.directory)}`);
     applyLibraryScan(result, state.activePaneId);
-    el('photo-workspace').classList.remove('hidden');
-    el('folder-browser').classList.add('hidden');
+    await renderPaneBrowserForDirectory(state.activePaneId, finished.directory);
     const details = [
       `${finished.completed} added`,
       `${finished.duplicates} exact duplicate${finished.duplicates === 1 ? '' : 's'} skipped`,
@@ -370,51 +368,131 @@
     });
   }
 
-  async function browseDirectory(path = '') {
-    const result = await api(`/api/local/browse?path=${encodeURIComponent(path)}`);
-    state.browserPath = result.current;
-    state.browserParent = result.parent;
-    const breadcrumbs = el('folder-path');
-    breadcrumbs.replaceChildren();
+  async function renderPaneBrowserForDirectory(paneId, path) {
+    const browse = await api(`/api/local/browse?path=${encodeURIComponent(path || '')}`);
+    const pane = paneFor(paneId);
+    pane.parent = browse.parent;
+    pane.breadcrumbs = browse.breadcrumbs || [];
+    pane.directories = browse.directories || [];
+    renderPaneBrowser(paneId);
+  }
+  async function navigatePane(paneId, path = '') {
+    await renderPaneBrowserForDirectory(paneId, path);
+    const pane = paneFor(paneId);
+    if (path) {
+      const scan = await api(`/api/local/scan?path=${encodeURIComponent(path)}`);
+      applyLibraryScan(scan, paneId);
+      if (!scan.assets.length) {
+        toast('No supported photos in this folder. Subfolders are listed above.');
+      }
+    } else {
+      pane.directory = '';
+      pane.assets = [];
+      pane.culling = null;
+      pane.selectedAssets.clear();
+      setActivePane(paneId);
+      renderPhotoGrid();
+    }
+  }
+
+  function renderPaneBrowser(paneId) {
+    const pane = paneFor(paneId);
+    const crumbs = el(`${paneId}-folder-path`);
+    crumbs.replaceChildren();
     const computer = document.createElement('button');
     computer.type = 'button';
     computer.textContent = 'Computer';
-    computer.addEventListener('click', () => browseDirectory('').catch(showError));
-    breadcrumbs.appendChild(computer);
-    (result.breadcrumbs || []).forEach((crumb) => {
+    if (!pane.breadcrumbs.length) computer.disabled = true;
+    else computer.addEventListener('click', () => navigatePane(paneId, '').catch(showError));
+    crumbs.appendChild(computer);
+    pane.breadcrumbs.forEach((crumb, index) => {
       const separator = document.createElement('span');
       separator.textContent = '›';
       separator.setAttribute('aria-hidden', 'true');
-      breadcrumbs.appendChild(separator);
+      crumbs.appendChild(separator);
       const button = document.createElement('button');
       button.type = 'button';
       button.textContent = crumb.name;
       button.title = crumb.path;
-      button.addEventListener('click', () => browseDirectory(crumb.path).catch(showError));
-      breadcrumbs.appendChild(button);
+      if (index === pane.breadcrumbs.length - 1) button.disabled = true;
+      else button.addEventListener('click', () => navigatePane(paneId, crumb.path).catch(showError));
+      crumbs.appendChild(button);
     });
-    el('folder-up').disabled = result.parent === null && result.current === '';
-    el('use-folder').disabled = !result.current;
-    const list = el('folder-list');
+    el(`${paneId}-folder-up`).disabled = !pane.breadcrumbs.length;
+
+    const list = el(`${paneId}-folder-list`);
     list.replaceChildren();
-    result.directories.forEach((directory) => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'folder-row';
-      button.textContent = `📁 ${directory.name}`;
-      button.addEventListener('click', () => browseDirectory(directory.path).catch(showError));
-      list.appendChild(button);
+    const atRoots = !pane.breadcrumbs.length;
+    pane.directories.forEach((directory) => {
+      const row = document.createElement('div');
+      row.className = 'folder-row';
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'folder-row-name';
+      open.textContent = `📁 ${directory.name}`;
+      open.title = directory.path;
+      open.addEventListener('click', () => navigatePane(paneId, directory.path).catch(showError));
+      row.appendChild(open);
+      if (!atRoots) {
+        const renameButton = document.createElement('button');
+        renameButton.type = 'button';
+        renameButton.className = 'folder-row-action';
+        renameButton.textContent = 'Rename';
+        renameButton.setAttribute('aria-label', `Rename ${directory.name}`);
+        renameButton.addEventListener('click', () => renameFolderInPane(paneId, directory).catch(showError));
+        const deleteButton = document.createElement('button');
+        deleteButton.type = 'button';
+        deleteButton.className = 'folder-row-action danger';
+        deleteButton.textContent = 'Delete';
+        deleteButton.setAttribute('aria-label', `Delete ${directory.name}`);
+        deleteButton.addEventListener('click', () => deleteFolderInPane(paneId, directory).catch(showError));
+        row.append(renameButton, deleteButton);
+      }
+      list.appendChild(row);
     });
-    if (!result.directories.length) list.innerHTML = '<p class="panel-copy">No subfolders.</p>';
+    if (!pane.directories.length) {
+      const empty = document.createElement('p');
+      empty.className = 'empty-folders';
+      empty.textContent = atRoots ? 'No drives found.' : 'No subfolders here.';
+      list.appendChild(empty);
+    }
   }
 
-  async function scanLibraryFolder() {
-    if (!state.browserPath) return;
-    const result = await api(`/api/local/scan?path=${encodeURIComponent(state.browserPath)}`);
-    applyLibraryScan(result, state.browserTargetPane);
-    el('photo-workspace').classList.remove('hidden');
-    el('folder-browser').classList.add('hidden');
-    if (!result.assets.length) toast('No supported photos were found in that folder.');
+  async function createFolderInPane(paneId) {
+    const pane = paneFor(paneId);
+    if (!pane.directory) return;
+    const name = window.prompt('Name for the new folder:', '');
+    if (name === null) return;
+    await api('/api/local/mkdir', {
+      method: 'POST',
+      body: JSON.stringify({parent_path: pane.directory, name}),
+    });
+    toast(`Created folder “${name.trim()}”.`);
+    await navigatePane(paneId, pane.directory);
+  }
+
+  async function renameFolderInPane(paneId, directory) {
+    const name = window.prompt(`Rename “${directory.name}” to:`, directory.name);
+    if (name === null || name.trim() === directory.name) return;
+    const result = await api('/api/local/rename', {
+      method: 'POST',
+      body: JSON.stringify({path: directory.path, name}),
+    });
+    toast(`Renamed to “${result.name}”.`);
+    await navigatePane(paneId, paneFor(paneId).directory);
+  }
+
+  async function deleteFolderInPane(paneId, directory) {
+    if (!window.confirm(
+      `Move the folder “${directory.name}” to the Recycle Bin?\n\n` +
+      'The folder and everything inside it leaves this view. Nothing is permanently deleted; restore it from the Recycle Bin if needed.',
+    )) return;
+    await api('/api/local/delete', {
+      method: 'POST',
+      body: JSON.stringify({path: directory.path}),
+    });
+    toast(`“${directory.name}” moved to the Recycle Bin.`);
+    await navigatePane(paneId, paneFor(paneId).directory);
   }
 
   function folderLabel(path) {
@@ -438,20 +516,17 @@
     const rightPane = paneFor('right');
     const hasComparison = Boolean(rightPane.directory);
     el('library-split').classList.toggle('single-pane', !hasComparison);
-    el('library-pane-right').classList.toggle('hidden', !hasComparison);
+    el('library-pane-right').classList.toggle('hidden', !state.rightPaneOpen);
     el('library-split').querySelector('.split-move-actions').classList.toggle('hidden', !hasComparison);
-    el('browse-folders').classList.toggle('hidden', Boolean(leftPane.directory));
-    el('browse-folders-right').classList.toggle('hidden', !leftPane.directory);
-    el('browse-folders-right').textContent = hasComparison ? 'Change comparison' : 'Compare a folder';
+    el('browse-folders-right').classList.toggle('hidden', state.rightPaneOpen);
     ['left', 'right'].forEach((paneId) => {
       const pane = paneFor(paneId);
-      const name = pane.directory ? folderLabel(pane.directory) : 'Choose a folder';
+      const name = pane.breadcrumbs.length ? folderLabel(pane.directory || pane.breadcrumbs.at(-1).path) : 'Computer';
       el(`library-pane-${paneId}`).classList.toggle('active', paneId === state.activePaneId);
       el(`${paneId}-folder-name`).textContent = name;
-      const pathButton = el(`${paneId}-folder-path`);
-      pathButton.textContent = pane.directory || 'No folder open';
-      pathButton.title = pane.directory ? `Browse from ${pane.directory}` : '';
-      pathButton.disabled = !pane.directory;
+      const canManage = Boolean(pane.directory);
+      el(`${paneId}-reveal`).disabled = !canManage;
+      el(`${paneId}-new-folder`).disabled = !canManage;
       el(`photo-count-${paneId}`).textContent = paneSummary(pane);
       el(`selection-count-${paneId}`).textContent = `${pane.selectedAssets.size} selected`;
     });
@@ -461,14 +536,7 @@
     });
     el('photo-count').textContent = active.directory
       ? `${paneSummary(active)}${hasComparison ? ' · click either folder to make it active' : ''}`
-      : 'Open a folder to begin.';
-  }
-
-  async function openFolderBrowserForPane(paneId) {
-    state.browserTargetPane = paneId;
-    el('folder-browser').classList.remove('hidden');
-    await browseDirectory(paneFor(paneId).directory || '');
-    el('folder-browser').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+      : 'Navigate to a folder to begin.';
   }
 
   function setActivePane(paneId) {
@@ -479,7 +547,6 @@
     state.libraryAssets = pane.assets;
     state.culling = pane.culling;
     state.selectedAssets = pane.selectedAssets;
-    state.browserPath = pane.directory;
     renderPaneHeaders();
     renderCullFolders();
     renderGroupPicker();
@@ -496,15 +563,14 @@
     pane.assets = result.assets.filter((asset) => asset.jpeg_files.length > 0 || (asset.video_files || []).length > 0);
     pane.culling = result.culling || null;
     pane.selectedAssets.clear();
-    state.browserTargetPane = paneId;
     setActivePane(paneId);
     renderPhotoGrid();
   }
 
   async function openCullFolder(path) {
-    state.browserPath = path;
     const result = await api(`/api/local/scan?path=${encodeURIComponent(path)}`);
     applyLibraryScan(result, state.activePaneId);
+    await navigatePane(state.activePaneId, path);
   }
 
   function renderCullFolders() {
@@ -1108,19 +1174,31 @@
     }
   });
 
-  el('browse-folders').addEventListener('click', () => openFolderBrowserForPane('left').catch(showError));
-  el('browse-folders-right').addEventListener('click', () => openFolderBrowserForPane('right').catch(showError));
-  el('left-folder-path').addEventListener('click', () => openFolderBrowserForPane('left').catch(showError));
-  el('right-folder-path').addEventListener('click', () => openFolderBrowserForPane('right').catch(showError));
   ['left', 'right'].forEach((paneId) => {
     el(`library-pane-${paneId}`).addEventListener('click', (event) => {
       if (!event.target.closest('button')) setActivePane(paneId);
     });
+    el(`${paneId}-folder-up`).addEventListener('click', () => navigatePane(paneId, paneFor(paneId).parent || '').catch(showError));
+    el(`${paneId}-reveal`).addEventListener('click', async () => {
+      const path = paneFor(paneId).directory;
+      if (!path) return;
+      try {
+        await api('/api/local/reveal', {method: 'POST', body: JSON.stringify({path})});
+      } catch (error) {
+        showError(error);
+      }
+    });
+    el(`${paneId}-new-folder`).addEventListener('click', () => createFolderInPane(paneId).catch(showError));
   });
 
-  el('folder-up').addEventListener('click', () => browseDirectory(state.browserParent || '').catch(showError));
-  el('close-folder-browser').addEventListener('click', () => el('folder-browser').classList.add('hidden'));
-  el('use-folder').addEventListener('click', () => scanLibraryFolder().catch(showError));
+  el('browse-folders-right').addEventListener('click', () => {
+    state.rightPaneOpen = true;
+    setActivePane('right');
+    renderPaneHeaders();
+    if (!paneFor('right').breadcrumbs.length) {
+      navigatePane('right', '').catch(showError);
+    }
+  });
   el('move-selected-left').addEventListener('click', () => moveSelectedAssetsBetweenDirectories('left', 'right'));
   el('move-selected-right').addEventListener('click', () => moveSelectedAssetsBetweenDirectories('right', 'left'));
   el('mark-unselect').addEventListener('click', () => moveSelectedAssets('unselect'));

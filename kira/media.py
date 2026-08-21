@@ -248,6 +248,91 @@ def safe_group_name(value: str) -> str:
     return cleaned
 
 
+def clean_folder_name(value: str) -> str:
+    name = INVALID_FILENAME.sub("_", str(value).strip()).rstrip(" .")
+    if not name or name in {".", ".."}:
+        raise KiraError(HTTPStatus.BAD_REQUEST, "Enter a folder name")
+    reserved = {"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)}
+    if name.split(".")[0].casefold() in reserved:
+        raise KiraError(HTTPStatus.BAD_REQUEST, f"{name} is a reserved Windows device name")
+    if len(name) > 120:
+        raise KiraError(HTTPStatus.BAD_REQUEST, "Folder names are limited to 120 characters")
+    return name
+
+
+def _guard_managed_directory(path_value: str) -> Path:
+    current = resolve_directory(path_value)
+    if current.parent == current:
+        raise KiraError(HTTPStatus.BAD_REQUEST, "Drives cannot be renamed or deleted")
+    return current
+
+
+def create_directory(parent_value: str, name: str) -> dict:
+    parent = resolve_directory(parent_value)
+    target = parent / clean_folder_name(name)
+    try:
+        target.mkdir(parents=False, exist_ok=False)
+    except FileExistsError as exc:
+        raise KiraError(HTTPStatus.CONFLICT, f"{target.name} already exists") from exc
+    except PermissionError as exc:
+        raise KiraError(HTTPStatus.FORBIDDEN, "Windows denied access to this folder") from exc
+    return {"name": target.name, "path": str(target)}
+
+
+def rename_directory(path_value: str, new_name: str) -> dict:
+    current = _guard_managed_directory(path_value)
+    target = current.parent / clean_folder_name(new_name)
+    if target == current:
+        return {"name": target.name, "path": str(target)}
+    if target.exists():
+        raise KiraError(HTTPStatus.CONFLICT, f"{target.name} already exists")
+    try:
+        current.rename(target)
+    except OSError as exc:
+        raise KiraError(HTTPStatus.INTERNAL_SERVER_ERROR, f"Could not rename folder: {exc}") from exc
+    return {"name": target.name, "path": str(target)}
+
+
+def delete_directory_to_recycle_bin(path_value: str) -> dict:
+    """Move a folder to the Windows Recycle Bin; never permanently delete."""
+    current = _guard_managed_directory(path_value)
+    if os.name != "nt":
+        raise KiraError(HTTPStatus.BAD_REQUEST, "Recycle Bin deletion requires Windows")
+    try:
+        import subprocess
+
+        escaped = str(current).replace("'", "''")
+        script = (
+            "Add-Type -AssemblyName Microsoft.VisualBasic; "
+            "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory("
+            f"'{escaped}', 'OnlyErrorDialogs', 'SendToRecycleBin')"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise KiraError(HTTPStatus.INTERNAL_SERVER_ERROR, "Deleting the folder timed out") from exc
+    except OSError as exc:
+        raise KiraError(HTTPStatus.INTERNAL_SERVER_ERROR, f"Could not start the Recycle Bin deletion: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        message = detail[-1] if detail else "Windows refused to delete this folder"
+        raise KiraError(HTTPStatus.INTERNAL_SERVER_ERROR, message[-300:])
+    if current.exists():
+        raise KiraError(HTTPStatus.INTERNAL_SERVER_ERROR, "The folder is still present after deletion")
+    return {"deleted": True, "path": str(current)}
+
+
+def reveal_directory(path_value: str) -> None:
+    current = resolve_directory(path_value)
+    if os.name != "nt":
+        raise KiraError(HTTPStatus.BAD_REQUEST, "Opening File Explorer requires Windows")
+    os.startfile(str(current))  # noqa: S606 - user-requested Explorer reveal
+
+
 def choose_assets(source_directory: str, asset_ids: list[str], context_message: str) -> tuple[Path, list[dict]]:
     """Resolve a directory and the assets matching the given ids, or fail."""
     current = resolve_directory(source_directory)

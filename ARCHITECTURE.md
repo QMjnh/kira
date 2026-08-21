@@ -75,3 +75,4 @@ This controls access; it is not transport encryption. Kira serves plain HTTP on 
 - Source folders are reorganized only when **Finish & organize** is explicitly requested; the operation is idempotent once complete.
 - Culling moves are reversible and never overwrite silently.
 - Cross-folder moves reject destination-name collisions without partial moves.
+- Folder management (`/api/local/mkdir`, `/rename`, `/delete`, `/reveal`) is laptop-only. Delete always sends folders to the Windows Recycle Bin — there is no permanent-delete path anywhere in Kira.

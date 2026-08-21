@@ -200,16 +200,23 @@ progress::-webkit-progress-bar { background: var(--surface-soft); }
 progress::-webkit-progress-value { background: var(--success); }
 progress::-moz-progress-bar { background: var(--success); }
 .toast { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: var(--ink); color: white; border-radius: 12px; padding: 11px 16px; box-shadow: var(--shadow); z-index: 20; max-width: calc(100% - 32px); }
-.folder-browser { order: 3; margin: 0 0 12px; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: #fafcfb; }
-.folder-browser-bar { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; }
+.pane-nav-bar { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; margin-top: 10px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 10px; background: white; }
 .folder-breadcrumbs { min-width: 0; display: flex; align-items: center; gap: 4px; overflow-x: auto; white-space: nowrap; scrollbar-width: thin; padding: 3px 0; }
 .folder-breadcrumbs button { border: 0; background: transparent; color: var(--forest); padding: 5px 3px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; }
-.folder-breadcrumbs button:hover { background: var(--surface-soft); }
+.folder-breadcrumbs button:hover:not(:disabled) { background: var(--surface-soft); }
+.folder-breadcrumbs button:disabled { color: var(--ink); cursor: default; }
 .folder-breadcrumbs span { color: var(--muted); font-size: 12px; }
-.folder-list { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-top: 12px; max-height: 260px; overflow: auto; }
-.folder-row { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); text-align: left; padding: 10px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; max-height: 220px; overflow: auto; }
+.folder-list.inline { margin: 10px 0 0; }
+.folder-list.inline:empty { display: none; }
+.folder-row { display: flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); padding: 4px 6px 4px 4px; }
 .folder-row:hover { background: var(--surface-soft); }
-.folder-browser-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.folder-row-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; background: transparent; border: 0; color: inherit; font: inherit; font-size: 13px; padding: 7px 4px; cursor: pointer; }
+.folder-row-action { flex: 0 0 auto; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 11px; font-weight: 650; padding: 6px 5px; border-radius: 7px; cursor: pointer; opacity: 0; transition: opacity .12s ease-in-out; }
+.folder-row:hover .folder-row-action, .folder-row:focus-within .folder-row-action { opacity: 1; }
+.folder-row-action:hover { background: var(--surface); color: var(--forest); }
+.folder-row-action.danger:hover { color: #a33d2e; }
+.empty-folders { grid-column: 1 / -1; margin: 2px 0 0; color: var(--muted); font-size: 12px; }
 .photo-workspace { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 16px; display: flex; flex-direction: column; }
 .library-split { order: 4; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 12px; align-items: stretch; }
 .library-split.single-pane { grid-template-columns: minmax(0, 1fr); }
@@ -219,9 +226,6 @@ progress::-moz-progress-bar { background: var(--success); }
 .library-pane-title { min-width: 0; }
 .library-pane-actions { display: flex; flex: 0 0 auto; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
 .library-pane-header h3 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 0 0 3px; }
-.folder-path-link { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 0; padding: 0; border: 0; background: transparent; color: var(--success); cursor: pointer; font: inherit; font-size: 11px; text-align: left; text-decoration: underline; text-decoration-color: rgba(44, 119, 77, .35); text-underline-offset: 3px; }
-.folder-path-link:hover { color: var(--forest); text-decoration-color: currentColor; }
-.folder-path-link:disabled { color: var(--muted); cursor: default; text-decoration: none; }
 .pane-photo-toolbar { display: flex; justify-content: space-between; gap: 8px; margin: 12px 0 8px; color: var(--muted); font-size: 11px; }
 .pane-photo-toolbar > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .library-pane .photo-grid { --photo-row-height: 150px; --photo-grid-height: 940px; grid-template-columns: repeat(3, minmax(0, 1fr)); padding-right: 2px; }
@@ -326,7 +330,7 @@ progress::-moz-progress-bar { background: var(--success); }
   .library-split { grid-template-columns: 1fr; }
   .split-move-actions { flex-direction: row; justify-content: flex-start; }
   .photo-grid { --photo-row-height: 145px; --photo-grid-height: 910px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .folder-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .folder-list { grid-template-columns: 1fr; }
   .cull-actions { align-items: stretch; flex-direction: column; }
   .cull-action-buttons, .group-action { width: 100%; }
   .selection-job-form { grid-template-columns: 1fr; }
@@ -355,10 +359,8 @@ progress::-moz-progress-bar { background: var(--success); }
   .job-header .primary-button { width: 100%; }
   .job-header-actions { flex-direction: column; }
   .job-pairing { flex-direction: column; }
-  .folder-browser-bar { grid-template-columns: auto 1fr; }
-  .folder-browser-footer { flex-direction: column-reverse; }
-  .folder-browser-footer button { width: 100%; }
   .photo-toolbar { align-items: flex-start; flex-direction: column; }
+  .pane-nav-bar { grid-template-columns: auto minmax(0, 1fr); }
   .library-pane-header { align-items: stretch; flex-direction: column; }
   .library-pane-actions { justify-content: flex-start; }
   .library-pane .photo-grid, .library-split.single-pane .library-pane .photo-grid { --photo-row-height: 116px; --photo-grid-height: 736px; grid-template-columns: repeat(2, minmax(0, 1fr)); }

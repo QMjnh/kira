@@ -22,8 +22,12 @@ from .google_photos import GooglePhotosError, GooglePhotosService
 from .media import (
     PREVIEW_EXTENSIONS,
     browse_directories,
+    create_directory,
+    delete_directory_to_recycle_bin,
     move_assets_between_directories,
     move_culling_assets,
+    rename_directory,
+    reveal_directory,
     safe_download_name,
     scan_photo_directory,
 )
@@ -53,6 +57,10 @@ AUTHED_ROUTES: list[tuple[tuple[str, ...], tuple[str, ...], str, bool]] = [
     (("api", "local", "cull"), ("POST",), "_h_local_cull", True),
     (("api", "local", "move"), ("POST",), "_h_local_move", True),
     (("api", "local", "preview"), ("GET", "HEAD"), "_h_local_preview", True),
+    (("api", "local", "mkdir"), ("POST",), "_h_local_mkdir", True),
+    (("api", "local", "rename"), ("POST",), "_h_local_rename", True),
+    (("api", "local", "delete"), ("POST",), "_h_local_delete", True),
+    (("api", "local", "reveal"), ("POST",), "_h_local_reveal", True),
     (("api", "jobs", "from-selection"), ("POST",), "_h_job_from_selection", True),
     (("api", "jobs"), ("GET",), "_h_jobs_list", False),
     (("api", "jobs"), ("POST",), "_h_jobs_create", False),
@@ -410,6 +418,23 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
             disposition="inline",
             cache_control="private, max-age=3600",
         )
+
+    def _h_local_mkdir(self, params: dict, query: dict) -> None:
+        body = self._read_json()
+        self._send_json(create_directory(str(body.get("parent_path", "")), str(body.get("name", ""))), status=201)
+
+    def _h_local_rename(self, params: dict, query: dict) -> None:
+        body = self._read_json()
+        self._send_json(rename_directory(str(body.get("path", "")), str(body.get("name", ""))))
+
+    def _h_local_delete(self, params: dict, query: dict) -> None:
+        body = self._read_json()
+        self._send_json(delete_directory_to_recycle_bin(str(body.get("path", ""))))
+
+    def _h_local_reveal(self, params: dict, query: dict) -> None:
+        body = self._read_json()
+        reveal_directory(str(body.get("path", "")))
+        self._send_json({"revealed": True})
 
     # -- Job handlers -------------------------------------------------------------
 
