@@ -18,6 +18,7 @@ import qrcode.image.svg
 
 from . import APP_NAME, APP_VERSION
 from .errors import KiraError
+from .google_photos import GooglePhotosError, GooglePhotosService
 from .media import (
     PREVIEW_EXTENSIONS,
     browse_directories,
@@ -27,7 +28,6 @@ from .media import (
     scan_photo_directory,
 )
 from .store import KiraStore
-from google_photos import GooglePhotosError, GooglePhotosService
 
 MAX_JSON_BODY = 1024 * 1024
 CHUNK_COPY_SIZE = 4 * 1024 * 1024

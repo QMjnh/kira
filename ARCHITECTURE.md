@@ -22,14 +22,14 @@ python -m unittest discover -s tests -v
 
 | Path | Responsibility |
 | --- | --- |
-| `server.py` | Entry-point shim: runs `kira.main.main()`, re-exports public names. |
+| `server.py` | Entry-point shim: runs `kira.main.main()`, re-exports public names. The only Python file outside `kira/`. |
 | `kira/main.py` | CLI arguments and server startup. |
 | `kira/api.py` | HTTP layer: declarative route table, auth, request handlers, file serving with range support. |
 | `kira/store.py` | Job manifests, resumable uploads, transfer bundles, source-folder organization, thumbnail cache. |
 | `kira/media.py` | Folder scanning, photo grouping, culling moves, media identity (pixel or byte hashing). |
+| `kira/google_photos.py` | Google Picker/Library OAuth client: imports, uploads, operations, folder matching. |
+| `kira/google_photos_web.py` | Album/Archive automation through the vendored `gpwc` web client. |
 | `kira/errors.py` | Shared `KiraError` type. |
-| `google_photos.py` | Google Picker/Library OAuth client: imports, uploads, operations, folder matching. |
-| `google_photos_web.py` | Album/Archive automation through the vendored `gpwc` web client. |
 | `web/` | Static browser UI served by the Python server. |
 | `vendor/` | Bundled dependencies used when Kira starts. |
 | `tests/` | Unit and workflow tests over a real loopback HTTP server. |
@@ -63,9 +63,9 @@ This controls access; it is not transport encryption. Kira serves plain HTTP on 
 
 ## Google Photos modules
 
-`google_photos.py` owns OAuth (DPAPI-encrypted tokens beside the data dir), picker sessions, background import/upload operations persisted as JSON records, and content-hash matching back to web media keys (SHA-1 remote match first, then visual-signature matching for re-encoded photos).
+`kira/google_photos.py` owns OAuth (DPAPI-encrypted tokens beside the data dir), picker sessions, background import/upload operations persisted as JSON records, and content-hash matching back to web media keys (SHA-1 remote match first, then visual-signature matching for re-encoded photos).
 
-`google_photos_web.py` wraps `gpwc` for album assignment and Archive only. Cookie sessions are imported explicitly, normalized to Netscape format, DPAPI-encrypted at rest, decrypted into a temporary cookie file per client session, and deleted after each use.
+`kira/google_photos_web.py` wraps `gpwc` for album assignment and Archive only. Cookie sessions are imported explicitly, normalized to Netscape format, DPAPI-encrypted at rest, decrypted into a temporary cookie file per client session, and deleted after each use.
 
 ## API behavior worth preserving
 

@@ -137,7 +137,7 @@ class GooglePhotosService:
     """Small server-side Google Photos client for Kira's local desktop workflow."""
 
     def __init__(self, data_root: Path, app_root: Path | None = None) -> None:
-        from google_photos_web import GooglePhotosWebService
+        from .google_photos_web import GooglePhotosWebService
 
         self.root = data_root.resolve()
         self.app_root = (app_root or Path(__file__).resolve().parent).resolve()

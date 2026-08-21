@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from PIL import Image
 
-from google_photos_web import GooglePhotosWebError, GooglePhotosWebService
+from kira.google_photos_web import GooglePhotosWebError, GooglePhotosWebService
 
 
 class FakePayload:

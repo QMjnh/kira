@@ -13,7 +13,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Iterator
 
-from google_photos import GooglePhotosError, _name_key, _windows_protect, _windows_unprotect
+from .google_photos import GooglePhotosError, _name_key, _windows_protect, _windows_unprotect
 
 try:
     from PIL import Image, ImageOps
