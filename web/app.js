@@ -514,10 +514,9 @@
   function renderPaneHeaders() {
     const leftPane = paneFor('left');
     const rightPane = paneFor('right');
-    const hasComparison = Boolean(rightPane.directory);
-    el('library-split').classList.toggle('single-pane', !hasComparison);
+    el('library-split').classList.toggle('single-pane', !state.rightPaneOpen);
     el('library-pane-right').classList.toggle('hidden', !state.rightPaneOpen);
-    el('library-split').querySelector('.split-move-actions').classList.toggle('hidden', !hasComparison);
+    el('library-split').querySelector('.split-move-actions').classList.toggle('hidden', !state.rightPaneOpen);
     el('browse-folders-right').classList.toggle('hidden', state.rightPaneOpen);
     ['left', 'right'].forEach((paneId) => {
       const pane = paneFor(paneId);
@@ -535,7 +534,7 @@
       node.classList.toggle('hidden', !active.directory);
     });
     el('photo-count').textContent = active.directory
-      ? `${paneSummary(active)}${hasComparison ? ' · click either folder to make it active' : ''}`
+      ? `${paneSummary(active)}${state.rightPaneOpen ? ' · click either folder to make it active' : ''}`
       : 'Navigate to a folder to begin.';
   }
 
@@ -770,7 +769,8 @@
     const sourcePane = paneFor(sourcePaneId);
     const destinationPane = paneFor(destinationPaneId);
     if (!sourcePane.directory || !destinationPane.directory || !sourcePane.selectedAssets.size) return;
-    if (!window.confirm(`Move the selected photo groups from the ${sourcePaneId} folder to the ${destinationPaneId} folder?`)) return;
+    const paneNames = {left: 'origin folder', right: 'comparison folder'};
+    if (!window.confirm(`Move the selected photo groups from the ${paneNames[sourcePaneId]} to the ${paneNames[destinationPaneId]}?`)) return;
     const button = sourcePaneId === 'left' ? el('move-selected-left') : el('move-selected-right');
     button.disabled = true;
     try {
@@ -786,7 +786,7 @@
       applyLibraryScan(result.destination, destinationPaneId);
       setActivePane(sourcePaneId);
       updateSelectionUi();
-      toast(`${result.moved_assets} photo group${result.moved_assets === 1 ? '' : 's'} moved from ${sourcePaneId} to ${destinationPaneId}.`);
+      toast(`${result.moved_assets} photo group${result.moved_assets === 1 ? '' : 's'} moved to the ${paneNames[destinationPaneId]}.`);
     } catch (error) {
       toast(error.message);
       updateSelectionUi();
@@ -1192,12 +1192,14 @@
   });
 
   el('browse-folders-right').addEventListener('click', () => {
+    const pane = paneFor('right');
     state.rightPaneOpen = true;
     setActivePane('right');
     renderPaneHeaders();
-    if (!paneFor('right').breadcrumbs.length) {
-      navigatePane('right', '').catch(showError);
-    }
+    // Render the navigator shell immediately so the pane is never a dead end,
+    // then fill in the real drive/folder listing.
+    renderPaneBrowser('right');
+    navigatePane('right', pane.directory || '').catch(showError);
   });
   el('move-selected-left').addEventListener('click', () => moveSelectedAssetsBetweenDirectories('left', 'right'));
   el('move-selected-right').addEventListener('click', () => moveSelectedAssetsBetweenDirectories('right', 'left'));
