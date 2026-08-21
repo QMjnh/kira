@@ -126,18 +126,11 @@ def _sha256_file(path: Path) -> str:
 
 def _google_remote_hash(path: Path) -> str:
     """Return the content hash format used by Google Photos' remote-match endpoint."""
-    return _local_content_hashes(path)[1]
-
-
-def _local_content_hashes(path: Path) -> tuple[str, str]:
-    """Return Kira's persistent SHA-256 and Google Photos' remote-match SHA-1."""
-    local_digest = hashlib.sha256()
     digest = hashlib.sha1()
     with path.open("rb") as source:
         while chunk := source.read(4 * 1024 * 1024):
-            local_digest.update(chunk)
             digest.update(chunk)
-    return local_digest.hexdigest(), base64.b64encode(digest.digest()).decode("ascii")
+    return base64.b64encode(digest.digest()).decode("ascii")
 
 
 class GooglePhotosService:
@@ -157,7 +150,7 @@ class GooglePhotosService:
         self.lock = threading.RLock()
         self.oauth_states: dict[str, dict] = {}
         self.operations: dict[str, dict] = {}
-        self.web = GooglePhotosWebService(self.root, cookie_export_root=self.app_root)
+        self.web = GooglePhotosWebService(self.root)
 
     def _client(self) -> dict:
         client_id = os.environ.get("KIRA_GOOGLE_CLIENT_ID", "").strip()
@@ -588,7 +581,7 @@ class GooglePhotosService:
             raise GooglePhotosError("Google returned an invalid media item")
         path = folder / f".{index:05d}-{uuid.uuid4().hex}.kira-download"
         parameter = "dv" if media_type == "VIDEO" else "d"
-        size, digest = self._download_file(f"{base_url}={parameter}", token, path)
+        size, digest, remote_hash = self._download_file(f"{base_url}={parameter}", token, path)
         return {
             "item": item,
             "filename": filename,
@@ -599,8 +592,7 @@ class GooglePhotosService:
             # Picker IDs are scoped to the Picker API and cannot be used by the
             # Google Photos web client.  Preserve Google's content-hash format
             # so the corresponding web media key can be resolved after import.
-            "google_content_hash": _google_remote_hash(path),
-            "archive_name": f"{index:05d}/{filename}",
+            "google_content_hash": remote_hash,
         }
 
     def _integrate_download(
@@ -684,9 +676,8 @@ class GooglePhotosService:
             and item.get("media_type") == "photo"
             and str(item.get("local_path", "")).strip()
         ]
-        visual_matcher = getattr(self.web, "find_visual_matches", None)
-        if unresolved_photos and callable(visual_matcher):
-            visual_matches, _visual_errors = visual_matcher(unresolved_photos)
+        if unresolved_photos:
+            visual_matches, _visual_errors = self.web.find_visual_matches(unresolved_photos)
             visually_matched_paths = {
                 str(path)
                 for match in visual_matches
@@ -765,17 +756,9 @@ class GooglePhotosService:
                                     False,
                                 )
 
-                if zip_mode and downloads:
-                    archive_path = temporary_root / "google-photos.zip"
-                    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
-                        for download in downloads:
-                            archive.write(download["path"], download["archive_name"])
-                    extracted = temporary_root / "extracted"
-                    with zipfile.ZipFile(archive_path) as archive:
-                        archive.extractall(extracted)
-                    for download in downloads:
-                        download["path"] = extracted / download["archive_name"]
-
+                # "ZIP mode" is a reporting label only: Google's Picker API
+                # always supplies items individually, so every item is
+                # downloaded directly into the staging folder.
                 for download in downloads:
                     self._integrate_download(operation_id, download, target, existing)
 
@@ -827,21 +810,24 @@ class GooglePhotosService:
             self._log_operation_error(operation_id, exc)
             self._update_operation(operation_id, status="failed", error=str(exc))
 
-    def _download_file(self, url: str, token: str, destination: Path) -> tuple[int, str]:
+    def _download_file(self, url: str, token: str, destination: Path) -> tuple[int, str, str]:
+        """Download to *destination*, returning (size, sha256, google remote hash)."""
         request = Request(url, headers={"Authorization": f"Bearer {token}"})
         part = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.part")
         digest = hashlib.sha256()
+        remote_digest = hashlib.sha1()
         size = 0
         try:
             with urlopen(request, timeout=120) as response, part.open("wb") as output:
                 while chunk := response.read(4 * 1024 * 1024):
                     output.write(chunk)
                     digest.update(chunk)
+                    remote_digest.update(chunk)
                     size += len(chunk)
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(part, destination)
-            return size, digest.hexdigest()
+            return size, digest.hexdigest(), base64.b64encode(remote_digest.digest()).decode("ascii")
         except (HTTPError, URLError, OSError) as exc:
             raise GooglePhotosError(f"Download failed: {exc}") from exc
         finally:
@@ -925,7 +911,7 @@ class GooglePhotosService:
                 try:
                     if not path.is_file():
                         raise GooglePhotosError("Local file is missing")
-                    _local_sha256, content_hash = _local_content_hashes(path)
+                    content_hash = _google_remote_hash(path)
                     paths_by_hash.setdefault(content_hash, []).append(path)
                 except Exception as exc:
                     self._log_operation_error(operation_id, exc, path.name)

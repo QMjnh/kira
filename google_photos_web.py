@@ -29,7 +29,6 @@ class GooglePhotosWebError(GooglePhotosError):
 class GooglePhotosWebService:
     """Focused adapter for album assignment and Archive through Google Photos' web client."""
 
-    COOKIE_EXPORT_PATTERN = "photos.google.com_*.json"
     MAX_COOKIE_BYTES = 5 * 1024 * 1024
     MAX_MEDIA_ITEMS = 500
     MAX_HASHES = 5000
@@ -46,11 +45,9 @@ class GooglePhotosWebService:
         data_root: Path,
         client_factory: object | None = None,
         payloads_module: object | None = None,
-        cookie_export_root: Path | None = None,
     ) -> None:
         self.root = data_root.resolve()
         self.session_path = self.root / "google-web-session.json"
-        self.cookie_export_root = (cookie_export_root or self.root).resolve()
         self._client_factory = client_factory
         self._payloads_module = payloads_module
 
@@ -86,7 +83,7 @@ class GooglePhotosWebService:
             raise
         except OSError as exc:
             raise GooglePhotosWebError(f"Could not read cookie file: {exc}") from exc
-        normalized, source_format = self._normalize_cookie_export(raw)
+        normalized = self._normalize_cookie_export(raw)
         if b"google.com" not in normalized.lower():
             raise GooglePhotosWebError("Cookie file does not contain a Google browser session")
 
@@ -112,18 +109,16 @@ class GooglePhotosWebService:
             "encrypted": os.name == "nt",
             "account": account or None,
             "account_index": account_index,
-            "source_format": source_format,
-            "source_mtime_ns": source.stat().st_mtime_ns,
             "data": base64.b64encode(protected).decode("ascii"),
         }
         self._write_session(wrapper)
         return self.status()
 
     @staticmethod
-    def _normalize_cookie_export(raw: bytes) -> tuple[bytes, str]:
+    def _normalize_cookie_export(raw: bytes) -> bytes:
         stripped = raw.lstrip()
         if not stripped.startswith((b"{", b"[")):
-            return raw, "netscape"
+            return raw
 
         try:
             parsed = json.loads(raw.decode("utf-8-sig"))
@@ -167,7 +162,7 @@ class GooglePhotosWebService:
             google_entries += 1
         if not google_entries:
             raise GooglePhotosWebError("Cookie JSON export contains no Google cookies")
-        return ("\n".join(lines) + "\n").encode("utf-8"), "json"
+        return ("\n".join(lines) + "\n").encode("utf-8")
 
     def disconnect(self) -> dict:
         self.session_path.unlink(missing_ok=True)
@@ -201,7 +196,6 @@ class GooglePhotosWebService:
                         matches[(content_hash, media_key)] = {
                             "content_hash": content_hash,
                             "media_key": media_key,
-                            "dedup_key": dedup_key,
                         }
         return list(matches.values())
 
@@ -407,7 +401,6 @@ class GooglePhotosWebService:
                 return
         matches[remote["media_key"]] = {
             "media_key": remote["media_key"],
-            "dedup_key": remote["dedup_key"],
             "local_files": list(best["paths"]),
             "visual_color_distance": round(color_distance, 3),
             "visual_hash_distance": hash_distance,
@@ -637,7 +630,6 @@ class GooglePhotosWebService:
             return {
                 "account": wrapper.get("account"),
                 "account_index": int(wrapper.get("account_index", 0)),
-                "source_mtime_ns": int(wrapper.get("source_mtime_ns", 0)),
             }
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return {}
@@ -693,7 +685,6 @@ class GooglePhotosWebService:
 
     @contextmanager
     def _client(self) -> Iterator[tuple[object, object]]:
-        self._import_newest_cookie_export()
         raw, account_index = self._load_session()
         client_factory, payloads = self._dependency()
         with self._temporary_cookie_file(raw) as cookies_path:
@@ -711,24 +702,6 @@ class GooglePhotosWebService:
                 raise GooglePhotosWebError(f"Google Photos web session failed: {exc}") from exc
             finally:
                 self._close_client(client)
-
-    def _import_newest_cookie_export(self) -> None:
-        exports = [
-            path
-            for path in self.cookie_export_root.glob(self.COOKIE_EXPORT_PATTERN)
-            if path.is_file()
-        ]
-        if not exports:
-            return
-        newest = max(exports, key=lambda path: (path.stat().st_mtime_ns, path.name))
-        metadata = self._session_metadata()
-        stored_mtime = int(metadata.get("source_mtime_ns", 0))
-        if not stored_mtime and self.session_path.exists():
-            stored_mtime = self.session_path.stat().st_mtime_ns
-        if newest.stat().st_mtime_ns <= stored_mtime:
-            return
-        print(f"[Google Photos] importing newest cookie export: {newest.name}", flush=True)
-        self.import_session(newest, int(metadata.get("account_index", 0)))
 
     @staticmethod
     def _close_client(client: object | None) -> None:
@@ -776,10 +749,7 @@ class GooglePhotosWebService:
                 dedup_key = str(getattr(data, "dedup_key", "") or "")
                 if not dedup_key:
                     raise GooglePhotosWebError(f"Google media ID is unavailable: {key}")
-                result[key] = {
-                    "dedup_key": dedup_key,
-                    "is_archived": bool(getattr(data, "is_archived", False)),
-                }
+                result[key] = {"dedup_key": dedup_key}
         return result
 
     def _verify_album(

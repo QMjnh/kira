@@ -14,6 +14,15 @@ from urllib.parse import parse_qs, urlparse
 from google_photos import GooglePhotosService, PICKER_SCOPE, UPLOAD_SCOPE, _google_remote_hash
 
 
+def _download_result(content: bytes) -> tuple[int, str, str]:
+    """Mirror GooglePhotosService._download_file's (size, sha256, google-hash)."""
+    return (
+        len(content),
+        hashlib.sha256(content).hexdigest(),
+        base64.b64encode(hashlib.sha1(content).digest()).decode("ascii"),
+    )
+
+
 class GooglePhotosServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -79,7 +88,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
             urls.append(url)
             content = f"download-{len(urls)}".encode("utf-8")
             destination.write_bytes(content)
-            return len(content), hashlib.sha256(content).hexdigest()
+            return _download_result(content)
 
         service._download_file = download
         service._request_json = lambda *_args, **_kwargs: {}
@@ -110,7 +119,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
         def download(_url, _token, destination):
             content = b"same-image-bytes"
             destination.write_bytes(content)
-            return len(content), hashlib.sha256(content).hexdigest()
+            return _download_result(content)
 
         service._download_file = download
         service._request_json = lambda *_args, **_kwargs: {}
@@ -142,7 +151,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
         def download(url, _token, destination):
             content = f"bytes:{url}".encode("utf-8")
             destination.write_bytes(content)
-            return len(content), hashlib.sha256(content).hexdigest()
+            return _download_result(content)
 
         service._download_file = download
         service._request_json = lambda *_args, **_kwargs: {}
@@ -177,7 +186,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
 
         def download(_url, _token, destination):
             destination.write_bytes(b"one")
-            return 3, hashlib.sha256(b"one").hexdigest()
+            return _download_result(b"one")
 
         service._download_file = download
         service._request_json = lambda *_args, **_kwargs: {}
@@ -208,7 +217,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
 
         def download(_url, _token, destination):
             destination.write_bytes(content)
-            return len(content), hashlib.sha256(content).hexdigest()
+            return _download_result(content)
 
         requested_hashes = []
         organized_keys = []
@@ -272,7 +281,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
 
         def download(_url, _token, destination):
             destination.write_bytes(content)
-            return len(content), hashlib.sha256(content).hexdigest()
+            return _download_result(content)
 
         organized_keys = []
         service._download_file = download
@@ -326,7 +335,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
             name = url.removeprefix("https://").removesuffix("=d")
             content = contents[name]
             destination.write_bytes(content)
-            return len(content), hashlib.sha256(content).hexdigest()
+            return _download_result(content)
 
         first_hash = base64.b64encode(hashlib.sha1(contents["one.jpg"]).digest()).decode("ascii")
         organize_calls = []

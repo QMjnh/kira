@@ -241,7 +241,6 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         self.assertNotIn("excluded-secret", temporary_cookie_text)
         stored = self.service.session_path.read_text(encoding="utf-8")
         self.assertNotIn("json-secret-session", stored)
-        self.assertEqual(json.loads(stored)["source_format"], "json")
         self.assertEqual(list(self.root.glob(".kira-google-web-*.txt")), [])
 
     def test_list_albums_uses_encrypted_session(self) -> None:
@@ -249,41 +248,6 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         albums = self.service.list_albums()
 
         self.assertEqual(albums, [{"media_key": "album-1", "title": "Trips", "item_count": 4, "shared": False}])
-
-    def test_web_calls_automatically_import_newest_cookie_json(self) -> None:
-        app_root = self.root / "app"
-        data_root = self.root / "data"
-        app_root.mkdir()
-        data_root.mkdir()
-        service = GooglePhotosWebService(
-            data_root,
-            FakeClient,
-            FakePayloads,
-            cookie_export_root=app_root,
-        )
-        export = app_root / "photos.google.com_16-08-2026.json"
-        export.write_text(
-            json.dumps(
-                {
-                    "cookies": [
-                        {
-                            "domain": ".google.com",
-                            "name": "SID",
-                            "path": "/",
-                            "secure": True,
-                            "value": "newest-session",
-                        }
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        albums = service.list_albums()
-
-        self.assertEqual(albums[0]["media_key"], "album-1")
-        self.assertTrue(service.session_path.exists())
-        self.assertIn("newest-session", FakeClient.instances[-1].cookies)
 
     def test_remote_hash_matching_is_content_based_and_batched(self) -> None:
         self.service.import_session(self.cookies)
