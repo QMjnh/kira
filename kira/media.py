@@ -14,6 +14,7 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 from .errors import KiraError
+from .visual import cluster_signatures, compute_signatures
 
 CHUNK_COPY_SIZE = 4 * 1024 * 1024
 INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -34,6 +35,11 @@ VIDEO_EXTENSIONS = {
     ".mkv", ".mmv", ".mod", ".mov", ".mp4", ".mpg", ".mts", ".tod", ".wmv",
 }
 MEDIA_EXTENSIONS = PHOTO_EXTENSIONS | VIDEO_EXTENSIONS
+
+DEFAULT_COMPARE_MIN_SIZE = 3
+MIN_COMPARE_MIN_SIZE = 2
+MAX_COMPARE_MIN_SIZE = 50
+MAX_COMPARE_PHOTOS = 1200
 
 
 def utc_now() -> str:
@@ -586,3 +592,118 @@ def scan_photo_directory(value: str) -> dict:
         )
     assets.sort(key=lambda asset: natural_key(asset["stem"]))
     return {"directory": str(current), "assets": assets, "culling": culling_context(current)}
+
+
+def _normalized_compare_size(value: object) -> int:
+    if value is None:
+        return DEFAULT_COMPARE_MIN_SIZE
+    try:
+        size = int(value)
+    except (TypeError, ValueError) as exc:
+        raise KiraError(HTTPStatus.BAD_REQUEST, "Minimum group size must be a number") from exc
+    if not MIN_COMPARE_MIN_SIZE <= size <= MAX_COMPARE_MIN_SIZE:
+        raise KiraError(
+            HTTPStatus.BAD_REQUEST,
+            f"Minimum group size must be between {MIN_COMPARE_MIN_SIZE} and {MAX_COMPARE_MIN_SIZE}",
+        )
+    return size
+
+
+def _compare_group_name(base: str, groups_root: Path, taken: set[str]) -> str:
+    try:
+        cleaned = safe_group_name(base)
+    except KiraError:
+        cleaned = safe_group_name(f"{base} compare")
+    candidate = cleaned
+    index = 2
+    while candidate.casefold() in taken or (groups_root / candidate).exists():
+        candidate = f"{cleaned} ({index})"
+        index += 1
+    return candidate
+
+
+def build_compare_groups(source_directory: str, min_group_size: object = None) -> dict:
+    """Cluster the folder's photos by visual similarity into comparison groups.
+
+    Photos are signed with the shared perceptual pipeline and joined via
+    connected components of similar pairs; edited variants must also be
+    captured within minutes of each other so unrelated scenes cannot chain
+    together. Every component holding at least ``min_group_size`` photos
+    becomes a ``compare_groups/<name>`` folder under the culling root.
+    """
+    size = _normalized_compare_size(min_group_size)
+    current = resolve_directory(source_directory)
+    scan = scan_photo_directory(str(current))
+    context = culling_context(current)
+    root = Path(context["root"])
+    groups_root = root / "compare_groups"
+
+    candidates: list[tuple[dict, Path]] = []
+    skipped_photos: list[dict] = []
+    for asset in scan["assets"]:
+        preview_records = asset["jpeg_files"] or [
+            record
+            for record in asset["other_files"]
+            if Path(record["filename"]).suffix.casefold() in PREVIEW_EXTENSIONS
+        ]
+        if not preview_records:
+            skipped_photos.append({"asset": asset["stem"], "reason": "no decodable photo preview"})
+            continue
+        candidates.append((asset, Path(preview_records[0]["path"])))
+    if len(candidates) > MAX_COMPARE_PHOTOS:
+        raise KiraError(
+            HTTPStatus.BAD_REQUEST,
+            f"Compare grouping handles up to {MAX_COMPARE_PHOTOS} photos per folder",
+        )
+
+    signatures, signature_errors = compute_signatures([path for _, path in candidates])
+    for error in signature_errors:
+        skipped_photos.append({"asset": Path(error["filename"]).stem, "reason": error["error"]})
+    usable_indexes = [index for index, (_, path) in enumerate(candidates) if path in signatures]
+
+    entries = [(str(index), signatures[candidates[index][1]]) for index in usable_indexes]
+    clusters = [
+        [candidates[int(key)][0] for key in cluster]
+        for cluster in cluster_signatures(entries)
+        if len(cluster) >= size
+    ]
+    clusters.sort(key=lambda assets: natural_key(assets[0]["stem"]))
+
+    taken_names: set[str] = set()
+    if groups_root.exists():
+        try:
+            taken_names = {
+                group.name.casefold() for group in groups_root.iterdir() if group.is_dir()
+            }
+        except PermissionError:
+            taken_names = set()
+    created_groups: list[dict] = []
+    for cluster_assets in clusters:
+        base = cluster_assets[0]["stem"]
+        name = _compare_group_name(base[:60], groups_root, taken_names)
+        taken_names.add(name.casefold())
+        result = move_culling_assets(
+            str(current),
+            [asset["id"] for asset in cluster_assets],
+            "group",
+            name,
+        )
+        created_groups.append(
+            {
+                "name": result["destination_group_name"],
+                "path": result["destination"],
+                "requested_assets": len(cluster_assets),
+                "moved_assets": result["moved_assets"],
+                "deleted_duplicate_files": result["deleted_duplicate_files"],
+                "renamed_files": result["renamed_files"],
+            }
+        )
+
+    refresh_directory = current if current.exists() else root
+    refreshed = scan_photo_directory(str(refresh_directory))
+    refreshed["culling"] = culling_context(refresh_directory)
+    refreshed["min_group_size"] = size
+    refreshed["compared_photos"] = len(usable_indexes)
+    refreshed["skipped_photos"] = skipped_photos
+    refreshed["created_groups"] = created_groups
+    return refreshed

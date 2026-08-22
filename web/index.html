@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#173b2d">
   <title>Kira</title>
+  <link rel="icon" type="image/png" href="/media/kira_k_light.png">
+  <link rel="apple-touch-icon" href="/media/kira_k_light.png">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -12,8 +14,7 @@
     <header class="topbar">
       <div class="topbar-inner">
         <a class="brand" href="/" aria-label="Kira home">
-          <span class="brand-mark" aria-hidden="true">K</span>
-          <span class="brand-copy"><strong>Kira</strong><small>Local photo workflow</small></span>
+          <img class="brand-mark" src="/media/kira_light.png" alt="Kira" width="72" height="36">
         </a>
         <div id="connection-state" class="connection-state"><span></span>Connecting…</div>
       </div>
@@ -22,9 +23,10 @@
     <main>
       <section id="pair-view" class="pair-view hidden" aria-labelledby="pair-title">
         <div class="pair-card">
+          <img class="pair-brand" src="/media/kira_light.png" alt="Kira" width="128" height="64">
           <div class="eyebrow">Connect this iPad</div>
-          <h1 id="pair-title">Pair with your Dell</h1>
-          <p>Enter the six-digit code shown in Kira on your laptop.</p>
+          <h1 id="pair-title">Pair with your desktop</h1>
+          <p>Enter the six-digit code shown in Kira on your desktop.</p>
           <form id="pair-form">
             <label for="pair-code">Pairing code</label>
             <input id="pair-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required>
@@ -71,7 +73,7 @@
           </div>
           <p id="google-copy" class="panel-copy">Choose Google photos and videos, then save them into the folder below.</p>
           <div class="google-destination">
-            <label for="google-destination-folder"><span>Import destination</span><input id="google-destination-folder" type="text" value="" placeholder="D:\KiraData\google-photos-inbox" autocomplete="off"></label>
+            <label for="google-destination-folder"><span>Import destination</span><input id="google-destination-folder" type="text" value="" placeholder="C:\Users\you\Pictures\google-photos-inbox" autocomplete="off"></label>
             <div class="google-destination-preview"><span>Google media will be saved to</span><strong id="google-destination">—</strong></div>
             <button id="google-download-settings-toggle" class="disclosure-button" type="button" aria-expanded="false" aria-controls="google-import-settings">
               <span>Download settings</span>
@@ -91,7 +93,7 @@
               <span>Automatic ZIP at</span>
               <span class="number-with-unit"><input id="google-zip-threshold" type="number" min="2" max="2000" step="1" value="50"><span>items</span></span>
             </label>
-            <p>Google transfers media individually. ZIP mode packages completed downloads temporarily on this Dell, extracts them as one verified batch, then deletes the ZIP.</p>
+            <p>Google transfers media individually. ZIP mode packages completed downloads temporarily on this desktop, extracts them as one verified batch, then deletes the ZIP.</p>
           </div>
           <div class="google-actions">
             <button id="google-connect" class="primary-button" type="button">Connect Google Photos</button>
@@ -134,7 +136,7 @@
 
         <section id="create-job-card" class="panel library-panel hidden">
           <div class="panel-heading">
-            <div><div class="eyebrow">Laptop library</div><h2>Compare folders</h2></div>
+            <div><div class="eyebrow">Desktop library</div><h2>Compare folders</h2></div>
           </div>
           <div id="photo-workspace" class="photo-workspace hidden">
             <div class="cull-actions folder-dependent hidden" aria-label="Organize selected photos">
@@ -155,7 +157,7 @@
             <div id="library-split" class="library-split single-pane">
               <section id="library-pane-left" class="library-pane active" aria-labelledby="left-folder-name">
                 <header class="library-pane-header">
-                  <div class="library-pane-title"><div class="eyebrow">Folder</div><h3 id="left-folder-name">Computer</h3></div>
+                  <div class="library-pane-title"><div class="eyebrow">Folder</div><h3 id="left-folder-name">Desktop</h3></div>
                   <div class="library-pane-actions">
                     <button id="left-reveal" class="quiet-button compact-button" type="button" disabled title="Show this folder in File Explorer">Reveal</button>
                     <button id="left-new-folder" class="quiet-button compact-button" type="button" disabled>New folder</button>
@@ -176,7 +178,7 @@
               </div>
               <section id="library-pane-right" class="library-pane hidden" aria-labelledby="right-folder-name">
                 <header class="library-pane-header">
-                  <div class="library-pane-title"><div class="eyebrow">Comparison folder</div><h3 id="right-folder-name">Computer</h3></div>
+                  <div class="library-pane-title"><div class="eyebrow">Comparison folder</div><h3 id="right-folder-name">Desktop</h3></div>
                   <div class="library-pane-actions">
                     <button id="right-reveal" class="quiet-button compact-button" type="button" disabled title="Show this folder in File Explorer">Reveal</button>
                     <button id="right-new-folder" class="quiet-button compact-button" type="button" disabled>New folder</button>
@@ -197,6 +199,11 @@
                 <button id="select-all" class="quiet-button compact-button" type="button">Select all in active pane</button>
                 <button id="clear-picked" class="quiet-button compact-button" type="button">Deselect active pane</button>
                 <button id="compare-picked" class="quiet-button compact-button" type="button" disabled>Compare selected</button>
+                <label class="auto-compare-size" title="Smallest number of similar photos that forms a comparison group">
+                  <span>Min group</span>
+                  <input id="compare-min-size" type="number" min="2" max="50" step="1" value="3">
+                </label>
+                <button id="auto-compare" class="quiet-button compact-button" type="button">Auto-compare folder</button>
                 <button id="google-upload-selected" class="quiet-button compact-button" type="button" disabled>Upload media to Google Photos</button>
               </div>
             </div>
@@ -221,7 +228,7 @@
           <div id="jobs-list" class="jobs-list"></div>
           <div id="empty-jobs" class="empty-state hidden">
             <h3>No edit jobs yet</h3>
-            <p>Create one on the Dell, then open Kira on the iPad.</p>
+            <p>Create one on the desktop, then open Kira on the iPad.</p>
           </div>
         </section>
       </section>
@@ -258,7 +265,7 @@
 
           <section class="panel return-panel">
             <div class="panel-heading"><div><div class="eyebrow">Step 2</div><h2>Return Lightroom exports</h2></div></div>
-            <p class="panel-copy">In Lightroom, export with the original filename to Files. Select those exports here and Kira will upload them to the Dell.</p>
+            <p class="panel-copy">In Lightroom, export with the original filename to Files. Select those exports here and Kira will upload them to the desktop.</p>
             <label class="return-picker">
               <input id="return-files" type="file" multiple accept="image/*,.dng,.tif,.tiff,.avif,.jxl,.zip,application/zip">
               <span class="return-picker-content"><strong>Choose edited photos or ZIP</strong><small>JPG, DNG, TIFF, AVIF, JXL, or ZIP</small></span>

@@ -281,6 +281,94 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         self.assertLessEqual(color, self.service.VISUAL_COLOR_THRESHOLD)
         self.assertLessEqual(perceptual, self.service.VISUAL_HASH_THRESHOLD)
 
+    @staticmethod
+    def _scene(size: tuple[int, int], warm: bool) -> Image.Image:
+        image = Image.new("RGB", size)
+        if warm:
+            image.putdata(
+                [
+                    (240 - (x + y) % 50, x % 140, y % 80)
+                    for y in range(size[1])
+                    for x in range(size[0])
+                ]
+            )
+        else:
+            image.putdata(
+                [
+                    (x % 80, (y * 2) % 120 + 60, 255 - (x + y) % 60)
+                    for y in range(size[1])
+                    for x in range(size[0])
+                ]
+            )
+        return image
+
+    def _match_pair(self, left: Path, right: Path) -> dict | None:
+        matches: dict[str, dict] = {}
+        self.service._record_visual_match(
+            matches,
+            {"media_key": "remote-1"},
+            [
+                {
+                    "signature": self.service._image_signature(left),
+                    "paths": [str(left)],
+                    "name_keys": set(),
+                }
+            ],
+            self.service._image_signature(right),
+        )
+        return matches.get("remote-1")
+
+    def test_visual_signature_matches_exposed_edited_variant(self) -> None:
+        from PIL import ImageEnhance
+
+        original_path = self.root / "original.jpg"
+        edited_path = self.root / "edited.jpg"
+        scene = self._scene((160, 120), warm=False)
+        scene.save(original_path, quality=95)
+        edited = ImageEnhance.Brightness(scene).enhance(0.42)
+        width, height = edited.size
+        edited = edited.crop((width // 8, height // 8, width - width // 8, height - height // 8))
+        edited = edited.resize((96, 128))
+        edited.save(edited_path, quality=90)
+
+        original = self.service._image_signature(original_path)
+        variant = self.service._image_signature(edited_path)
+        color, perceptual = self.service._signature_distance(original, variant)
+        palette = self.service._palette_similarity(original, variant)
+        phash = self.service._perceptual_hash_distance(original, variant)
+
+        strict_match = (
+            color <= self.service.VISUAL_COLOR_THRESHOLD
+            and perceptual <= self.service.VISUAL_HASH_THRESHOLD
+        )
+        self.assertFalse(strict_match)
+        self.assertGreaterEqual(palette, self.service.VISUAL_PALETTE_THRESHOLD)
+        self.assertLessEqual(phash, self.service.VISUAL_PHASH_THRESHOLD)
+
+        record = self._match_pair(original_path, edited_path)
+        self.assertIsNotNone(record)
+        self.assertEqual(record["visual_match_tier"], "edited")
+        self.assertEqual(record["local_files"], [str(original_path)])
+        self.assertIn("visual_palette_similarity", record)
+
+    def test_visual_signature_rejects_unrelated_scenes(self) -> None:
+        cool_path = self.root / "cool.jpg"
+        warm_path = self.root / "warm.jpg"
+        self._scene((160, 120), warm=False).save(cool_path, quality=92)
+        self._scene((160, 120), warm=True).save(warm_path, quality=92)
+
+        record = self._match_pair(cool_path, warm_path)
+
+        self.assertIsNone(record)
+
+    def test_dimension_compatibility_allows_orientation_and_crop_variants(self) -> None:
+        compatible = self.service._dimensions_compatible
+        self.assertTrue(compatible((3072, 4096), (5472, 3648)))
+        self.assertTrue(compatible((3648, 5472), (3072, 4096)))
+        self.assertTrue(compatible((4000, 3000), (3000, 2250)))
+        self.assertFalse(compatible((800, 600), (4000, 3000)))
+        self.assertFalse(compatible((0, 0), (100, 100)))
+
     def test_organize_adds_to_album_then_archives_and_verifies(self) -> None:
         self.service.import_session(self.cookies)
         result = self.service.organize(["media-1", "media-2", "media-1"], "Trips", archive=True)

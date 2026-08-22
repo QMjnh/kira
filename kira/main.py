@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
         default=Path(__file__).resolve().parent.parent / "kira-data",
         help="Folder where Kira stores jobs and returned edits",
     )
-    parser.add_argument("--no-open", action="store_true", help="Do not open the Dell dashboard")
+    parser.add_argument("--no-open", action="store_true", help="Do not open the desktop dashboard")
     return parser.parse_args()
 
 
@@ -39,7 +39,7 @@ def main() -> None:
     ipad_url = f"http://{discover_local_ip()}:{actual_port}"
     print()
     print(f"Kira {APP_VERSION} is running")
-    print(f"Dell dashboard: {local_url}")
+    print(f"Desktop dashboard: {local_url}")
     print(f"iPad address:   {ipad_url}")
     print(f"Pairing code:   {server.store.pair_code}")
     print(f"Data folder:    {server.store.root}")

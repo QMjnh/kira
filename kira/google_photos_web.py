@@ -9,11 +9,22 @@ import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from io import BytesIO
 from pathlib import Path
 from typing import Iterator
 
 from .google_photos import GooglePhotosError, _name_key, _windows_protect, _windows_unprotect
+from .visual import (
+    VISUAL_COLOR_THRESHOLD,
+    VISUAL_HASH_THRESHOLD,
+    VISUAL_PALETTE_THRESHOLD,
+    VISUAL_PHASH_THRESHOLD,
+    VISUAL_SIZE,
+    dimensions_compatible as _visual_dimensions_compatible,
+    image_signature as _visual_image_signature,
+    palette_similarity as _visual_palette_similarity,
+    perceptual_hash_distance as _visual_perceptual_hash_distance,
+    signature_distance as _visual_signature_distance,
+)
 
 try:
     from PIL import Image, ImageOps
@@ -36,9 +47,13 @@ class GooglePhotosWebService:
     INFO_BATCH_SIZE = 100
     VERIFY_ATTEMPTS = 10
     VERIFY_INTERVAL_SECONDS = 0.5
-    VISUAL_SIZE = 32
-    VISUAL_COLOR_THRESHOLD = 8.0
-    VISUAL_HASH_THRESHOLD = 12
+    VISUAL_SIZE = VISUAL_SIZE
+    VISUAL_COLOR_THRESHOLD = VISUAL_COLOR_THRESHOLD
+    VISUAL_HASH_THRESHOLD = VISUAL_HASH_THRESHOLD
+    VISUAL_PALETTE_THRESHOLD = VISUAL_PALETTE_THRESHOLD
+    VISUAL_PHASH_THRESHOLD = VISUAL_PHASH_THRESHOLD
+    VISUAL_DIMENSION_TOLERANCE = 0.7
+    VISUAL_NARROW_FALLBACK_LIMIT = 6
 
     def __init__(
         self,
@@ -232,11 +247,7 @@ class GooglePhotosWebService:
         if not local_groups:
             return [], errors
 
-        groups_by_dimensions: dict[tuple[int, int], list[dict]] = {}
-        for group in local_groups.values():
-            signature = group["signature"]
-            dimensions = (signature["width"], signature["height"])
-            groups_by_dimensions.setdefault(dimensions, []).append(group)
+        local_groups_list = list(local_groups.values())
 
         matches: dict[str, dict] = {}
         with self._client() as (client, payloads):
@@ -244,10 +255,14 @@ class GooglePhotosWebService:
             for remote in self._list_library(client, payloads):
                 if remote["video"] or remote["partial"] or not remote["owned"]:
                     continue
-                dimensions = (remote["width"], remote["height"])
-                candidates = groups_by_dimensions.get(dimensions)
-                if not candidates:
-                    candidates = groups_by_dimensions.get((dimensions[1], dimensions[0]))
+                candidates = [
+                    group
+                    for group in local_groups_list
+                    if self._dimensions_compatible(
+                        (group["signature"]["width"], group["signature"]["height"]),
+                        (remote["width"], remote["height"]),
+                    )
+                ]
                 if not candidates:
                     continue
                 remote_candidates.append((remote, candidates))
@@ -331,6 +346,8 @@ class GooglePhotosWebService:
                         and remote_capture == group["signature"].get("capture_time")
                     )
                 ]
+                if not compatible and len(groups) <= self.VISUAL_NARROW_FALLBACK_LIMIT:
+                    compatible = list(groups)
                 if compatible:
                     narrowed[media_key] = (remote, compatible)
 
@@ -379,31 +396,80 @@ class GooglePhotosWebService:
     def _record_visual_match(
         self, matches: dict[str, dict], remote: dict, candidates: list[dict], signature: dict
     ) -> None:
-        ranked = sorted(
-            (
-                (
-                    self._signature_distance(signature, candidate["signature"]),
-                    candidate,
+        exact_rows: list[tuple[dict, dict]] = []
+        variant_rows: list[tuple[dict, dict]] = []
+        for candidate in candidates:
+            other = candidate["signature"]
+            color_distance, hash_distance = self._signature_distance(signature, other)
+            palette_similarity = self._palette_similarity(signature, other)
+            perceptual_distance = self._perceptual_hash_distance(signature, other)
+            if (
+                color_distance <= self.VISUAL_COLOR_THRESHOLD
+                and hash_distance <= self.VISUAL_HASH_THRESHOLD
+            ):
+                exact_rows.append(
+                    (
+                        {
+                            "color": color_distance,
+                            "hash": hash_distance,
+                            "palette": palette_similarity,
+                            "phash": perceptual_distance,
+                        },
+                        candidate,
+                    )
                 )
-                for candidate in candidates
-            ),
-            key=lambda value: (value[0][0], value[0][1]),
-        )
-        (color_distance, hash_distance), best = ranked[0]
-        if (
-            color_distance > self.VISUAL_COLOR_THRESHOLD
-            or hash_distance > self.VISUAL_HASH_THRESHOLD
-        ):
+            elif (
+                palette_similarity >= self.VISUAL_PALETTE_THRESHOLD
+                and perceptual_distance <= self.VISUAL_PHASH_THRESHOLD
+            ):
+                variant_rows.append(
+                    (
+                        {
+                            "color": color_distance,
+                            "hash": hash_distance,
+                            "palette": palette_similarity,
+                            "phash": perceptual_distance,
+                        },
+                        candidate,
+                    )
+                )
+
+        if exact_rows:
+            ranked = sorted(exact_rows, key=lambda value: (value[0]["color"], value[0]["hash"]))
+            best_metrics, best = ranked[0]
+            if len(ranked) > 1:
+                next_metrics = ranked[1][0]
+                if (
+                    next_metrics["color"] - best_metrics["color"] < 1.0
+                    and next_metrics["hash"] - best_metrics["hash"] < 3
+                ):
+                    return
+            matches[remote["media_key"]] = {
+                "media_key": remote["media_key"],
+                "local_files": list(best["paths"]),
+                "visual_match_tier": "reencoded",
+                "visual_color_distance": round(best_metrics["color"], 3),
+                "visual_hash_distance": best_metrics["hash"],
+            }
             return
+
+        if not variant_rows:
+            return
+        ranked = sorted(variant_rows, key=lambda value: (-value[0]["palette"], value[0]["phash"]))
+        best_metrics, best = ranked[0]
         if len(ranked) > 1:
-            next_color, next_hash = ranked[1][0]
-            if next_color - color_distance < 1.0 and next_hash - hash_distance < 3:
+            next_metrics = ranked[1][0]
+            if (
+                next_metrics["palette"] - best_metrics["palette"] < 0.01
+                and abs(next_metrics["phash"] - best_metrics["phash"]) < 3
+            ):
                 return
         matches[remote["media_key"]] = {
             "media_key": remote["media_key"],
             "local_files": list(best["paths"]),
-            "visual_color_distance": round(color_distance, 3),
-            "visual_hash_distance": hash_distance,
+            "visual_match_tier": "edited",
+            "visual_palette_similarity": round(best_metrics["palette"], 4),
+            "visual_phash_distance": best_metrics["phash"],
         }
 
     def _list_library(self, client: object, payloads: object) -> list[dict]:
@@ -451,52 +517,23 @@ class GooglePhotosWebService:
 
     @classmethod
     def _image_signature(cls, source: Path | bytes) -> dict:
-        stream = BytesIO(source) if isinstance(source, bytes) else source
-        with Image.open(stream) as opened:
-            width, height = opened.size
-            try:
-                orientation = int(opened.getexif().get(274, 1))
-            except (AttributeError, TypeError, ValueError):
-                orientation = 1
-            if orientation in {5, 6, 7, 8}:
-                width, height = height, width
-            capture_time = None
-            try:
-                capture_time = str(opened.getexif().get(36867) or "").strip() or None
-            except (AttributeError, TypeError, ValueError):
-                pass
-            opened.draft("RGB", (256, 256))
-            image = ImageOps.exif_transpose(opened)
-            rgb = image.convert("RGB").resize(
-                (cls.VISUAL_SIZE, cls.VISUAL_SIZE), Image.Resampling.LANCZOS
-            )
-            grayscale = image.convert("L").resize(
-                (17, 16), Image.Resampling.LANCZOS
-            )
-            grayscale_bytes = grayscale.tobytes()
-            difference_hash = 0
-            for row in range(16):
-                offset = row * 17
-                for column in range(16):
-                    difference_hash = (difference_hash << 1) | (
-                        grayscale_bytes[offset + column]
-                        > grayscale_bytes[offset + column + 1]
-                    )
-            return {
-                "width": width,
-                "height": height,
-                "pixels": rgb.tobytes(),
-                "difference_hash": difference_hash,
-                "capture_time": capture_time,
-            }
+        return _visual_image_signature(source)
+
+    @classmethod
+    def _dimensions_compatible(cls, left: tuple[int, int], right: tuple[int, int]) -> bool:
+        return _visual_dimensions_compatible(left, right)
 
     @staticmethod
     def _signature_distance(left: dict, right: dict) -> tuple[float, int]:
-        color = sum(
-            abs(first - second) for first, second in zip(left["pixels"], right["pixels"])
-        ) / len(left["pixels"])
-        perceptual = (left["difference_hash"] ^ right["difference_hash"]).bit_count()
-        return color, perceptual
+        return _visual_signature_distance(left, right)
+
+    @staticmethod
+    def _perceptual_hash_distance(left: dict, right: dict) -> int:
+        return _visual_perceptual_hash_distance(left, right)
+
+    @staticmethod
+    def _palette_similarity(left: dict, right: dict) -> float:
+        return _visual_palette_similarity(left, right)
 
     def ensure_album(self, album_title: str) -> dict:
         """Resolve one exact album once, creating it when it does not exist."""
@@ -657,7 +694,7 @@ class GooglePhotosWebService:
             raw = base64.b64decode(wrapper["data"])
             if wrapper.get("encrypted"):
                 if os.name != "nt":
-                    raise GooglePhotosWebError("Google web session belongs to another computer")
+                    raise GooglePhotosWebError("Google web session belongs to another desktop")
                 raw = _windows_unprotect(raw)
             return raw, int(wrapper.get("account_index", 0))
         except GooglePhotosWebError:

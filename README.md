@@ -5,8 +5,8 @@ Editing photos should not feel like moving house.
 Right now, the workflow often looks like this:
 
 ```text
-SD card → laptop → external drive → Google Drive → iPad → Lightroom
-      → Google Drive → laptop → another folder → who knows
+SD card → desktop → external drive → Google Drive → iPad → Lightroom
+      → Google Drive → desktop → another folder → who knows
 ```
 
 Every arrow makes another copy. Soon there are originals, selects, exports, "final" exports, and `final-final-2` exports spread across several devices, and nobody is quite sure which version is the real one — or whether it is safe to delete anything.
@@ -14,12 +14,12 @@ Every arrow makes another copy. Soon there are originals, selects, exports, "fin
 Kira cuts out the middle:
 
 ```text
-Camera folder on your laptop → Kira → iPad (Lightroom) → Kira → organized camera folder
+Camera folder on your desktop → Kira → iPad (Lightroom) → Kira → organized camera folder
 ```
 
-You plug the camera card or photo drive into your Windows laptop. In Kira, you pick the photos worth editing. Kira sends only those photos directly to your iPad over your home Wi-Fi. You edit in Lightroom, send the finished images back, and Kira puts everything in its proper place in the original folder.
+You plug the camera card or photo drive into your Windows desktop. In Kira, you pick the photos worth editing. Kira sends only those photos directly to your iPad over your home Wi-Fi. You edit in Lightroom, send the finished images back, and Kira puts everything in its proper place in the original folder.
 
-Kira is not an editor, a backup service, or a photo library. Lightroom is still where you edit. Your backup is still your backup. Kira just keeps the trip between your laptop and iPad from turning into a mess.
+Kira is not an editor, a backup service, or a photo library. Lightroom is still where you edit. Your backup is still your backup. Kira just keeps the trip between your desktop and iPad from turning into a mess.
 
 ## What Kira does
 
@@ -44,7 +44,7 @@ To store Kira's working data on an attached hard drive instead:
 .\start-kira.ps1 -DataDir "E:\Kira"
 ```
 
-Kira opens on the laptop and shows a QR code, the address for the iPad, and a six-digit pairing code as a manual fallback. Scan the QR code with the iPad's Camera app and Safari opens already paired.
+Kira opens on the desktop and shows a QR code, the address for the iPad, and a six-digit pairing code as a manual fallback. Scan the QR code with the iPad's Camera app and Safari opens already paired.
 
 If PowerShell says scripts are disabled, run this once in the same window, then start Kira again:
 
@@ -54,7 +54,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ## A session, end to end
 
-1. Copy a shoot from the SD card to a folder on the laptop or an external drive.
+1. Copy a shoot from the SD card to a folder on the desktop or an external drive.
 2. Open Kira, browse to that folder, cull and compare until only keepers are checked.
 3. Create the edit job and download it on the iPad; unpack the ZIP once in Files and import into Lightroom.
 4. Edit. Export with original filenames via **Share → Export As**.
@@ -69,7 +69,7 @@ After connecting you can import picked media into any local folder, upload selec
 
 ## Keeping your photos private
 
-Pairing is required: an unpaired device cannot use Kira just by finding the laptop on the network. But traffic between the laptop and iPad is not encrypted, so use Kira on a trusted home network or a private hotspot — not hotel, café, or school Wi-Fi. Keep the laptop awake until transfers finish. Tokens and sessions stay on your laptop.
+Pairing is required: an unpaired device cannot use Kira just by finding the desktop on the network. But traffic between the desktop and iPad is not encrypted, so use Kira on a trusted home network or a private hotspot — not hotel, café, or school Wi-Fi. Keep the desktop awake until transfers finish. Tokens and sessions stay on your desktop.
 
 ---
 

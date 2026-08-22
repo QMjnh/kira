@@ -22,6 +22,7 @@ from .google_photos import GooglePhotosError, GooglePhotosService
 from .media import (
     PREVIEW_EXTENSIONS,
     browse_directories,
+    build_compare_groups,
     create_directory,
     delete_directory_to_recycle_bin,
     move_assets_between_directories,
@@ -55,6 +56,7 @@ AUTHED_ROUTES: list[tuple[tuple[str, ...], tuple[str, ...], str, bool]] = [
     (("api", "local", "browse"), ("GET",), "_h_local_browse", True),
     (("api", "local", "scan"), ("GET",), "_h_local_scan", True),
     (("api", "local", "cull"), ("POST",), "_h_local_cull", True),
+    (("api", "local", "compare-groups"), ("POST",), "_h_local_compare_groups", True),
     (("api", "local", "move"), ("POST",), "_h_local_move", True),
     (("api", "local", "preview"), ("GET", "HEAD"), "_h_local_preview", True),
     (("api", "local", "mkdir"), ("POST",), "_h_local_mkdir", True),
@@ -75,6 +77,8 @@ AUTHED_ROUTES: list[tuple[tuple[str, ...], tuple[str, ...], str, bool]] = [
 ]
 
 STATIC_PATHS = {"/", "/index.html", "/app.js", "/styles.css"}
+MEDIA_ROOT = Path(__file__).resolve().parent.parent / "media"
+MEDIA_FILES = {"/media/kira_light.png", "/media/kira_k_light.png"}
 
 
 def discover_local_ip() -> str:
@@ -166,7 +170,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
             if path == "/" and method == "GET" and "state" in query and ("code" in query or "error" in query):
                 self._google_oauth_callback(query)
                 return
-            if path in STATIC_PATHS and method in {"GET", "HEAD"}:
+            if path in STATIC_PATHS | MEDIA_FILES and method in {"GET", "HEAD"}:
                 self._serve_static(path, method == "HEAD")
                 return
             if path == "/api/system" and method == "GET":
@@ -398,6 +402,15 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
             )
         )
 
+    def _h_local_compare_groups(self, params: dict, query: dict) -> None:
+        body = self._read_json()
+        self._send_json(
+            build_compare_groups(
+                str(body.get("source_directory", "")),
+                body.get("min_group_size"),
+            )
+        )
+
     def _h_local_preview(self, params: dict, query: dict) -> None:
         try:
             preview = Path(query.get("path", [""])[0]).resolve(strict=True)
@@ -526,11 +539,11 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
 
     def _require_local(self) -> None:
         if not self._is_loopback():
-            raise KiraError(HTTPStatus.FORBIDDEN, "This action is only available on the Dell")
+            raise KiraError(HTTPStatus.FORBIDDEN, "This action is only available on the desktop")
 
     def _bootstrap(self) -> None:
         if not self._is_loopback():
-            raise KiraError(HTTPStatus.FORBIDDEN, "Bootstrap is only available on the Dell")
+            raise KiraError(HTTPStatus.FORBIDDEN, "Bootstrap is only available on the desktop")
         port = self.server.server_address[1]
         local_ip = discover_local_ip()
         ipad_url = f"http://{local_ip}:{port}"
@@ -549,7 +562,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
 
     def _pair_qr(self, head_only: bool) -> None:
         if not self._is_loopback():
-            raise KiraError(HTTPStatus.FORBIDDEN, "Pairing QR is only displayed on the Dell")
+            raise KiraError(HTTPStatus.FORBIDDEN, "Pairing QR is only displayed on the desktop")
         port = self.server.server_address[1]
         local_ip = discover_local_ip()
         pair_url = f"http://{local_ip}:{port}/?pair={quote(self.server.store.pair_secret, safe='')}"
@@ -619,8 +632,11 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
             self.rfile.read(length)
 
     def _serve_static(self, path: str, head_only: bool) -> None:
-        filename = "index.html" if path in {"/", "/index.html"} else path.lstrip("/")
-        target = self.server.static_root / filename
+        if path in MEDIA_FILES:
+            target = MEDIA_ROOT / path.rsplit("/", 1)[1]
+        else:
+            filename = "index.html" if path in {"/", "/index.html"} else path.lstrip("/")
+            target = self.server.static_root / filename
         if not target.exists():
             raise KiraError(HTTPStatus.NOT_FOUND, "Not found")
         content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"

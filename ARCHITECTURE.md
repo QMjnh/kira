@@ -1,6 +1,6 @@
 # Kira architecture
 
-Kira is a small, local-first photo-transfer service. It runs on a Windows laptop, serves a browser UI to the laptop and a paired iPad, and moves selected JPEG or RAW files between the laptop's source drive and Lightroom on the iPad. This document is for people working on the code; the [README](README.md) covers usage.
+Kira is a small, local-first photo-transfer service. It runs on the desktop, serves a browser UI to the desktop and a paired iPad, and moves selected JPEG or RAW files between the desktop's source drive and Lightroom on the iPad. This document is for people working on the code; the [README](README.md) covers usage.
 
 ## Run locally
 
@@ -34,7 +34,7 @@ python -m unittest discover -s tests -v
 | `vendor/` | Bundled dependencies used when Kira starts. |
 | `tests/` | Unit and workflow tests over a real loopback HTTP server. |
 
-The server uses `ThreadingHTTPServer`. It discovers the adapter owning the default route, avoiding Hyper-V/WSL addresses where possible. Authed routes live in one table (`AUTHED_ROUTES`) mapping `(pattern, methods) -> handler`; `{name}` segments become handler parameters. Laptop-only routes are marked `requires_local` and rejected for non-loopback clients.
+The server uses `ThreadingHTTPServer`. It discovers the adapter owning the default route, avoiding Hyper-V/WSL addresses where possible. Authed routes live in one table (`AUTHED_ROUTES`) mapping `(pattern, methods) -> handler`; `{name}` segments become handler parameters. Desktop-only routes are marked `requires_local` and rejected for non-loopback clients.
 
 ## Photo workflow and data model
 
@@ -57,7 +57,7 @@ Finishing a job reorganizes the source directory in place (layout above in the R
 
 ## Pairing and network security
 
-The laptop dashboard is restricted to loopback requests. The QR contains a one-time pairing secret; successful pairing returns the persistent device token, which iPad API requests supply via `X-Kira-Token` (or token query parameter). The six-digit code is an alternate pairing factor shown on the Dell.
+The desktop dashboard is restricted to loopback requests. The QR contains a one-time pairing secret; successful pairing returns the persistent device token, which iPad API requests supply via `X-Kira-Token` (or token query parameter). The six-digit code is an alternate pairing factor shown on the desktop.
 
 This controls access; it is not transport encryption. Kira serves plain HTTP on trusted private networks only.
 
@@ -75,4 +75,4 @@ This controls access; it is not transport encryption. Kira serves plain HTTP on 
 - Source folders are reorganized only when **Finish & organize** is explicitly requested; the operation is idempotent once complete.
 - Culling moves are reversible and never overwrite silently.
 - Cross-folder moves reject destination-name collisions without partial moves.
-- Folder management (`/api/local/mkdir`, `/rename`, `/delete`, `/reveal`) is laptop-only. Delete always sends folders to the Windows Recycle Bin — there is no permanent-delete path anywhere in Kira.
+- Folder management (`/api/local/mkdir`, `/rename`, `/delete`, `/reveal`) is desktop-only. Delete always sends folders to the Windows Recycle Bin — there is no permanent-delete path anywhere in Kira.

@@ -72,7 +72,7 @@
     }
 
     if (pairingSecret && !state.desktop) {
-      setDisconnected('Pairing with Dell…');
+      setDisconnected('Pairing with desktop…');
       try {
         const response = await api('/api/pair', {
           method: 'POST',
@@ -85,7 +85,7 @@
         localStorage.removeItem('kira-token');
         state.token = '';
         history.replaceState({}, document.title, window.location.pathname);
-        el('pair-error').textContent = 'That QR link has expired. Scan the current code shown on the Dell.';
+        el('pair-error').textContent = 'That QR link has expired. Scan the current code shown on the desktop.';
       }
     }
 
@@ -113,7 +113,7 @@
   async function loadDashboard() {
     const response = await api('/api/jobs');
     state.jobs = response.jobs;
-    setConnected(state.desktop ? 'Dell server running' : 'Connected to Dell');
+    setConnected(state.desktop ? 'Running on this desktop' : 'Connected to desktop');
     showOnly(dashboardView);
     el('desktop-services').classList.toggle('hidden', !state.desktop);
     el('desktop-setup').classList.toggle('hidden', !state.desktop);
@@ -399,12 +399,12 @@
     const pane = paneFor(paneId);
     const crumbs = el(`${paneId}-folder-path`);
     crumbs.replaceChildren();
-    const computer = document.createElement('button');
-    computer.type = 'button';
-    computer.textContent = 'Computer';
-    if (!pane.breadcrumbs.length) computer.disabled = true;
-    else computer.addEventListener('click', () => navigatePane(paneId, '').catch(showError));
-    crumbs.appendChild(computer);
+    const desktop = document.createElement('button');
+    desktop.type = 'button';
+    desktop.textContent = 'Desktop';
+    if (!pane.breadcrumbs.length) desktop.disabled = true;
+    else desktop.addEventListener('click', () => navigatePane(paneId, '').catch(showError));
+    crumbs.appendChild(desktop);
     pane.breadcrumbs.forEach((crumb, index) => {
       const separator = document.createElement('span');
       separator.textContent = '›';
@@ -520,7 +520,7 @@
     el('browse-folders-right').classList.toggle('hidden', state.rightPaneOpen);
     ['left', 'right'].forEach((paneId) => {
       const pane = paneFor(paneId);
-      const name = pane.breadcrumbs.length ? folderLabel(pane.directory || pane.breadcrumbs.at(-1).path) : 'Computer';
+      const name = pane.breadcrumbs.length ? folderLabel(pane.directory || pane.breadcrumbs.at(-1).path) : 'Desktop';
       el(`library-pane-${paneId}`).classList.toggle('active', paneId === state.activePaneId);
       el(`${paneId}-folder-name`).textContent = name;
       const canManage = Boolean(pane.directory);
@@ -761,6 +761,42 @@
       toast(error.message);
     } finally {
       groupButton.textContent = 'Group to compare';
+      updateSelectionUi();
+    }
+  }
+
+  async function autoCompareGroups() {
+    if (!state.libraryDirectory) return;
+    const minSize = Math.max(2, Number(el('compare-min-size').value) || 3);
+    if (!window.confirm(`Find similar photos in this folder and create comparison groups of at least ${minSize} photos? Similar photos will be moved into new compare folders.`)) return;
+    const button = el('auto-compare');
+    button.disabled = true;
+    const originalLabel = button.textContent;
+    button.textContent = 'Comparing…';
+    try {
+      const result = await api('/api/local/compare-groups', {
+        method: 'POST',
+        body: JSON.stringify({
+          source_directory: state.libraryDirectory,
+          min_group_size: minSize,
+        }),
+      });
+      applyLibraryScan(result);
+      const groups = result.created_groups || [];
+      if (!groups.length) {
+        toast(`No clusters of at least ${result.min_group_size || minSize} similar photos were found.`);
+      } else {
+        const moved = groups.reduce((total, group) => total + (group.moved_assets || 0), 0);
+        const duplicates = groups.reduce((total, group) => total + (group.deleted_duplicate_files || 0), 0);
+        const details = [];
+        if (duplicates) details.push(`${duplicates} visually identical duplicate${duplicates === 1 ? '' : 's'} removed`);
+        const movedLabel = `${moved} photo group${moved === 1 ? '' : 's'} moved`;
+        toast(`${groups.length} comparison group${groups.length === 1 ? '' : 's'} created; ${movedLabel}${details.length ? `; ${details.join('; ')}` : ''}.`);
+      }
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      button.textContent = originalLabel;
       updateSelectionUi();
     }
   }
@@ -1058,7 +1094,7 @@
   el('google-destination-folder').addEventListener('input', renderGoogleDestination);
 
   el('google-disconnect').addEventListener('click', async () => {
-    if (!window.confirm('Disconnect Google Photos from Kira? Imported local files will stay on this computer.')) return;
+    if (!window.confirm('Disconnect Google Photos from Kira? Imported local files will stay on this desktop.')) return;
     try {
       await api('/api/google/disconnect', {method: 'POST', body: '{}'});
       await refreshGoogleStatus();
@@ -1226,6 +1262,7 @@
     updateSelectionUi();
   });
   el('compare-picked').addEventListener('click', openCompare);
+  el('auto-compare').addEventListener('click', autoCompareGroups);
   el('close-compare').addEventListener('click', () => {
     el('compare-modal').classList.add('hidden');
     syncSelectionTiles();
@@ -1281,7 +1318,7 @@
       await uploadFiles(state.currentJob.id, files, 'returns', progressSet('return'));
       el('return-files').value = '';
       document.querySelector('.return-picker-content strong').textContent = 'Choose edited photos or ZIP';
-      toast('Returned edits are verified on the Dell.');
+      toast('Returned edits are verified on the desktop.');
       await openJob(state.currentJob.id);
     } catch (error) {
       toast(error.message);

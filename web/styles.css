@@ -36,10 +36,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 }
 .topbar-inner { width: min(1480px, 100%); min-height: 68px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
 .brand { display: inline-flex; align-items: center; gap: 11px; color: var(--ink); text-decoration: none; }
-.brand-mark { width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center; background: var(--forest); color: white; font-size: 16px; font-weight: 780; box-shadow: 0 6px 14px rgba(20, 61, 46, .18); }
-.brand-copy { display: grid; gap: 1px; }
-.brand-copy strong { font-size: 18px; line-height: 1.1; }
-.brand-copy small { color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: .03em; }
+.brand-mark { height: 36px; width: auto; display: block; box-shadow: 0 6px 14px rgba(22, 34, 28, .16); border-radius: 12px; }
 .connection-state { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
 .connection-state span { width: 8px; height: 8px; border-radius: 50%; background: var(--warning); box-shadow: 0 0 0 4px rgba(152, 100, 15, .1); }
 .connection-state.connected span { background: var(--success); }
@@ -54,6 +51,7 @@ p { color: var(--muted); line-height: 1.55; }
 .pair-view { min-height: calc(100vh - 160px); display: grid; place-items: center; }
 .pair-card { width: min(460px, 100%); background: var(--surface); border: 1px solid var(--line); border-radius: 24px; padding: 32px; box-shadow: var(--shadow); }
 .pair-card form { display: grid; gap: 12px; margin-top: 24px; }
+.pair-brand { display: block; height: 64px; width: auto; margin: 0 auto 20px; }
 label > span, label { color: var(--ink); font-size: 13px; font-weight: 650; }
 input[type="text"], input[type="number"], input[inputmode="numeric"], select { width: 100%; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 11px; padding: 13px 14px; outline: none; }
 input:focus, select:focus { border-color: var(--forest); box-shadow: 0 0 0 3px rgba(23, 59, 45, .12); }
@@ -238,6 +236,8 @@ progress::-moz-progress-bar { background: var(--success); }
 .photo-toolbar strong, .photo-toolbar small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .photo-toolbar small { color: var(--muted); margin-top: 3px; }
 .photo-toolbar-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.auto-compare-size { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; color: var(--muted); }
+.auto-compare-size input { width: 56px; min-height: 36px; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: 9px; font: inherit; font-size: 12px; background: white; }
 .compact-button { min-height: 36px; padding: 7px 11px; border-radius: 9px; font-size: 12px; }
 .cull-actions { order: 2; display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0 0 12px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft); }
 .cull-action-buttons, .group-action { display: flex; align-items: center; gap: 7px; }
@@ -346,7 +346,7 @@ progress::-moz-progress-bar { background: var(--success); }
 @media (max-width: 520px) {
   .topbar { min-height: 60px; padding-inline: 16px; }
   .topbar-inner { min-height: 60px; }
-  .brand-copy small { display: none; }
+  .brand-mark { height: 30px; }
   .connection-state { font-size: 11px; }
   .pair-card, .panel, .setup-card { padding: 18px; border-radius: 16px; }
   .setup-transfer-row { grid-template-columns: 1fr; gap: 12px; }

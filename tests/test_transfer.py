@@ -933,6 +933,88 @@ class KiraTransferTests(unittest.TestCase):
         self.assertTrue(grouped_photo.exists())
         self.assertTrue((group / "IMG_200__variant2.JPG").exists())
 
+    @staticmethod
+    def _gradient_scene(size: tuple[int, int], warm: bool) -> Image.Image:
+        image = Image.new("RGB", size)
+        if warm:
+            image.putdata(
+                [
+                    (240 - (x + y) % 50, x % 140, y % 80)
+                    for y in range(size[1])
+                    for x in range(size[0])
+                ]
+            )
+        else:
+            image.putdata(
+                [
+                    (x % 80, (y * 2) % 120 + 60, 255 - (x + y) % 60)
+                    for y in range(size[1])
+                    for x in range(size[0])
+                ]
+            )
+        return image
+
+    def test_auto_compare_groups_creates_folders_of_similar_photos(self) -> None:
+        from PIL import ImageEnhance
+
+        source = Path(self.temp.name) / "england"
+        source.mkdir()
+        cool = self._gradient_scene((160, 120), warm=False)
+        warm = self._gradient_scene((160, 120), warm=True)
+        for name, image in {
+            "DSC0100": cool,
+            "DSC0101": ImageEnhance.Brightness(cool).enhance(0.42),
+            "DSC0102": ImageEnhance.Brightness(cool).enhance(1.4),
+            "DSC0200": warm,
+            "DSC0201": ImageEnhance.Brightness(warm).enhance(0.5),
+            "DSC0202": ImageEnhance.Brightness(warm).enhance(1.4),
+            "DSC0300": Image.new("RGB", (64, 48), (10, 200, 10)),
+        }.items():
+            image.save(source / f"{name}.JPG", format="JPEG", quality=92)
+
+        response, result = self.json_request(
+            "POST",
+            "/api/local/compare-groups",
+            {"source_directory": str(source), "min_group_size": 3},
+        )
+
+        self.assertEqual(response.status, 200)
+        created = [group["name"] for group in result["created_groups"]]
+        self.assertEqual(len(created), 2)
+        cool_group = source / "compare_groups" / created[0]
+        warm_group = source / "compare_groups" / created[1]
+        self.assertEqual(
+            sorted(path.name for path in cool_group.iterdir()),
+            ["DSC0100.JPG", "DSC0101.JPG", "DSC0102.JPG"],
+        )
+        self.assertEqual(
+            sorted(path.name for path in warm_group.iterdir()),
+            ["DSC0200.JPG", "DSC0201.JPG", "DSC0202.JPG"],
+        )
+        self.assertTrue((source / "DSC0300.JPG").exists())
+        group_roles = [
+            folder
+            for folder in result["culling"]["folders"]
+            if folder["role"] == "group"
+        ]
+        self.assertEqual(len(group_roles), 2)
+        self.assertEqual(result["compared_photos"], 7)
+
+    def test_auto_compare_groups_rejects_invalid_min_size(self) -> None:
+        source = Path(self.temp.name) / "tiny"
+        source.mkdir()
+        Image.new("RGB", (40, 40), (5, 5, 200)).save(source / "ONLY.JPG")
+
+        response, result = self.json_request(
+            "POST",
+            "/api/local/compare-groups",
+            {"source_directory": str(source), "min_group_size": 1},
+        )
+
+        self.assertEqual(response.status, 400)
+        self.assertIn("Minimum group size", result["error"])
+        self.assertTrue((source / "ONLY.JPG").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

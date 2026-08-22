@@ -223,7 +223,7 @@ class GooglePhotosService:
             raw = base64.b64decode(wrapper["data"])
             if wrapper.get("encrypted"):
                 if os.name != "nt":
-                    raise GooglePhotosError("Google credentials belong to another computer")
+                    raise GooglePhotosError("Google credentials belong to another desktop")
                 raw = _windows_unprotect(raw)
             return json.loads(raw)
         except GooglePhotosError:
