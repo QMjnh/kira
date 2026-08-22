@@ -55,6 +55,8 @@ AUTHED_ROUTES: list[tuple[tuple[str, ...], tuple[str, ...], str, bool]] = [
     (("api", "google", "operations", "{operation_id}"), ("GET",), "_h_google_operation", True),
     (("api", "local", "browse"), ("GET",), "_h_local_browse", True),
     (("api", "local", "scan"), ("GET",), "_h_local_scan", True),
+    (("api", "local", "tags"), ("GET",), "_h_local_tags", True),
+    (("api", "local", "tags"), ("POST",), "_h_local_tags_update", True),
     (("api", "local", "cull"), ("POST",), "_h_local_cull", True),
     (("api", "local", "compare-groups"), ("POST",), "_h_local_compare_groups", True),
     (("api", "local", "move"), ("POST",), "_h_local_move", True),
@@ -379,37 +381,61 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         self._send_json(browse_directories(query.get("path", [""])[0]))
 
     def _h_local_scan(self, params: dict, query: dict) -> None:
-        self._send_json(scan_photo_directory(query.get("path", [""])[0]))
+        scan = scan_photo_directory(query.get("path", [""])[0])
+        self.server.store.annotate_scan(scan)
+        self._send_json(scan)
+
+    # -- Photo tag handlers -------------------------------------------------------
+
+    def _h_local_tags(self, params: dict, query: dict) -> None:
+        self._send_json({"tags": self.server.store.all_tags()})
+
+    def _h_local_tags_update(self, params: dict, query: dict) -> None:
+        body = self._read_json()
+        result = self.server.store.update_asset_tags(
+            _string_list(body, "asset_ids"),
+            body.get("add_tags", []),
+            body.get("remove_tags", []),
+        )
+        self._send_json(result)
+
+    def _annotated(self, payload: object) -> object:
+        """Attach stored tags to scan payloads returned by cull/move/compare."""
+        if isinstance(payload, dict):
+            if "assets" in payload:
+                self.server.store.annotate_scan(payload)
+            for key in ("source", "destination"):
+                child = payload.get(key)
+                if isinstance(child, dict) and "assets" in child:
+                    self.server.store.annotate_scan(child)
+        return payload
 
     def _h_local_cull(self, params: dict, query: dict) -> None:
         body = self._read_json()
-        self._send_json(
-            move_culling_assets(
-                str(body.get("source_directory", "")),
-                _string_list(body, "asset_ids"),
-                str(body.get("action", "")),
-                str(body.get("group_name", "")),
-            )
+        result = move_culling_assets(
+            str(body.get("source_directory", "")),
+            _string_list(body, "asset_ids"),
+            str(body.get("action", "")),
+            str(body.get("group_name", "")),
         )
+        self._send_json(self._annotated(result))
 
     def _h_local_move(self, params: dict, query: dict) -> None:
         body = self._read_json()
-        self._send_json(
-            move_assets_between_directories(
-                str(body.get("source_directory", "")),
-                str(body.get("destination_directory", "")),
-                _string_list(body, "asset_ids"),
-            )
+        result = move_assets_between_directories(
+            str(body.get("source_directory", "")),
+            str(body.get("destination_directory", "")),
+            _string_list(body, "asset_ids"),
         )
+        self._send_json(self._annotated(result))
 
     def _h_local_compare_groups(self, params: dict, query: dict) -> None:
         body = self._read_json()
-        self._send_json(
-            build_compare_groups(
-                str(body.get("source_directory", "")),
-                body.get("min_group_size"),
-            )
+        result = build_compare_groups(
+            str(body.get("source_directory", "")),
+            body.get("min_group_size"),
         )
+        self._send_json(self._annotated(result))
 
     def _h_local_preview(self, params: dict, query: dict) -> None:
         try:

@@ -10,7 +10,9 @@
     libraryAssets: [],
     culling: null,
     selectedAssets: new Set(),
+    tagFilter: new Set(),
     rightPaneOpen: false,
+    tileAnchor: {left: null, right: null},
     libraryPanes: {
       left: {directory: '', assets: [], culling: null, selectedAssets: new Set(), parent: null, breadcrumbs: [], directories: []},
       right: {directory: '', assets: [], culling: null, selectedAssets: new Set(), parent: null, breadcrumbs: [], directories: []},
@@ -566,6 +568,79 @@
     renderPhotoGrid();
   }
 
+  function visiblePaneAssets(pane) {
+    if (!state.tagFilter.size) return pane.assets;
+    return pane.assets.filter((asset) => (asset.tags || []).some((tag) => state.tagFilter.has(tag.toLowerCase())));
+  }
+
+  function knownTags() {
+    const counts = new Map();
+    ['left', 'right'].forEach((paneId) => {
+      paneFor(paneId).assets.forEach((asset) => {
+        (asset.tags || []).forEach((tag) => counts.set(tag, (counts.get(tag) || 0) + 1));
+      });
+    });
+    return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }
+
+  function effectiveTagValue() {
+    return (el('tag-input').value.trim() || el('tag-existing-select').value.trim());
+  }
+
+  function renderTagFilterBar() {
+    const tags = knownTags();
+    const chips = el('tag-filter-chips');
+    chips.replaceChildren();
+    tags.forEach(([tag]) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = `tag-chip${state.tagFilter.has(tag.toLowerCase()) ? ' active' : ''}`;
+      chip.textContent = tag;
+      chip.setAttribute('aria-pressed', String(state.tagFilter.has(tag.toLowerCase())));
+      chip.addEventListener('click', () => {
+        toggleTagFilter(tag);
+      });
+      chips.appendChild(chip);
+    });
+    const showBar = tags.length > 0 || state.tagFilter.size > 0;
+    el('tag-filter-bar').classList.toggle('hidden', !showBar);
+    el('tag-clear').classList.toggle('hidden', state.tagFilter.size === 0);
+    const datalist = el('tag-options');
+    datalist.replaceChildren();
+    tags.forEach(([tag]) => {
+      const option = document.createElement('option');
+      option.value = tag;
+      datalist.appendChild(option);
+    });
+    const existingSelect = el('tag-existing-select');
+    const previousSelect = existingSelect.value;
+    existingSelect.replaceChildren();
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = tags.length ? 'Existing tags…' : 'No tags yet';
+    existingSelect.appendChild(placeholder);
+    tags.forEach(([tag]) => {
+      const option = document.createElement('option');
+      option.value = tag;
+      option.textContent = tag;
+      existingSelect.appendChild(option);
+    });
+    if (tags.some(([tag]) => tag === previousSelect)) {
+      existingSelect.value = previousSelect;
+    } else {
+      existingSelect.value = '';
+    }
+    existingSelect.disabled = tags.length === 0;
+  }
+
+  function toggleTagFilter(tag) {
+    const key = String(tag).toLowerCase();
+    if (state.tagFilter.has(key)) state.tagFilter.delete(key);
+    else state.tagFilter.add(key);
+    renderTagFilterBar();
+    renderPhotoGrid();
+  }
+
   async function openCullFolder(path) {
     const result = await api(`/api/local/scan?path=${encodeURIComponent(path)}`);
     applyLibraryScan(result, state.activePaneId);
@@ -645,8 +720,13 @@
       grid.innerHTML = '<p class="pane-empty panel-copy">No supported media in this folder.</p>';
       return;
     }
+    const visible = visiblePaneAssets(pane);
+    if (!visible.length) {
+      grid.innerHTML = '<p class="pane-empty panel-copy">No photos match the selected tag filter.</p>';
+      return;
+    }
     const fragment = document.createDocumentFragment();
-    pane.assets.forEach((asset) => {
+    visible.forEach((asset) => {
       const selected = pane.selectedAssets.has(asset.id);
       const button = document.createElement('button');
       button.type = 'button';
@@ -657,14 +737,41 @@
         ? `<img src="${escapeHtml(previewUrl(asset.preview_path, 480, asset.preview_version))}" alt="${escapeHtml(asset.stem)}" loading="lazy" decoding="async">`
         : '<span class="photo-placeholder video-placeholder"><span>▶</span>Video</span>';
       const formatTags = [];
+      (asset.tags || []).forEach((tag) => formatTags.push(`<span class="format-tag tile-tag">${escapeHtml(tag)}</span>`));
       if (asset.jpeg_files.length) formatTags.push(`<span class="format-tag">JPEG${asset.jpeg_files.length > 1 ? ` ×${asset.jpeg_files.length}` : ''}</span>`);
       if ((asset.video_files || []).length) formatTags.push(`<span class="format-tag">VIDEO${asset.video_files.length > 1 ? ` ×${asset.video_files.length}` : ''}</span>`);
       const tags = formatTags.join('');
       button.innerHTML = `${media}<span class="pick-check">${selected ? '✓' : '+'}</span><span class="photo-tile-info"><strong>${escapeHtml(asset.stem)}</strong><span class="format-tags">${tags}</span></span>`;
-      button.addEventListener('click', () => {
+      button.addEventListener('click', (event) => {
         setActivePane(paneId);
-        toggleAsset(asset.id, button, paneId);
+        if (event.shiftKey && state.tileAnchor[paneId]) {
+          pane.selectedAssets.clear();
+          const anchorIndex = visible.findIndex((item) => item.id === state.tileAnchor[paneId]);
+          const targetIndex = visible.indexOf(asset);
+          const [from, to] = anchorIndex <= targetIndex ? [anchorIndex, targetIndex] : [targetIndex, anchorIndex];
+          for (let i = from; i <= to; i++) pane.selectedAssets.add(visible[i].id);
+          state.tileAnchor[paneId] = asset.id;
+          state.selectedAssets = pane.selectedAssets;
+          syncSelectionTiles();
+          updateSelectionUi();
+        } else if (event.ctrlKey || event.metaKey) {
+          state.tileAnchor[paneId] = asset.id;
+          toggleAsset(asset.id, button, paneId);
+        } else {
+          state.tileAnchor[paneId] = asset.id;
+          pane.selectedAssets.clear();
+          pane.selectedAssets.add(asset.id);
+          state.selectedAssets = pane.selectedAssets;
+          syncSelectionTiles();
+          updateSelectionUi();
+        }
       });
+      if (asset.preview_path) {
+        button.addEventListener('dblclick', () => {
+          setActivePane(paneId);
+          openLightbox(asset);
+        });
+      }
       fragment.appendChild(button);
     });
     grid.appendChild(fragment);
@@ -674,6 +781,7 @@
     renderPanePhotoGrid('left');
     renderPanePhotoGrid('right');
     renderPaneHeaders();
+    renderTagFilterBar();
     updateSelectionUi();
   }
 
@@ -716,10 +824,39 @@
     el('restore-inbox').disabled = count === 0;
     el('group-selected').disabled = count === 0 || !selectedComparisonGroupName();
     el('google-upload-selected').disabled = count === 0 || !state.google.connected;
+    const tagValue = effectiveTagValue();
+    el('tag-add').disabled = count === 0 || !tagValue;
+    el('tag-remove').disabled = count === 0 || !tagValue;
     const left = paneFor('left');
     const right = paneFor('right');
     el('move-selected-left').disabled = !left.directory || !right.directory || left.selectedAssets.size === 0;
     el('move-selected-right').disabled = !left.directory || !right.directory || right.selectedAssets.size === 0;
+  }
+
+  async function updateSelectedTags(action) {
+    const value = effectiveTagValue();
+    if (!value || !state.selectedAssets.size) return;
+    const assetIds = Array.from(state.selectedAssets);
+    const body = action === 'add'
+      ? {asset_ids: assetIds, add_tags: [value]}
+      : {asset_ids: assetIds, remove_tags: [value]};
+    try {
+      const result = await api('/api/local/tags', {method: 'POST', body: JSON.stringify(body)});
+      ['left', 'right'].forEach((paneId) => {
+        paneFor(paneId).assets.forEach((asset) => {
+          if (Object.prototype.hasOwnProperty.call(result.assignments, asset.id)) {
+            asset.tags = result.assignments[asset.id];
+          }
+        });
+      });
+      el('tag-input').value = '';
+      el('tag-existing-select').value = '';
+      renderTagFilterBar();
+      renderPhotoGrid();
+      toast(`${action === 'add' ? 'Added' : 'Removed'} tag “${value}” ${action === 'add' ? 'on' : 'from'} ${assetIds.length} photo group${assetIds.length === 1 ? '' : 's'}.`);
+    } catch (error) {
+      toast(error.message);
+    }
   }
 
   async function moveSelectedAssets(action) {
@@ -845,6 +982,11 @@
     el('compare-zoom-value').textContent = '100%';
     const grid = el('compare-grid');
     grid.replaceChildren();
+    const count = assets.length;
+    const cols = count <= 2 ? count : count <= 4 ? 2 : 3;
+    const rows = Math.ceil(count / cols);
+    grid.style.setProperty('--compare-cols', String(cols));
+    grid.style.setProperty('--compare-rows', String(rows));
     assets.forEach((asset) => {
       const item = document.createElement('div');
       item.className = 'compare-item';
@@ -1252,10 +1394,26 @@
   });
   el('select-all').addEventListener('click', () => {
     state.selectedAssets.clear();
-    state.libraryAssets.forEach((asset) => state.selectedAssets.add(asset.id));
+    visiblePaneAssets(paneFor()).forEach((asset) => state.selectedAssets.add(asset.id));
     syncSelectionTiles();
     updateSelectionUi();
   });
+  el('tag-clear').addEventListener('click', () => {
+    state.tagFilter.clear();
+    renderTagFilterBar();
+    renderPhotoGrid();
+  });
+  el('tag-input').addEventListener('input', () => {
+    if (el('tag-input').value.trim()) el('tag-existing-select').value = '';
+    updateSelectionUi();
+  });
+  el('tag-existing-select').addEventListener('change', () => {
+    const chosen = el('tag-existing-select').value.trim();
+    if (chosen) el('tag-input').value = chosen;
+    updateSelectionUi();
+  });
+  el('tag-add').addEventListener('click', () => updateSelectedTags('add'));
+  el('tag-remove').addEventListener('click', () => updateSelectedTags('remove'));
   el('clear-picked').addEventListener('click', () => {
     state.selectedAssets.clear();
     syncSelectionTiles();
@@ -1272,6 +1430,22 @@
     if (state.compareZoom === 1) state.comparePan = {x: 0, y: 0};
     el('compare-zoom-value').textContent = `${event.target.value}%`;
     applyCompareTransform();
+  });
+  el('compare-grid').addEventListener('wheel', (event) => {
+    event.preventDefault();
+    const step = event.deltaY < 0 ? 10 : -10;
+    const percent = Math.min(300, Math.max(100, Math.round(state.compareZoom * 100) + step));
+    state.compareZoom = percent / 100;
+    if (state.compareZoom === 1) state.comparePan = {x: 0, y: 0};
+    el('compare-zoom').value = String(percent);
+    el('compare-zoom-value').textContent = `${percent}%`;
+    applyCompareTransform();
+  }, {passive: false});
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !el('compare-modal').classList.contains('hidden')) {
+      el('compare-modal').classList.add('hidden');
+      syncSelectionTiles();
+    }
   });
 
   el('selection-job-form').addEventListener('submit', async (event) => {

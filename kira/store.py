@@ -30,6 +30,16 @@ from .media import (
     utc_now,
 )
 
+MAX_TAGS_PER_ASSET = 32
+MAX_TAG_LENGTH = 40
+
+
+def normalize_tag(value: object) -> str:
+    cleaned = re.sub(r"\s+", " ", str(value or "").strip())[:MAX_TAG_LENGTH].strip()
+    if not cleaned:
+        raise KiraError(HTTPStatus.BAD_REQUEST, "Enter a non-empty tag")
+    return cleaned
+
 
 class KiraStore:
     def __init__(self, root: Path) -> None:
@@ -37,6 +47,7 @@ class KiraStore:
         self.jobs_root = self.root / "jobs"
         self.thumbnails_root = self.root / "thumbnails"
         self.config_path = self.root / "config.json"
+        self.tags_path = self.root / "tags.json"
         self.lock = threading.RLock()
         self.bundle_lock = threading.Lock()
         self.thumbnail_slots = threading.Semaphore(2)
@@ -62,6 +73,83 @@ class KiraStore:
         payload = {"token": secrets.token_urlsafe(32), "created_at": utc_now()}
         atomic_json_write(self.config_path, payload)
         return payload
+
+    # -- Photo tags ---------------------------------------------------------------
+
+    def _load_tags(self) -> dict[str, list[str]]:
+        if not self.tags_path.exists():
+            return {}
+        try:
+            payload = json.loads(self.tags_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        tags: dict[str, list[str]] = {}
+        for asset_id, names in payload.items():
+            if not isinstance(names, list):
+                continue
+            merged: list[str] = []
+            seen: set[str] = set()
+            for name in names:
+                key = str(name).strip().casefold()
+                if key and key not in seen:
+                    seen.add(key)
+                    merged.append(str(name).strip())
+            if merged:
+                tags[str(asset_id)] = merged
+        return tags
+
+    def all_tags(self) -> list[dict]:
+        counts: dict[str, int] = {}
+        for names in self._load_tags().values():
+            for name in names:
+                counts[name.casefold()] = counts.get(name.casefold(), 0) + 1
+        return [
+            {"name": name, "count": count}
+            for name, count in sorted(counts.items(), key=lambda item: item[0])
+        ]
+
+    def update_asset_tags(self, asset_ids: list[str], add_values: list, remove_values: list) -> dict:
+        adds = [normalize_tag(value) for value in add_values]
+        removes = [str(value or "").strip() for value in remove_values]
+        ids = [str(item) for item in asset_ids]
+        if not ids:
+            raise KiraError(HTTPStatus.BAD_REQUEST, "Select at least one photo")
+        if not adds and not removes:
+            raise KiraError(HTTPStatus.BAD_REQUEST, "Provide a tag to add or remove")
+        remove_keys = {value.casefold() for value in removes if value}
+        with self.lock:
+            tags = self._load_tags()
+            assignments: dict[str, list[str]] = {}
+            for asset_id in ids:
+                existing = [name for name in tags.get(asset_id, []) if name.casefold() not in remove_keys]
+                merged: list[str] = []
+                seen: set[str] = set(existing_name.casefold() for existing_name in existing)
+                merged.extend(existing)
+                for name in adds:
+                    key = name.casefold()
+                    if key not in seen:
+                        seen.add(key)
+                        merged.append(name)
+                if len(merged) > MAX_TAGS_PER_ASSET:
+                    raise KiraError(
+                        HTTPStatus.BAD_REQUEST,
+                        f"A photo can hold at most {MAX_TAGS_PER_ASSET} tags",
+                    )
+                assignments[asset_id] = merged
+                if merged:
+                    tags[asset_id] = merged
+                else:
+                    tags.pop(asset_id, None)
+            atomic_json_write(self.tags_path, tags)
+        return {"assignments": assignments, "tags": self.all_tags()}
+
+    def annotate_scan(self, scan: dict) -> None:
+        """Attach stored tag lists to every scanned asset in place."""
+        tags = self._load_tags()
+        for asset in scan.get("assets", []):
+            asset["tags"] = list(tags.get(str(asset.get("id")), []))
 
     def _job_dir(self, job_id: str) -> Path:
         if not re.fullmatch(r"[a-f0-9]{12}", job_id):
