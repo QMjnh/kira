@@ -21,6 +21,7 @@
     compareZoom: 1,
     comparePan: {x: 0, y: 0},
     googleDownloadSettingsOpen: false,
+    showRawOnly: localStorage.getItem('kira-show-raw-only') === 'true',
     google: {configured: false, connected: false},
   };
 
@@ -506,11 +507,56 @@
     return state.libraryPanes[paneId];
   }
 
+  function isAssetDisplayable(asset) {
+    if (state.showRawOnly) return true;
+    return asset.jpeg_files.length > 0 || (asset.video_files || []).length > 0;
+  }
+
+  function displayableAssets(pane) {
+    return pane.assets.filter(isAssetDisplayable);
+  }
+
   function paneSummary(pane) {
-    const photoCount = pane.assets.filter((asset) => asset.jpeg_files.length).length;
-    const videoCount = pane.assets.filter((asset) => (asset.video_files || []).length).length;
     if (!pane.directory) return 'No folder open';
-    return `${photoCount} photo group${photoCount === 1 ? '' : 's'} · ${videoCount} video group${videoCount === 1 ? '' : 's'}`;
+    const displayable = displayableAssets(pane);
+    const photoCount = displayable.filter((asset) => asset.jpeg_files.length).length;
+    const videoCount = displayable.filter((asset) => (asset.video_files || []).length).length;
+    const hiddenCount = pane.assets.length - displayable.length;
+    let summary = `${photoCount} photo group${photoCount === 1 ? '' : 's'} · ${videoCount} video group${videoCount === 1 ? '' : 's'}`;
+    if (hiddenCount > 0 && !state.showRawOnly) {
+      summary += ` · ${hiddenCount} RAW-only hidden`;
+    } else if (state.showRawOnly && hiddenCount === 0 && pane.assets.length !== displayable.length) {
+      // no-op
+    } else if (state.showRawOnly) {
+      const rawOnly = displayable.filter((asset) => asset.raw_files.length > 0 && asset.jpeg_files.length === 0 && !(asset.video_files || []).length).length;
+      if (rawOnly) summary += ` · ${rawOnly} RAW-only`;
+    }
+    return summary;
+  }
+
+  function renderDisplaySettings() {
+    const toggle = el('show-raw-toggle');
+    if (!toggle) return;
+    toggle.checked = state.showRawOnly;
+    const hiddenNote = el('raw-hidden-note');
+    if (!hiddenNote) return;
+    const active = paneFor();
+    if (!active.directory) {
+      hiddenNote.classList.add('hidden');
+      hiddenNote.textContent = '';
+      hiddenNote.removeAttribute('title');
+      return;
+    }
+    const hidden = active.assets.length - displayableAssets(active).length;
+    if (!state.showRawOnly && hidden > 0) {
+      hiddenNote.textContent = `${hidden} hidden`;
+      hiddenNote.title = `${hidden} RAW-only group${hidden === 1 ? '' : 's'} hidden — enable “Show RAW” to display`;
+      hiddenNote.classList.remove('hidden');
+    } else {
+      hiddenNote.classList.add('hidden');
+      hiddenNote.textContent = '';
+      hiddenNote.removeAttribute('title');
+    }
   }
 
   function renderPaneHeaders() {
@@ -553,15 +599,14 @@
     renderGroupPicker();
     renderGoogleDestination();
     renderGoogleOrganizer();
+    renderDisplaySettings();
     updateSelectionUi();
   }
 
   function applyLibraryScan(result, paneId = state.activePaneId) {
     const pane = paneFor(paneId);
-    // Culling is JPEG-driven: RAW-only files stay out of the visual workspace,
-    // while a same-stem RAW remains available as the selected transfer source.
     pane.directory = result.directory;
-    pane.assets = result.assets.filter((asset) => asset.jpeg_files.length > 0 || (asset.video_files || []).length > 0);
+    pane.assets = result.assets;
     pane.culling = result.culling || null;
     pane.selectedAssets.clear();
     setActivePane(paneId);
@@ -569,14 +614,15 @@
   }
 
   function visiblePaneAssets(pane) {
-    if (!state.tagFilter.size) return pane.assets;
-    return pane.assets.filter((asset) => (asset.tags || []).some((tag) => state.tagFilter.has(tag.toLowerCase())));
+    const base = displayableAssets(pane);
+    if (!state.tagFilter.size) return base;
+    return base.filter((asset) => (asset.tags || []).some((tag) => state.tagFilter.has(tag.toLowerCase())));
   }
 
   function knownTags() {
     const counts = new Map();
     ['left', 'right'].forEach((paneId) => {
-      paneFor(paneId).assets.forEach((asset) => {
+      displayableAssets(paneFor(paneId)).forEach((asset) => {
         (asset.tags || []).forEach((tag) => counts.set(tag, (counts.get(tag) || 0) + 1));
       });
     });
@@ -720,9 +766,20 @@
       grid.innerHTML = '<p class="pane-empty panel-copy">No supported media in this folder.</p>';
       return;
     }
+    const displayable = displayableAssets(pane);
+    if (!displayable.length) {
+      const hidden = pane.assets.length;
+      grid.innerHTML = `<p class="pane-empty panel-copy">No JPEG or video previews in this folder — ${hidden} RAW-only group${hidden === 1 ? '' : 's'} hidden. Enable “Show RAW-only photos” to display them.</p>`;
+      return;
+    }
     const visible = visiblePaneAssets(pane);
     if (!visible.length) {
-      grid.innerHTML = '<p class="pane-empty panel-copy">No photos match the selected tag filter.</p>';
+      const hiddenByType = pane.assets.length - displayable.length;
+      if (hiddenByType > 0 && !state.tagFilter.size) {
+        grid.innerHTML = '<p class="pane-empty panel-copy">No photos match the current display settings.</p>';
+      } else {
+        grid.innerHTML = '<p class="pane-empty panel-copy">No photos match the selected tag filter.</p>';
+      }
       return;
     }
     const fragment = document.createDocumentFragment();
@@ -733,13 +790,26 @@
       button.className = `photo-tile${selected ? ' selected' : ''}`;
       button.setAttribute('aria-pressed', String(selected));
       button.dataset.assetId = asset.id;
-      const media = asset.preview_path
-        ? `<img src="${escapeHtml(previewUrl(asset.preview_path, 480, asset.preview_version))}" alt="${escapeHtml(asset.stem)}" loading="lazy" decoding="async">`
-        : '<span class="photo-placeholder video-placeholder"><span>▶</span>Video</span>';
+      let media;
+      if (asset.preview_path) {
+        media = `<img src="${escapeHtml(previewUrl(asset.preview_path, 480, asset.preview_version))}" alt="${escapeHtml(asset.stem)}" loading="lazy" decoding="async">`;
+      } else if ((asset.video_files || []).length) {
+        media = '<span class="photo-placeholder video-placeholder"><span>▶</span>Video</span>';
+      } else if (asset.raw_files.length) {
+        media = `<span class="photo-placeholder raw-placeholder"><span>RAW</span>${escapeHtml(asset.raw_files[0].filename)}</span>`;
+      } else if ((asset.other_files || []).length) {
+        media = `<span class="photo-placeholder raw-placeholder"><span>${escapeHtml(asset.other_files[0].filename.split('.').pop().toUpperCase())}</span>${escapeHtml(asset.stem)}</span>`;
+      } else {
+        media = '<span class="photo-placeholder video-placeholder"><span>•</span>Media</span>';
+      }
       const formatTags = [];
       (asset.tags || []).forEach((tag) => formatTags.push(`<span class="format-tag tile-tag">${escapeHtml(tag)}</span>`));
+      if (asset.raw_files.length) formatTags.push(`<span class="format-tag">RAW${asset.raw_files.length > 1 ? ` ×${asset.raw_files.length}` : ''}</span>`);
       if (asset.jpeg_files.length) formatTags.push(`<span class="format-tag">JPEG${asset.jpeg_files.length > 1 ? ` ×${asset.jpeg_files.length}` : ''}</span>`);
       if ((asset.video_files || []).length) formatTags.push(`<span class="format-tag">VIDEO${asset.video_files.length > 1 ? ` ×${asset.video_files.length}` : ''}</span>`);
+      if ((asset.other_files || []).length && !asset.jpeg_files.length && !asset.raw_files.length && !(asset.video_files || []).length) {
+        formatTags.push(`<span class="format-tag">${escapeHtml(asset.other_files[0].filename.split('.').pop().toUpperCase())}</span>`);
+      }
       const tags = formatTags.join('');
       button.innerHTML = `${media}<span class="pick-check">${selected ? '✓' : '+'}</span><span class="photo-tile-info"><strong>${escapeHtml(asset.stem)}</strong><span class="format-tags">${tags}</span></span>`;
       button.addEventListener('click', (event) => {
@@ -782,6 +852,7 @@
     renderPanePhotoGrid('right');
     renderPaneHeaders();
     renderTagFilterBar();
+    renderDisplaySettings();
     updateSelectionUi();
   }
 
@@ -817,7 +888,11 @@
     el('selection-job-form').querySelector('button[type="submit"]').disabled = count === 0;
     el('compare-picked').disabled = count < 2;
     el('compare-picked').textContent = `Compare selected${count ? ` (${count})` : ''}`;
-    el('select-all').disabled = state.libraryAssets.length === 0 || count === state.libraryAssets.length;
+    const totalSelectable = displayableAssets(paneFor()).length;
+    const visibleCount = visiblePaneAssets(paneFor()).length;
+    // Select all picks the currently filtered visible set; disable when that set is already fully selected.
+    const selectAllTarget = state.tagFilter.size ? visibleCount : totalSelectable;
+    el('select-all').disabled = selectAllTarget === 0 || count === selectAllTarget;
     el('clear-picked').disabled = count === 0;
     el('mark-unselect').disabled = count === 0;
     el('mark-select').disabled = count === 0;
@@ -1402,6 +1477,24 @@
     state.tagFilter.clear();
     renderTagFilterBar();
     renderPhotoGrid();
+  });
+  el('show-raw-toggle').addEventListener('change', (event) => {
+    state.showRawOnly = event.target.checked;
+    localStorage.setItem('kira-show-raw-only', String(state.showRawOnly));
+    // Keep existing selections but re-render so hidden assets disappear/appear.
+    // If hiding, deselect any now-hidden assets to keep counts accurate.
+    if (!state.showRawOnly) {
+      ['left', 'right'].forEach((paneId) => {
+        const pane = paneFor(paneId);
+        const visibleIds = new Set(displayableAssets(pane).map((a) => a.id));
+        for (const id of Array.from(pane.selectedAssets)) {
+          if (!visibleIds.has(id)) pane.selectedAssets.delete(id);
+        }
+      });
+      state.selectedAssets = paneFor().selectedAssets;
+    }
+    renderPhotoGrid();
+    toast(state.showRawOnly ? 'Showing all files including RAW-only' : 'Hiding RAW-only photos');
   });
   el('tag-input').addEventListener('input', () => {
     if (el('tag-input').value.trim()) el('tag-existing-select').value = '';
