@@ -35,6 +35,8 @@ VIDEO_EXTENSIONS = {
     ".mkv", ".mmv", ".mod", ".mov", ".mp4", ".mpg", ".mts", ".tod", ".wmv",
 }
 MEDIA_EXTENSIONS = PHOTO_EXTENSIONS | VIDEO_EXTENSIONS
+_EXIF_DATETIME_ORIGINAL = 36867
+_EXIF_IFD_POINTER = 34665
 
 DEFAULT_COMPARE_MIN_SIZE = 3
 MIN_COMPARE_MIN_SIZE = 2
@@ -77,6 +79,38 @@ def match_key(filename: str) -> str:
         previous = stem
         stem = EDIT_SUFFIX.sub("", stem).strip(" _-")
     return stem.casefold()
+
+
+def _exif_taken_date(path: Path) -> str | None:
+    """Return YYYY-MM-DD from DateTimeOriginal when the file has readable EXIF."""
+    if path.suffix.casefold() not in PREVIEW_EXTENSIONS:
+        return None
+    try:
+        with Image.open(path) as image:
+            exif = image.getexif()
+            raw = ""
+            try:
+                raw = str(exif.get_ifd(_EXIF_IFD_POINTER).get(_EXIF_DATETIME_ORIGINAL) or "")
+            except (AttributeError, KeyError, TypeError, ValueError):
+                pass
+            if not raw.strip():
+                raw = str(exif.get(_EXIF_DATETIME_ORIGINAL) or "")
+    except (OSError, ValueError):
+        return None
+    stamp = raw.strip()
+    if len(stamp) >= 10 and stamp[4:5] == ":" and stamp[7:8] == ":":
+        return f"{stamp[0:4]}-{stamp[5:7]}-{stamp[8:10]}"
+    return None
+
+
+def asset_taken_at(paths: list[Path], file_stats: dict) -> str:
+    """Prefer EXIF capture date; otherwise use the earliest file timestamp."""
+    for path in paths:
+        taken = _exif_taken_date(path)
+        if taken:
+            return taken
+    earliest = min(file_stats[path].st_mtime for path in paths)
+    return datetime.fromtimestamp(earliest).date().isoformat()
 
 
 def unique_destination(folder: Path, filename: str) -> Path:
@@ -577,6 +611,7 @@ def scan_photo_directory(value: str) -> dict:
         asset_id = hashlib.sha256(f"{current}\0{group['stem'].casefold()}".encode("utf-8")).hexdigest()[:16]
         preview = group["preview_paths"][0] if group["preview_paths"] else None
         file_stats = {path: path.stat() for path in all_paths}
+        date_paths = group["jpeg_paths"] + group["other_paths"] + group["raw_paths"] + group["video_paths"]
         assets.append(
             {
                 "id": asset_id,
@@ -587,6 +622,7 @@ def scan_photo_directory(value: str) -> dict:
                 "other_files": [{"filename": path.name, "path": str(path), "size": file_stats[path].st_size} for path in group["other_paths"]],
                 "preview_path": str(preview) if preview else None,
                 "preview_version": file_stats[preview].st_mtime_ns if preview else None,
+                "taken_at": asset_taken_at(date_paths, file_stats),
                 "total_size": sum(file_stats[path].st_size for path in all_paths),
             }
         )

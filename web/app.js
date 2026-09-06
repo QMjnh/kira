@@ -11,6 +11,8 @@
     culling: null,
     selectedAssets: new Set(),
     tagFilter: new Set(),
+    dateFrom: '',
+    dateTo: '',
     rightPaneOpen: false,
     tileAnchor: {left: null, right: null},
     libraryPanes: {
@@ -613,10 +615,36 @@
     renderPhotoGrid();
   }
 
+  function hasPhotoFilter() {
+    return state.tagFilter.size > 0 || Boolean(state.dateFrom || state.dateTo);
+  }
+
+  function matchesDateFilter(asset) {
+    if (!state.dateFrom && !state.dateTo) return true;
+    const taken = String(asset.taken_at || '').slice(0, 10);
+    if (!taken) return false;
+    if (state.dateFrom && taken < state.dateFrom) return false;
+    if (state.dateTo && taken > state.dateTo) return false;
+    return true;
+  }
+
   function visiblePaneAssets(pane) {
-    const base = displayableAssets(pane);
-    if (!state.tagFilter.size) return base;
-    return base.filter((asset) => (asset.tags || []).some((tag) => state.tagFilter.has(tag.toLowerCase())));
+    let visible = displayableAssets(pane);
+    if (state.tagFilter.size) {
+      visible = visible.filter((asset) => (asset.tags || []).some((tag) => state.tagFilter.has(tag.toLowerCase())));
+    }
+    if (state.dateFrom || state.dateTo) {
+      visible = visible.filter(matchesDateFilter);
+    }
+    return visible;
+  }
+
+  function renderDateFilterBar() {
+    const bar = el('date-filter-bar');
+    if (!bar) return;
+    el('date-from').value = state.dateFrom;
+    el('date-to').value = state.dateTo;
+    el('date-clear').classList.toggle('hidden', !state.dateFrom && !state.dateTo);
   }
 
   function knownTags() {
@@ -775,8 +803,10 @@
     const visible = visiblePaneAssets(pane);
     if (!visible.length) {
       const hiddenByType = pane.assets.length - displayable.length;
-      if (hiddenByType > 0 && !state.tagFilter.size) {
+      if (hiddenByType > 0 && !hasPhotoFilter()) {
         grid.innerHTML = '<p class="pane-empty panel-copy">No photos match the current display settings.</p>';
+      } else if (state.dateFrom || state.dateTo) {
+        grid.innerHTML = '<p class="pane-empty panel-copy">No photos match the selected date range.</p>';
       } else {
         grid.innerHTML = '<p class="pane-empty panel-copy">No photos match the selected tag filter.</p>';
       }
@@ -851,6 +881,7 @@
     renderPanePhotoGrid('left');
     renderPanePhotoGrid('right');
     renderPaneHeaders();
+    renderDateFilterBar();
     renderTagFilterBar();
     renderDisplaySettings();
     updateSelectionUi();
@@ -888,11 +919,9 @@
     el('selection-job-form').querySelector('button[type="submit"]').disabled = count === 0;
     el('compare-picked').disabled = count < 2;
     el('compare-picked').textContent = `Compare selected${count ? ` (${count})` : ''}`;
-    const totalSelectable = displayableAssets(paneFor()).length;
     const visibleCount = visiblePaneAssets(paneFor()).length;
     // Select all picks the currently filtered visible set; disable when that set is already fully selected.
-    const selectAllTarget = state.tagFilter.size ? visibleCount : totalSelectable;
-    el('select-all').disabled = selectAllTarget === 0 || count === selectAllTarget;
+    el('select-all').disabled = visibleCount === 0 || count === visibleCount;
     el('clear-picked').disabled = count === 0;
     el('mark-unselect').disabled = count === 0;
     el('mark-select').disabled = count === 0;
@@ -1476,6 +1505,22 @@
   el('tag-clear').addEventListener('click', () => {
     state.tagFilter.clear();
     renderTagFilterBar();
+    renderPhotoGrid();
+  });
+  el('date-from').addEventListener('input', (event) => {
+    state.dateFrom = event.target.value;
+    renderDateFilterBar();
+    renderPhotoGrid();
+  });
+  el('date-to').addEventListener('input', (event) => {
+    state.dateTo = event.target.value;
+    renderDateFilterBar();
+    renderPhotoGrid();
+  });
+  el('date-clear').addEventListener('click', () => {
+    state.dateFrom = '';
+    state.dateTo = '';
+    renderDateFilterBar();
     renderPhotoGrid();
   });
   el('show-raw-toggle').addEventListener('change', (event) => {

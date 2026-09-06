@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import struct
 import tempfile
 import threading
 import unittest
 import zipfile
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import quote
@@ -65,6 +68,9 @@ class KiraTransferTests(unittest.TestCase):
         self.assertIn('id="group-selected"', html)
         self.assertIn('id="compare-group-select"', html)
         self.assertIn('id="select-all"', html)
+        self.assertIn('id="date-from"', html)
+        self.assertIn('id="date-to"', html)
+        self.assertIn('id="date-clear"', html)
         self.assertIn('id="clear-picked"', html)
         self.assertIn('id="google-connect"', html)
         self.assertIn('id="google-download-mode"', html)
@@ -310,6 +316,42 @@ class KiraTransferTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(len(scan["assets"]), 1)
         self.assertEqual(len(scan["assets"][0]["jpeg_files"]), 3)
+
+    def test_scan_includes_taken_at_from_exif_or_file_mtime(self) -> None:
+        source = Path(self.temp.name) / "dated-photos"
+        source.mkdir()
+        Image.new("RGB", (24, 18), (10, 20, 30)).save(
+            source / "stamped.jpg",
+            format="JPEG",
+            quality=90,
+            exif=self._exif_blob("2024:06:15 09:30:00"),
+        )
+        fallback = source / "fallback.jpg"
+        Image.new("RGB", (24, 18), (40, 50, 60)).save(fallback, format="JPEG", quality=90)
+        stamp = datetime(2025, 1, 8, 12, 0, 0).timestamp()
+        os.utime(fallback, (stamp, stamp))
+
+        response, raw = self.request("GET", f"/api/local/scan?path={quote(str(source))}")
+        scan = json.loads(raw)
+        by_stem = {asset["stem"]: asset for asset in scan["assets"]}
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(by_stem["stamped"]["taken_at"], "2024-06-15")
+        self.assertEqual(by_stem["fallback"]["taken_at"], "2025-01-08")
+
+    def _exif_blob(self, capture_time: str) -> bytes:
+        data = capture_time.encode("ascii") + b"\x00"
+        ifd0_offset = 8
+        exif_ifd_offset = ifd0_offset + 18
+        tiff = b"II" + struct.pack("<H", 42) + struct.pack("<I", ifd0_offset)
+        ifd0 = struct.pack("<H", 1)
+        ifd0 += struct.pack("<HHII", 34665, 4, 1, exif_ifd_offset)
+        ifd0 += struct.pack("<I", 0)
+        value_offset = exif_ifd_offset + 18
+        exif_ifd = struct.pack("<H", 1)
+        exif_ifd += struct.pack("<HHII", 36867, 2, len(data), value_offset)
+        exif_ifd += struct.pack("<I", 0)
+        return b"Exif\x00\x00" + tiff + ifd0 + exif_ifd + data
 
     def upload(self, job_id: str, kind: str, filename: str, content: bytes, last_modified: int = 1):
         response, started = self.json_request(
