@@ -38,6 +38,7 @@
 
       <section id="dashboard-view" class="dashboard hidden">
         <section id="desktop-services" class="desktop-services hidden" aria-labelledby="services-title">
+          <div id="google-health-notice" class="health-notice hidden" role="status"></div>
           <header class="dashboard-section-heading">
             <div>
               <div class="eyebrow">Import &amp; connect</div>
@@ -137,52 +138,31 @@
         <section id="create-job-card" class="panel library-panel hidden">
           <div class="panel-heading">
             <div><div class="eyebrow">Desktop library</div><h2>Compare folders</h2></div>
+            <button id="browse-folders-right" class="quiet-button compact-button" type="button">+ Compare folder</button>
           </div>
           <div id="photo-workspace" class="photo-workspace hidden">
-            <div class="cull-actions folder-dependent hidden" aria-label="Organize selected photos">
-              <div class="cull-action-buttons">
-                <button id="mark-unselect" class="quiet-button" type="button" disabled>Move to Unselected</button>
-                <button id="mark-select" class="primary-button" type="button" disabled>Move to Selected</button>
-                <button id="restore-inbox" class="quiet-button hidden" type="button" disabled>Restore to inbox</button>
+            <details id="library-filters" class="workspace-disclosure library-filters">
+              <summary>Filters &amp; display <span id="filter-summary" class="disclosure-context"></span></summary>
+              <div class="workspace-disclosure-body">
+                <label class="toggle-switch toggle-switch--inline" title="Show RAW-only photos that have no JPEG preview">
+                  <input id="show-raw-toggle" type="checkbox">
+                  <span class="toggle-slider" aria-hidden="true"></span>
+                  <span class="toggle-label">Show RAW</span>
+                  <span id="raw-hidden-note" class="toggle-badge hidden"></span>
+                </label>
+                <div id="date-filter-bar" class="tag-filter-bar date-filter-bar folder-dependent hidden" aria-label="Filter photos by date">
+                  <span class="eyebrow">Filter by date</span>
+                  <label class="date-filter-field">From <input id="date-from" type="date"></label>
+                  <label class="date-filter-field">To <input id="date-to" type="date"></label>
+                  <button id="date-clear" class="quiet-button compact-button hidden" type="button">Clear dates</button>
+                </div>
+                <div id="tag-filter-bar" class="tag-filter-bar hidden" aria-label="Filter photos by tag">
+                  <span class="eyebrow">Filter by tag</span>
+                  <div id="tag-filter-chips" class="tag-filter-chips"></div>
+                  <button id="tag-clear" class="quiet-button compact-button hidden" type="button">Clear filter</button>
+                </div>
               </div>
-              <div class="group-action">
-                <select id="compare-group-select" aria-label="Comparison group">
-                  <option value="">Choose comparison group…</option>
-                  <option value="__new__">+ New comparison group…</option>
-                </select>
-                <input id="compare-group-name" class="hidden" type="text" maxlength="80" placeholder="New group name">
-                <button id="group-selected" class="quiet-button" type="button" disabled>Group to compare</button>
-              </div>
-            </div>
-            <div id="tag-editor-row" class="tag-editor-row folder-dependent hidden">
-              <span class="eyebrow">Tags for selection</span>
-              <div class="tag-action">
-                <select id="tag-existing-select" aria-label="Existing tags">
-                  <option value="">Existing tags…</option>
-                </select>
-                <input id="tag-input" type="text" maxlength="40" placeholder="New tag name…" list="tag-options" autocomplete="off">
-                <datalist id="tag-options"></datalist>
-                <button id="tag-add" class="quiet-button compact-button" type="button" disabled>Add tag</button>
-                <button id="tag-remove" class="quiet-button compact-button" type="button" disabled>Remove tag</button>
-              </div>
-              <label class="toggle-switch toggle-switch--inline" title="Show RAW-only photos that have no JPEG preview">
-                <input id="show-raw-toggle" type="checkbox">
-                <span class="toggle-slider" aria-hidden="true"></span>
-                <span class="toggle-label">Show RAW</span>
-                <span id="raw-hidden-note" class="toggle-badge hidden"></span>
-              </label>
-            </div>
-            <div id="date-filter-bar" class="tag-filter-bar date-filter-bar folder-dependent hidden" aria-label="Filter photos by date">
-              <span class="eyebrow">Filter by date</span>
-              <label class="date-filter-field">From <input id="date-from" type="date"></label>
-              <label class="date-filter-field">To <input id="date-to" type="date"></label>
-              <button id="date-clear" class="quiet-button compact-button hidden" type="button">Clear dates</button>
-            </div>
-            <div id="tag-filter-bar" class="tag-filter-bar hidden" aria-label="Filter photos by tag">
-              <span class="eyebrow">Filter by tag</span>
-              <div id="tag-filter-chips" class="tag-filter-chips"></div>
-              <button id="tag-clear" class="quiet-button compact-button hidden" type="button">Clear filter</button>
-            </div>
+            </details>
             <div id="library-split" class="library-split single-pane">
               <section id="library-pane-left" class="library-pane active" aria-labelledby="left-folder-name">
                 <header class="library-pane-header">
@@ -190,7 +170,6 @@
                   <div class="library-pane-actions">
                     <button id="left-reveal" class="quiet-button compact-button" type="button" disabled title="Show this folder in File Explorer">Reveal</button>
                     <button id="left-new-folder" class="quiet-button compact-button" type="button" disabled>New folder</button>
-                    <button id="browse-folders-right" class="quiet-button compact-button hidden" type="button">Compare a folder</button>
                     <button id="left-close-folder" class="quiet-button compact-button icon-close-button" type="button" disabled title="Close this folder" aria-label="Close this folder">✕</button>
                   </div>
                 </header>
@@ -199,12 +178,33 @@
                   <nav id="left-folder-path" class="folder-breadcrumbs" aria-label="Folder path"></nav>
                 </div>
                 <div id="left-folder-list" class="folder-list inline"></div>
-                <div class="pane-photo-toolbar"><small id="photo-count-left">No folder open</small><span id="selection-count-left">0 selected</span></div>
+                <div class="pane-photo-toolbar">
+                  <div class="pane-selection-actions" role="group" aria-label="Left folder selection">
+                    <button id="left-select-all" class="quiet-button compact-button" type="button" disabled>Select all</button>
+                    <button id="left-clear-picked" title="Deselect all in this folder" class="quiet-button compact-button" type="button" disabled>Clear</button>
+                    <span id="selection-count-left" aria-live="polite">0 selected</span>
+                  </div>
+                  <div class="pane-selection-actions">
+                    <button id="left-compare-picked" title="Compare selected photos" class="quiet-button compact-button" type="button" disabled>Compare</button>
+                    <details class="pane-more">
+                      <summary class="quiet-button compact-button">More</summary>
+                      <div class="pane-more-menu">
+                        <button class="quiet-button compact-button" data-organize-pane="left" type="button">Organize selection…</button>
+                        <button id="left-google-upload" class="quiet-button compact-button" type="button" disabled>Upload to Google Photos</button>
+                        <div class="pane-auto-compare">
+                          <label class="auto-compare-size" for="left-compare-min-size">Minimum group <input id="left-compare-min-size" type="number" min="2" max="50" step="1" value="3"></label>
+                          <button id="left-auto-compare" class="quiet-button compact-button" type="button" disabled>Auto-compare folder</button>
+                        </div>
+                      </div>
+                    </details>
+                  </div>
+                </div>
+                <small id="photo-count-left" class="pane-media-count">No folder open</small>
                 <div id="photo-grid-left" class="photo-grid"></div>
               </section>
               <div class="split-move-actions hidden" aria-label="Move selected photos between folders">
-                <button id="move-selected-left" class="primary-button compact-button arrow-button" type="button" aria-label="Move selected photos to the right folder" title="Move selected to right" disabled>→</button>
-                <button id="move-selected-right" class="quiet-button compact-button arrow-button" type="button" aria-label="Move selected photos to the left folder" title="Move selected to left" disabled>←</button>
+                <button id="move-selected-left" class="primary-button compact-button arrow-button" type="button" aria-label="Move selected photos to the right folder" title="Move selected to right" disabled><span aria-hidden="true">→</span></button>
+                <button id="move-selected-right" class="quiet-button compact-button arrow-button" type="button" aria-label="Move selected photos to the left folder" title="Move selected to left" disabled><span aria-hidden="true">←</span></button>
               </div>
               <section id="library-pane-right" class="library-pane hidden" aria-labelledby="right-folder-name">
                 <header class="library-pane-header">
@@ -220,25 +220,63 @@
                   <nav id="right-folder-path" class="folder-breadcrumbs" aria-label="Folder path"></nav>
                 </div>
                 <div id="right-folder-list" class="folder-list inline"></div>
-                <div class="pane-photo-toolbar"><small id="photo-count-right">No folder open</small><span id="selection-count-right">0 selected</span></div>
+                <div class="pane-photo-toolbar">
+                  <div class="pane-selection-actions" role="group" aria-label="Right folder selection">
+                    <button id="right-select-all" class="quiet-button compact-button" type="button" disabled>Select all</button>
+                    <button id="right-clear-picked" title="Deselect all in this folder" class="quiet-button compact-button" type="button" disabled>Clear</button>
+                    <span id="selection-count-right" aria-live="polite">0 selected</span>
+                  </div>
+                  <div class="pane-selection-actions">
+                    <button id="right-compare-picked" title="Compare selected photos" class="quiet-button compact-button" type="button" disabled>Compare</button>
+                    <details class="pane-more">
+                      <summary class="quiet-button compact-button">More</summary>
+                      <div class="pane-more-menu">
+                        <button class="quiet-button compact-button" data-organize-pane="right" type="button">Organize selection…</button>
+                        <button id="right-google-upload" class="quiet-button compact-button" type="button" disabled>Upload to Google Photos</button>
+                        <div class="pane-auto-compare">
+                          <label class="auto-compare-size" for="right-compare-min-size">Minimum group <input id="right-compare-min-size" type="number" min="2" max="50" step="1" value="3"></label>
+                          <button id="right-auto-compare" class="quiet-button compact-button" type="button" disabled>Auto-compare folder</button>
+                        </div>
+                      </div>
+                    </details>
+                  </div>
+                </div>
+                <small id="photo-count-right" class="pane-media-count">No folder open</small>
                 <div id="photo-grid-right" class="photo-grid"></div>
               </section>
             </div>
-            <div class="cull-folder-row folder-dependent hidden">
-              <nav id="cull-folders" class="cull-folders" aria-label="Culling folders"></nav>
-              <div class="photo-toolbar-actions">
-                <button id="select-all" class="quiet-button compact-button" type="button">Select all in active pane</button>
-                <button id="clear-picked" class="quiet-button compact-button" type="button">Deselect active pane</button>
-                <button id="compare-picked" class="quiet-button compact-button" type="button" disabled>Compare selected</button>
-                <label class="auto-compare-size" title="Smallest number of similar photos that forms a comparison group">
-                  <span>Min group</span>
-                  <input id="compare-min-size" type="number" min="2" max="50" step="1" value="3">
-                </label>
-                <button id="auto-compare" class="quiet-button compact-button" type="button">Auto-compare folder</button>
-                <button id="google-upload-selected" class="quiet-button compact-button" type="button" disabled>Upload media to Google Photos</button>
+            <details id="organize-selection" class="workspace-disclosure organize-selection folder-dependent hidden">
+              <summary>Organize selection <span id="organize-folder-name" class="disclosure-context"></span></summary>
+              <div class="workspace-disclosure-body">
+                <div class="cull-actions folder-dependent hidden" aria-label="Organize selected photos">
+                  <div class="cull-action-buttons">
+                    <button id="mark-unselect" title="Move selection to the Unselected folder" class="quiet-button compact-button" type="button" disabled>Move to Unselected</button>
+                    <button id="mark-select" title="Move selection to the Selected folder" class="primary-button compact-button" type="button" disabled>Move to Selected</button>
+                    <button id="restore-inbox" class="quiet-button hidden" type="button" disabled>Restore to inbox</button>
+                  </div>
+                  <div class="group-action">
+                    <select id="compare-group-select" aria-label="Comparison group">
+                      <option value="">Choose comparison group…</option>
+                      <option value="__new__">+ New comparison group…</option>
+                    </select>
+                    <input id="compare-group-name" class="hidden" type="text" maxlength="80" placeholder="New group name" aria-label="New comparison group name">
+                    <button id="group-selected" class="quiet-button compact-button" type="button" disabled>Group</button>
+                  </div>
+                </div>
+                <div id="tag-editor-row" class="tag-editor-row folder-dependent hidden">
+                  <span class="eyebrow">Tags for selection</span>
+                  <div class="tag-action">
+                    <select id="tag-existing-select" aria-label="Existing tags">
+                      <option value="">Existing tags…</option>
+                    </select>
+                    <input id="tag-input" type="text" maxlength="40" placeholder="New tag name…" aria-label="New tag name" list="tag-options" autocomplete="off">
+                    <datalist id="tag-options"></datalist>
+                    <button id="tag-add" class="quiet-button compact-button" type="button" disabled>Add tag</button>
+                    <button id="tag-remove" class="quiet-button compact-button" type="button" disabled>Remove tag</button>
+                  </div>
+                </div>
               </div>
-            </div>
-            <small id="photo-count" class="photo-count-summary folder-dependent hidden">Click either folder pane to make it active.</small>
+            </details>
             <form id="selection-job-form" class="selection-job-form folder-dependent hidden">
               <label><span>Job name</span><input id="job-name" name="name" type="text" maxlength="120" placeholder="Lake Michigan · Aug 12" required></label>
               <label><span>Send photos to iPad as</span><select id="edit-source-format" name="source-format">

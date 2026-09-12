@@ -75,11 +75,29 @@ class GooglePhotosWebService:
             available = False
         return {
             "available": available,
-            "connected": self.session_path.exists(),
+            "connected": self._session_readable(),
             "account": metadata.get("account"),
             "account_index": metadata.get("account_index", 0),
             "session_path": str(self.session_path),
         }
+
+    def check(self) -> None:
+        """Verify the stored cookie JSON can be decrypted and used."""
+        if not self.session_path.exists():
+            raise GooglePhotosWebError(
+                "Import a Google Photos cookie JSON so album and Archive automation works."
+            )
+        with self._client():
+            pass
+
+    def _session_readable(self) -> bool:
+        if not self.session_path.exists():
+            return False
+        try:
+            self._load_session()
+            return True
+        except GooglePhotosWebError:
+            return False
 
     def import_session(self, cookies_path: Path, account_index: int = 0) -> dict:
         try:
@@ -691,6 +709,13 @@ class GooglePhotosWebService:
             raise GooglePhotosWebError("Import a Google Photos cookies.txt file first")
         try:
             wrapper = json.loads(self.session_path.read_text(encoding="utf-8"))
+            if isinstance(wrapper, dict) and "data" not in wrapper and (
+                "cookies" in wrapper or "url" in wrapper
+            ):
+                raise GooglePhotosWebError(
+                    "google-web-session.json is a cookie export, not an imported Kira session. "
+                    "Paste that file's path into Cookie export path and click Import session."
+                )
             raw = base64.b64decode(wrapper["data"])
             if wrapper.get("encrypted"):
                 if os.name != "nt":

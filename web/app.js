@@ -134,6 +134,7 @@
     if (state.desktop) {
       renderPhotoGrid();
       await refreshGoogleStatus();
+      await checkGoogleHealth();
       await navigatePane('left', '').catch(showError);
     }
     renderJobs();
@@ -148,6 +149,25 @@
       el('google-status').textContent = 'Unavailable';
       el('google-copy').textContent = error.message;
       return state.google;
+    }
+  }
+
+  async function checkGoogleHealth() {
+    const notice = el('google-health-notice');
+    try {
+      const health = await api('/api/google/health');
+      if (health.ok) {
+        notice.classList.add('hidden');
+        notice.textContent = '';
+        return health;
+      }
+      notice.textContent = health.message || 'Google Photos picker or cookie JSON is not working.';
+      notice.classList.remove('hidden');
+      return health;
+    } catch (error) {
+      notice.textContent = error.message || 'Could not check Google Photos picker or cookie JSON.';
+      notice.classList.remove('hidden');
+      return null;
     }
   }
 
@@ -260,6 +280,7 @@
       const status = await refreshGoogleStatus();
       if (status.connected) {
         toast('Google Photos connected.');
+        await checkGoogleHealth();
         return;
       }
     }
@@ -373,23 +394,23 @@
     });
   }
 
-  async function renderPaneBrowserForDirectory(paneId, path) {
+  async function renderPaneBrowserForDirectory(paneId, path, pane = paneFor(paneId), request = pane.navigationRequest) {
     const browse = await api(`/api/local/browse?path=${encodeURIComponent(path || '')}`);
-    const pane = paneFor(paneId);
+    if (paneFor(paneId) !== pane || pane.navigationRequest !== request) return false;
     pane.parent = browse.parent;
     pane.breadcrumbs = browse.breadcrumbs || [];
     pane.directories = browse.directories || [];
     renderPaneBrowser(paneId);
+    return true;
   }
   async function navigatePane(paneId, path = '') {
-    await renderPaneBrowserForDirectory(paneId, path);
     const pane = paneFor(paneId);
+    const request = pane.navigationRequest = (pane.navigationRequest || 0) + 1;
+    if (!await renderPaneBrowserForDirectory(paneId, path, pane, request)) return;
     if (path) {
       const scan = await api(`/api/local/scan?path=${encodeURIComponent(path)}`);
+      if (paneFor(paneId) !== pane || pane.navigationRequest !== request) return;
       applyLibraryScan(scan, paneId);
-      if (!scan.assets.length) {
-        toast('No supported photos in this folder. Subfolders are listed above.');
-      }
     } else {
       pane.directory = '';
       pane.assets = [];
@@ -509,6 +530,31 @@
     return state.libraryPanes[paneId];
   }
 
+  function emptyPane() {
+    return {directory: '', assets: [], culling: null, selectedAssets: new Set(), parent: null, breadcrumbs: [], directories: []};
+  }
+
+  function closePane(paneId) {
+    document.querySelectorAll('.pane-more[open]').forEach((menu) => { menu.open = false; });
+    if (paneId === 'left' && state.rightPaneOpen) {
+      // Keep the remaining folder and its selection when closing the left side.
+      state.libraryPanes.left = {...paneFor('right'), comparing: false, uploading: false};
+      state.tileAnchor.left = state.tileAnchor.right;
+    } else if (paneId === 'left') {
+      state.libraryPanes.left = emptyPane();
+      state.tileAnchor.left = null;
+    }
+    state.libraryPanes.right = emptyPane();
+    state.tileAnchor.right = null;
+    state.rightPaneOpen = false;
+    setActivePane('left');
+    renderPaneBrowser('left');
+    renderPaneBrowser('right');
+    renderPhotoGrid();
+    if (!paneFor('left').directory) navigatePane('left', '').catch(showError);
+    el('browse-folders-right').focus();
+  }
+
   function isAssetDisplayable(asset) {
     if (state.showRawOnly) return true;
     return asset.jpeg_files.length > 0 || (asset.video_files || []).length > 0;
@@ -562,8 +608,6 @@
   }
 
   function renderPaneHeaders() {
-    const leftPane = paneFor('left');
-    const rightPane = paneFor('right');
     el('library-split').classList.toggle('single-pane', !state.rightPaneOpen);
     el('library-pane-right').classList.toggle('hidden', !state.rightPaneOpen);
     el('library-split').querySelector('.split-move-actions').classList.toggle('hidden', !state.rightPaneOpen);
@@ -576,6 +620,7 @@
       const canManage = Boolean(pane.directory);
       el(`${paneId}-reveal`).disabled = !canManage;
       el(`${paneId}-new-folder`).disabled = !canManage;
+      el(`${paneId}-close-folder`).disabled = paneId === 'left' && !canManage && !state.rightPaneOpen;
       el(`photo-count-${paneId}`).textContent = paneSummary(pane);
       el(`selection-count-${paneId}`).textContent = `${pane.selectedAssets.size} selected`;
     });
@@ -583,9 +628,7 @@
     el('create-job-card').querySelectorAll('.folder-dependent').forEach((node) => {
       node.classList.toggle('hidden', !active.directory);
     });
-    el('photo-count').textContent = active.directory
-      ? `${paneSummary(active)}${state.rightPaneOpen ? ' · click either folder to make it active' : ''}`
-      : 'Navigate to a folder to begin.';
+    el('organize-folder-name').textContent = active.directory ? folderLabel(active.directory) : '';
   }
 
   function setActivePane(paneId) {
@@ -597,7 +640,7 @@
     state.culling = pane.culling;
     state.selectedAssets = pane.selectedAssets;
     renderPaneHeaders();
-    renderCullFolders();
+    renderCullActions();
     renderGroupPicker();
     renderGoogleDestination();
     renderGoogleOrganizer();
@@ -645,6 +688,11 @@
     el('date-from').value = state.dateFrom;
     el('date-to').value = state.dateTo;
     el('date-clear').classList.toggle('hidden', !state.dateFrom && !state.dateTo);
+    const filters = [];
+    if (state.dateFrom || state.dateTo) filters.push('Date range');
+    if (state.tagFilter.size) filters.push(`${state.tagFilter.size} tag${state.tagFilter.size === 1 ? '' : 's'}`);
+    if (state.showRawOnly) filters.push('RAW visible');
+    el('filter-summary').textContent = filters.join(' · ');
   }
 
   function knownTags() {
@@ -715,25 +763,7 @@
     renderPhotoGrid();
   }
 
-  async function openCullFolder(path) {
-    const result = await api(`/api/local/scan?path=${encodeURIComponent(path)}`);
-    applyLibraryScan(result, state.activePaneId);
-    await navigatePane(state.activePaneId, path);
-  }
-
-  function renderCullFolders() {
-    const nav = el('cull-folders');
-    nav.replaceChildren();
-    (state.culling?.folders || []).forEach((folder) => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = `cull-folder${folder.path === state.libraryDirectory ? ' active' : ''}`;
-      button.textContent = folder.name;
-      button.title = folder.path;
-      button.disabled = folder.path === state.libraryDirectory;
-      button.addEventListener('click', () => openCullFolder(folder.path).catch(showError));
-      nav.appendChild(button);
-    });
+  function renderCullActions() {
     const canRestore = Boolean(state.culling && state.culling.role !== 'inbox');
     el('restore-inbox').classList.toggle('hidden', !canRestore);
   }
@@ -915,24 +945,34 @@
 
   function updateSelectionUi() {
     const count = state.selectedAssets.size;
-    el('selection-summary').textContent = `${count} media group${count === 1 ? '' : 's'} selected for iPad editing`;
+    el('selection-summary').textContent = `${count} selected in ${folderLabel(state.libraryDirectory)}`;
     el('selection-job-form').querySelector('button[type="submit"]').disabled = count === 0;
-    el('compare-picked').disabled = count < 2;
-    el('compare-picked').textContent = `Compare selected${count ? ` (${count})` : ''}`;
-    const visibleCount = visiblePaneAssets(paneFor()).length;
-    // Select all picks the currently filtered visible set; disable when that set is already fully selected.
-    el('select-all').disabled = visibleCount === 0 || count === visibleCount;
-    el('clear-picked').disabled = count === 0;
+    ['left', 'right'].forEach((paneId) => {
+      const pane = paneFor(paneId);
+      const visible = visiblePaneAssets(pane);
+      el(`${paneId}-select-all`).disabled = !visible.length || visible.every((asset) => pane.selectedAssets.has(asset.id));
+      el(`${paneId}-clear-picked`).disabled = !pane.selectedAssets.size;
+      el(`${paneId}-compare-picked`).disabled = pane.assets.filter((asset) => pane.selectedAssets.has(asset.id) && asset.preview_path).length < 2;
+      el(`${paneId}-auto-compare`).disabled = !pane.directory || pane.comparing || !pane.assets.length;
+      el(`${paneId}-auto-compare`).textContent = pane.comparing ? 'Comparing…' : 'Auto-compare folder';
+      el(`${paneId}-google-upload`).disabled = !pane.selectedAssets.size || !state.google.connected || pane.uploading;
+      el(`${paneId}-google-upload`).textContent = pane.uploading ? 'Uploading…' : 'Upload to Google Photos';
+      document.querySelector(`[data-organize-pane="${paneId}"]`).disabled = !pane.directory;
+    });
     el('mark-unselect').disabled = count === 0;
     el('mark-select').disabled = count === 0;
     el('restore-inbox').disabled = count === 0;
     el('group-selected').disabled = count === 0 || !selectedComparisonGroupName();
-    el('google-upload-selected').disabled = count === 0 || !state.google.connected;
     const tagValue = effectiveTagValue();
     el('tag-add').disabled = count === 0 || !tagValue;
     el('tag-remove').disabled = count === 0 || !tagValue;
     const left = paneFor('left');
     const right = paneFor('right');
+    [['left', left, right], ['right', right, left]].forEach(([paneId, source, destination]) => {
+      const label = `Move selection from ${folderLabel(source.directory) || 'this folder'} to ${folderLabel(destination.directory) || 'the other folder'}`;
+      el(`move-selected-${paneId}`).title = label;
+      el(`move-selected-${paneId}`).setAttribute('aria-label', label);
+    });
     el('move-selected-left').disabled = !left.directory || !right.directory || left.selectedAssets.size === 0;
     el('move-selected-right').disabled = !left.directory || !right.directory || right.selectedAssets.size === 0;
   }
@@ -965,6 +1005,9 @@
 
   async function moveSelectedAssets(action) {
     if (!state.selectedAssets.size) return;
+    const paneId = state.activePaneId;
+    const pane = paneFor(paneId);
+    const directory = pane.directory;
     const labels = {
       select: 'Move the selected photo groups into the select folder?',
       unselect: 'Move the selected photo groups into the unselect folder? Nothing will be deleted.',
@@ -987,8 +1030,11 @@
           group_name: groupName,
         }),
       });
-      applyLibraryScan(result);
-      if (action === 'group') renderGroupPicker(result.destination_group_name || groupName);
+      if (paneFor(paneId) === pane && pane.directory === directory) {
+        applyLibraryScan(result, paneId);
+        await renderPaneBrowserForDirectory(paneId, result.directory);
+        if (action === 'group') renderGroupPicker(result.destination_group_name || groupName);
+      }
       const closedGroup = result.group_deleted ? ' The empty comparison group was removed.' : '';
       const duplicates = result.deleted_duplicate_files || 0;
       const renamed = (result.renamed_files || []).length;
@@ -1001,16 +1047,19 @@
     } catch (error) {
       toast(error.message);
     } finally {
-      groupButton.textContent = 'Group to compare';
+      groupButton.textContent = 'Group';
       updateSelectionUi();
     }
   }
 
-  async function autoCompareGroups() {
-    if (!state.libraryDirectory) return;
-    const minSize = Math.max(2, Number(el('compare-min-size').value) || 3);
+  async function autoCompareGroups(paneId) {
+    const pane = paneFor(paneId);
+    if (!pane.directory || pane.comparing) return;
+    const minSize = Math.min(50, Math.max(2, Math.round(Number(el(`${paneId}-compare-min-size`).value) || 3)));
     if (!window.confirm(`Find similar photos in this folder and create comparison groups of at least ${minSize} photos? Similar photos will be moved into new compare folders.`)) return;
-    const button = el('auto-compare');
+    const button = el(`${paneId}-auto-compare`);
+    const directory = pane.directory;
+    pane.comparing = true;
     button.disabled = true;
     const originalLabel = button.textContent;
     button.textContent = 'Comparing…';
@@ -1018,11 +1067,14 @@
       const result = await api('/api/local/compare-groups', {
         method: 'POST',
         body: JSON.stringify({
-          source_directory: state.libraryDirectory,
+          source_directory: directory,
           min_group_size: minSize,
         }),
       });
-      applyLibraryScan(result);
+      if (paneFor(paneId) === pane && pane.directory === directory) {
+        applyLibraryScan(result, paneId);
+        await renderPaneBrowserForDirectory(paneId, directory);
+      }
       const groups = result.created_groups || [];
       if (!groups.length) {
         toast(`No clusters of at least ${result.min_group_size || minSize} similar photos were found.`);
@@ -1037,6 +1089,7 @@
     } catch (error) {
       toast(error.message);
     } finally {
+      pane.comparing = false;
       button.textContent = originalLabel;
       updateSelectionUi();
     }
@@ -1344,6 +1397,7 @@
     try {
       await api('/api/google/disconnect', {method: 'POST', body: '{}'});
       await refreshGoogleStatus();
+      await checkGoogleHealth();
       toast('Google Photos disconnected. Imported files were kept.');
     } catch (error) {
       showError(error);
@@ -1363,6 +1417,7 @@
         body: JSON.stringify({cookies_path: cookiesPath, account_index: Number.isFinite(accountIndex) ? accountIndex : 0}),
       });
       await refreshGoogleStatus();
+      await checkGoogleHealth();
       toast('Google Photos album and Archive automation connected.');
     } catch (error) {
       showError(error);
@@ -1374,6 +1429,7 @@
     try {
       await api('/api/google/web-session', {method: 'DELETE'});
       await refreshGoogleStatus();
+      await checkGoogleHealth();
       toast('Google Photos web session removed.');
     } catch (error) {
       showError(error);
@@ -1433,16 +1489,18 @@
     }
   });
 
-  el('google-upload-selected').addEventListener('click', async () => {
-    if (!state.selectedAssets.size || !state.google.connected) return;
-    const button = el('google-upload-selected');
+  async function uploadPaneSelection(paneId) {
+    const pane = paneFor(paneId);
+    if (!pane.selectedAssets.size || !state.google.connected || pane.uploading) return;
+    const button = el(`${paneId}-google-upload`);
+    pane.uploading = true;
     button.disabled = true;
     try {
       const operation = await api('/api/google/uploads', {
         method: 'POST',
         body: JSON.stringify({
-          source_directory: state.libraryDirectory,
-          asset_ids: Array.from(state.selectedAssets),
+          source_directory: pane.directory,
+          asset_ids: Array.from(pane.selectedAssets),
         }),
       });
       const finished = await pollGoogleOperation(operation.id);
@@ -1451,12 +1509,40 @@
     } catch (error) {
       showError(error);
     } finally {
+      pane.uploading = false;
       el('google-progress').classList.add('hidden');
       updateSelectionUi();
     }
-  });
+  }
 
   ['left', 'right'].forEach((paneId) => {
+    el(`${paneId}-close-folder`).addEventListener('click', () => closePane(paneId));
+    el(`${paneId}-select-all`).addEventListener('click', () => {
+      setActivePane(paneId);
+      visiblePaneAssets(paneFor(paneId)).forEach((asset) => state.selectedAssets.add(asset.id));
+      syncSelectionTiles();
+      updateSelectionUi();
+    });
+    el(`${paneId}-clear-picked`).addEventListener('click', () => {
+      setActivePane(paneId);
+      state.selectedAssets.clear();
+      state.tileAnchor[paneId] = null;
+      syncSelectionTiles();
+      updateSelectionUi();
+    });
+    el(`${paneId}-compare-picked`).addEventListener('click', () => {
+      setActivePane(paneId);
+      openCompare();
+    });
+    el(`${paneId}-auto-compare`).addEventListener('click', () => autoCompareGroups(paneId));
+    el(`${paneId}-google-upload`).addEventListener('click', () => uploadPaneSelection(paneId));
+    document.querySelector(`[data-organize-pane="${paneId}"]`).addEventListener('click', (event) => {
+      setActivePane(paneId);
+      event.target.closest('details').open = false;
+      el('organize-selection').open = true;
+      el('organize-selection').scrollIntoView({block: 'nearest', behavior: 'smooth'});
+      el('organize-selection').querySelector('summary').focus();
+    });
     el(`library-pane-${paneId}`).addEventListener('click', (event) => {
       if (!event.target.closest('button')) setActivePane(paneId);
     });
@@ -1471,6 +1557,19 @@
       }
     });
     el(`${paneId}-new-folder`).addEventListener('click', () => createFolderInPane(paneId).catch(showError));
+  });
+
+  document.addEventListener('click', (event) => {
+    document.querySelectorAll('.pane-more[open]').forEach((menu) => {
+      if (!menu.contains(event.target)) menu.open = false;
+    });
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    document.querySelectorAll('.pane-more[open]').forEach((menu) => {
+      menu.open = false;
+      menu.querySelector('summary').focus();
+    });
   });
 
   el('browse-folders-right').addEventListener('click', () => {
@@ -1494,12 +1593,6 @@
     const creating = el('compare-group-select').value === '__new__';
     el('compare-group-name').classList.toggle('hidden', !creating);
     if (creating) el('compare-group-name').focus();
-    updateSelectionUi();
-  });
-  el('select-all').addEventListener('click', () => {
-    state.selectedAssets.clear();
-    visiblePaneAssets(paneFor()).forEach((asset) => state.selectedAssets.add(asset.id));
-    syncSelectionTiles();
     updateSelectionUi();
   });
   el('tag-clear').addEventListener('click', () => {
@@ -1552,13 +1645,6 @@
   });
   el('tag-add').addEventListener('click', () => updateSelectedTags('add'));
   el('tag-remove').addEventListener('click', () => updateSelectedTags('remove'));
-  el('clear-picked').addEventListener('click', () => {
-    state.selectedAssets.clear();
-    syncSelectionTiles();
-    updateSelectionUi();
-  });
-  el('compare-picked').addEventListener('click', openCompare);
-  el('auto-compare').addEventListener('click', autoCompareGroups);
   el('close-compare').addEventListener('click', () => {
     el('compare-modal').classList.add('hidden');
     syncSelectionTiles();

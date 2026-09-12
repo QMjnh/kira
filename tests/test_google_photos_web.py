@@ -464,6 +464,27 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(GooglePhotosWebError, "session expired"):
             self.service.list_albums()
 
+    def test_check_verifies_imported_cookie_json(self) -> None:
+        self.service.import_session(self.cookies)
+        self.service.check()
+
+    def test_check_reports_missing_and_unreadable_cookie_json(self) -> None:
+        with self.assertRaisesRegex(GooglePhotosWebError, "cookie JSON"):
+            self.service.check()
+        self.service.session_path.write_text("{broken", encoding="utf-8")
+        self.assertFalse(self.service.status()["connected"])
+        with self.assertRaisesRegex(GooglePhotosWebError, "unreadable"):
+            self.service.check()
+
+    def test_check_rejects_raw_cookie_export_saved_as_session(self) -> None:
+        self.service.session_path.write_text(
+            json.dumps({"url": "https://photos.google.com", "cookies": [{"domain": ".google.com", "name": "SID", "value": "x"}]}),
+            encoding="utf-8",
+        )
+        self.assertFalse(self.service.status()["connected"])
+        with self.assertRaisesRegex(GooglePhotosWebError, "cookie export"):
+            self.service.check()
+
 
 if __name__ == "__main__":
     unittest.main()

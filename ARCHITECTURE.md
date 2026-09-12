@@ -18,6 +18,8 @@ cd kira
 python -m unittest discover -s tests -v
 ```
 
+The folder-panel browser regression checks use Node.js and Playwright (`npm install --no-save playwright`, then `node --test tests/test_library_ui.cjs`). They use isolated API fixtures and never touch real photos. The checks use installed Chrome or Edge on Windows; elsewhere, install Playwright's Chromium with `npx playwright install chromium`, or set `KIRA_TEST_BROWSER` to a Chromium executable. Set `KIRA_UI_SCREENSHOTS` to an existing directory to save desktop and mobile layout captures.
+
 ## Code map
 
 | Path | Responsibility |

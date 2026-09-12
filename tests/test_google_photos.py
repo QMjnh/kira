@@ -5,13 +5,26 @@ import hashlib
 import io
 import json
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 
 from kira.google_photos import GooglePhotosService, PICKER_SCOPE, UPLOAD_SCOPE, _google_remote_hash
+
+
+def _http_error(status: int, body: bytes = b"{}") -> HTTPError:
+    return HTTPError(
+        "https://photospicker.googleapis.com/v1/sessions",
+        status,
+        "error",
+        None,
+        io.BytesIO(body),
+    )
 
 
 def _download_result(content: bytes) -> tuple[int, str, str]:
@@ -63,6 +76,60 @@ class GooglePhotosServiceTests(unittest.TestCase):
         self.assertEqual(service.credentials_path, self.app_root / "google-oauth-client.json")
         self.assertEqual(service.token_path, self.data_root / "google-token.json")
         self.assertTrue(service.status()["configured"])
+
+    def test_health_ok_when_cookie_json_works_and_picker_answers(self) -> None:
+        service = self.service()
+        service.web.check = lambda: None
+        with patch("kira.google_photos.urlopen", side_effect=_http_error(401)):
+            health = service.health()
+        self.assertTrue(health["ok"])
+        self.assertTrue(health["json_ok"])
+        self.assertTrue(health["picker_ok"])
+        self.assertEqual(health["message"], "")
+
+    def test_health_reports_unreadable_cookie_json(self) -> None:
+        service = self.service()
+        service.web.session_path.write_text("{not-valid", encoding="utf-8")
+        with patch("kira.google_photos.urlopen", side_effect=_http_error(401)):
+            health = service.health()
+        self.assertFalse(health["ok"])
+        self.assertFalse(health["json_ok"])
+        self.assertTrue(health["picker_ok"])
+        self.assertIn("unreadable", health["message"].casefold())
+
+    def test_health_reports_missing_cookie_json(self) -> None:
+        service = self.service()
+        with patch("kira.google_photos.urlopen", side_effect=_http_error(401)):
+            health = service.health()
+        self.assertFalse(health["ok"])
+        self.assertFalse(health["json_ok"])
+        self.assertTrue(health["picker_ok"])
+        self.assertIn("cookie json", health["message"].casefold())
+
+    def test_health_reports_unreachable_picker(self) -> None:
+        service = self.service()
+        service.web.check = lambda: None
+        with patch("kira.google_photos.urlopen", side_effect=URLError("timed out")):
+            health = service.health()
+        self.assertFalse(health["ok"])
+        self.assertTrue(health["json_ok"])
+        self.assertFalse(health["picker_ok"])
+        self.assertIn("picker", health["message"].casefold())
+
+    def test_health_reports_connected_picker_auth_failure(self) -> None:
+        service = self.service()
+        service.web.check = lambda: None
+        service._save_tokens(
+            {"access_token": "token", "refresh_token": "refresh", "expires_at": time.time() + 3600}
+        )
+        with patch(
+            "kira.google_photos.urlopen",
+            side_effect=_http_error(403, b'{"error":{"message":"Photos Picker API has not been used"}}'),
+        ):
+            health = service.health()
+        self.assertTrue(health["json_ok"])
+        self.assertFalse(health["picker_ok"])
+        self.assertIn("Photos Picker API", health["message"])
 
     def test_import_destination_defaults_to_inbox_and_accepts_external_absolute_path(self) -> None:
         service = self.service()

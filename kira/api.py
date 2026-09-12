@@ -41,6 +41,7 @@ APP_ROOT = Path(__file__).resolve().parent.parent
 # (pattern, methods, handler, requires_local). "{name}" segments become params.
 AUTHED_ROUTES: list[tuple[tuple[str, ...], tuple[str, ...], str, bool]] = [
     (("api", "google", "status"), ("GET",), "_h_google_status", True),
+    (("api", "google", "health"), ("GET",), "_h_google_health", True),
     (("api", "google", "oauth", "start"), ("POST",), "_h_google_oauth_start", True),
     (("api", "google", "disconnect"), ("POST",), "_h_google_disconnect", True),
     (("api", "google", "web-session"), ("POST",), "_h_google_web_session_import", True),
@@ -242,6 +243,9 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
 
     def _h_google_status(self, params: dict, query: dict) -> None:
         self._send_json(self.server.google_photos.status())
+
+    def _h_google_health(self, params: dict, query: dict) -> None:
+        self._send_json(self.server.google_photos.health())
 
     def _h_google_oauth_start(self, params: dict, query: dict) -> None:
         self._discard_optional_body()

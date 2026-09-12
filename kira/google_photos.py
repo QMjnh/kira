@@ -185,6 +185,47 @@ class GooglePhotosService:
             "organizer": self.web.status(),
         }
 
+    def health(self) -> dict:
+        """Check the Photos Picker and the stored cookie JSON."""
+        json_ok = False
+        picker_ok = False
+        issues: list[str] = []
+        try:
+            self.web.check()
+            json_ok = True
+        except GooglePhotosError as exc:
+            issues.append(str(exc))
+        try:
+            self._check_picker()
+            picker_ok = True
+        except GooglePhotosError as exc:
+            issues.append(str(exc))
+        return {
+            "ok": json_ok and picker_ok,
+            "json_ok": json_ok,
+            "picker_ok": picker_ok,
+            "message": " ".join(issues),
+        }
+
+    def _check_picker(self) -> None:
+        headers = {"Accept": "application/json"}
+        authed = False
+        if self.token_path.exists():
+            headers["Authorization"] = f"Bearer {self._access_token()}"
+            authed = True
+        request = Request(f"{PICKER_ENDPOINT}/sessions", headers=headers, method="GET")
+        try:
+            with urlopen(request, timeout=10) as response:
+                response.read()
+        except HTTPError as exc:
+            body = exc.read()
+            if authed and exc.code in {401, 403}:
+                raise GooglePhotosError(self._error_message(body, exc.code)) from exc
+            if exc.code >= 500:
+                raise GooglePhotosError(self._error_message(body, exc.code)) from exc
+        except (URLError, OSError, TimeoutError) as exc:
+            raise GooglePhotosError(f"Could not reach Google Photos picker: {exc}") from exc
+
     def resolve_import_destination(self, folder: str) -> Path:
         """Resolve an import destination: empty means the inbox, absolute
         paths are used as-is, anything else is relative to the inbox."""

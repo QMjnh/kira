@@ -140,6 +140,9 @@ class KiraTransferTests(unittest.TestCase):
                     "organizer": {"available": True, "connected": True},
                 }
 
+            def health(self):
+                return {"ok": True, "json_ok": True, "picker_ok": True, "message": ""}
+
             def start_oauth(self, redirect_uri):
                 return {"authorization_url": f"https://accounts.example/auth?redirect={redirect_uri}"}
 
@@ -206,6 +209,10 @@ class KiraTransferTests(unittest.TestCase):
         response, status = self.request("GET", "/api/google/status")
         self.assertEqual(response.status, 200)
         self.assertTrue(json.loads(status)["connected"])
+
+        response, health = self.request("GET", "/api/google/health")
+        self.assertEqual(response.status, 200)
+        self.assertTrue(json.loads(health)["ok"])
 
         response, oauth = self.json_request("POST", "/api/google/oauth/start", {})
         self.assertEqual(response.status, 200)
