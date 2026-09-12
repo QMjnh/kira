@@ -64,14 +64,14 @@ class KiraTransferTests(unittest.TestCase):
         self.assertIn("<title>Kira</title>", html)
         self.assertIn('id="job-pair-qr"', html)
         self.assertIn('id="job-pair-code"', html)
-        self.assertIn('id="mark-unselect"', html)
-        self.assertIn('id="group-selected"', html)
-        self.assertIn('id="compare-group-select"', html)
-        self.assertIn('id="select-all"', html)
+        self.assertIn('id="left-move-menu"', html)
+        self.assertIn('id="left-new-group"', html)
+        self.assertIn('id="left-move-groups"', html)
+        self.assertIn('id="left-select-all"', html)
         self.assertIn('id="date-from"', html)
         self.assertIn('id="date-to"', html)
         self.assertIn('id="date-clear"', html)
-        self.assertIn('id="clear-picked"', html)
+        self.assertIn('id="left-clear-picked"', html)
         self.assertIn('id="google-connect"', html)
         self.assertIn('id="google-download-mode"', html)
         self.assertIn('id="google-zip-threshold"', html)
@@ -80,14 +80,14 @@ class KiraTransferTests(unittest.TestCase):
         self.assertIn('id="google-destination-folder"', html)
         self.assertIn('id="google-import-archive"', html)
         self.assertIn('id="google-pick"', html)
-        self.assertIn('id="google-upload-selected"', html)
+        self.assertIn('id="left-google-upload"', html)
         self.assertIn('id="library-pane-left"', html)
         self.assertIn('id="library-pane-right"', html)
         self.assertIn('id="left-folder-up"', html)
         self.assertIn('id="right-folder-list"', html)
         self.assertIn('id="left-new-folder"', html)
-        self.assertIn('id="left-reveal"', html)
-        self.assertIn('>Compare a folder</button>', html)
+        self.assertNotIn('id="left-reveal"', html)
+        self.assertIn('id="browse-folders-right"', html)
         self.assertIn('id="move-selected-left"', html)
         self.assertIn('id="move-selected-right"', html)
 
@@ -809,6 +809,15 @@ class KiraTransferTests(unittest.TestCase):
         response, _ = self.request("DELETE", f"/api/jobs/{job['id']}")
         self.assertEqual(response.status, 200)
         self.assertEqual(edited.read_bytes(), b"edited")
+
+    def test_preview_endpoint_can_serve_original_resolution(self) -> None:
+        source = Path(self.temp.name) / "full-size.JPG"
+        Image.new("RGB", (2400, 1800), "green").save(source)
+        response, original = self.request("GET", f"/api/local/preview?path={quote(str(source))}&original=1")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(original, source.read_bytes())
+        with Image.open(BytesIO(original)) as image:
+            self.assertEqual(image.size, (2400, 1800))
 
     def test_preview_endpoint_returns_cached_thumbnail(self) -> None:
         source = Path(self.temp.name) / "large-preview.JPG"

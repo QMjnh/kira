@@ -16,8 +16,8 @@
     rightPaneOpen: false,
     tileAnchor: {left: null, right: null},
     libraryPanes: {
-      left: {directory: '', assets: [], culling: null, selectedAssets: new Set(), parent: null, breadcrumbs: [], directories: []},
-      right: {directory: '', assets: [], culling: null, selectedAssets: new Set(), parent: null, breadcrumbs: [], directories: []},
+      left: {directory: '', assets: [], culling: null, selectedAssets: new Set(), selectMode: false, parent: null, breadcrumbs: [], directories: []},
+      right: {directory: '', assets: [], culling: null, selectedAssets: new Set(), selectMode: false, parent: null, breadcrumbs: [], directories: []},
     },
     activePaneId: 'left',
     compareZoom: 1,
@@ -531,14 +531,14 @@
   }
 
   function emptyPane() {
-    return {directory: '', assets: [], culling: null, selectedAssets: new Set(), parent: null, breadcrumbs: [], directories: []};
+    return {directory: '', assets: [], culling: null, selectedAssets: new Set(), selectMode: false, parent: null, breadcrumbs: [], directories: []};
   }
 
   function closePane(paneId) {
     document.querySelectorAll('.pane-more[open]').forEach((menu) => { menu.open = false; });
     if (paneId === 'left' && state.rightPaneOpen) {
       // Keep the remaining folder and its selection when closing the left side.
-      state.libraryPanes.left = {...paneFor('right'), comparing: false, uploading: false};
+      state.libraryPanes.left = {...paneFor('right'), comparing: false, uploading: false, organizing: false, tagging: false};
       state.tileAnchor.left = state.tileAnchor.right;
     } else if (paneId === 'left') {
       state.libraryPanes.left = emptyPane();
@@ -618,7 +618,6 @@
       el(`library-pane-${paneId}`).classList.toggle('active', paneId === state.activePaneId);
       el(`${paneId}-folder-name`).textContent = name;
       const canManage = Boolean(pane.directory);
-      el(`${paneId}-reveal`).disabled = !canManage;
       el(`${paneId}-new-folder`).disabled = !canManage;
       el(`${paneId}-close-folder`).disabled = paneId === 'left' && !canManage && !state.rightPaneOpen;
       el(`photo-count-${paneId}`).textContent = paneSummary(pane);
@@ -628,7 +627,6 @@
     el('create-job-card').querySelectorAll('.folder-dependent').forEach((node) => {
       node.classList.toggle('hidden', !active.directory);
     });
-    el('organize-folder-name').textContent = active.directory ? folderLabel(active.directory) : '';
   }
 
   function setActivePane(paneId) {
@@ -640,8 +638,6 @@
     state.culling = pane.culling;
     state.selectedAssets = pane.selectedAssets;
     renderPaneHeaders();
-    renderCullActions();
-    renderGroupPicker();
     renderGoogleDestination();
     renderGoogleOrganizer();
     renderDisplaySettings();
@@ -705,10 +701,6 @@
     return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   }
 
-  function effectiveTagValue() {
-    return (el('tag-input').value.trim() || el('tag-existing-select').value.trim());
-  }
-
   function renderTagFilterBar() {
     const tags = knownTags();
     const chips = el('tag-filter-chips');
@@ -734,25 +726,6 @@
       option.value = tag;
       datalist.appendChild(option);
     });
-    const existingSelect = el('tag-existing-select');
-    const previousSelect = existingSelect.value;
-    existingSelect.replaceChildren();
-    const placeholder = document.createElement('option');
-    placeholder.value = '';
-    placeholder.textContent = tags.length ? 'Existing tags…' : 'No tags yet';
-    existingSelect.appendChild(placeholder);
-    tags.forEach(([tag]) => {
-      const option = document.createElement('option');
-      option.value = tag;
-      option.textContent = tag;
-      existingSelect.appendChild(option);
-    });
-    if (tags.some(([tag]) => tag === previousSelect)) {
-      existingSelect.value = previousSelect;
-    } else {
-      existingSelect.value = '';
-    }
-    existingSelect.disabled = tags.length === 0;
   }
 
   function toggleTagFilter(tag) {
@@ -763,49 +736,55 @@
     renderPhotoGrid();
   }
 
-  function renderCullActions() {
-    const canRestore = Boolean(state.culling && state.culling.role !== 'inbox');
-    el('restore-inbox').classList.toggle('hidden', !canRestore);
-  }
-
-  function comparisonGroups() {
-    return (state.culling?.folders || [])
-      .filter((folder) => folder.role === 'group')
-      .map((folder) => folder.group_name || folder.name.replace(/^Compare:\s*/, ''));
-  }
-
-  function selectedComparisonGroupName() {
-    const selected = el('compare-group-select').value;
-    return selected === '__new__' ? el('compare-group-name').value.trim() : selected;
-  }
-
-  function renderGroupPicker(preferredGroup = '') {
-    const select = el('compare-group-select');
-    const previous = preferredGroup || select.value;
-    select.replaceChildren();
-
-    const placeholder = document.createElement('option');
-    placeholder.value = '';
-    placeholder.textContent = 'Choose comparison group…';
-    select.appendChild(placeholder);
-
-    const groups = comparisonGroups();
-    groups.forEach((name) => {
-      const option = document.createElement('option');
-      option.value = name;
-      option.textContent = name;
-      select.appendChild(option);
+  function renderPaneOrganizers(paneId) {
+    const pane = paneFor(paneId);
+    const disabled = !pane.selectedAssets.size || Boolean(pane.organizing);
+    el(`${paneId}-move-menu`).querySelectorAll('[data-cull-action]').forEach((button) => {
+      button.disabled = disabled;
+      if (button.dataset.cullAction === 'restore') button.classList.toggle('hidden', !pane.culling || pane.culling.role === 'inbox');
     });
-
-    const create = document.createElement('option');
-    create.value = '__new__';
-    create.textContent = '+ New comparison group…';
-    select.appendChild(create);
-
-    if (groups.includes(previous)) select.value = previous;
-    else if (!groups.length) select.value = '__new__';
-    else select.value = '';
-    el('compare-group-name').classList.toggle('hidden', select.value !== '__new__');
+    el(`${paneId}-new-group`).disabled = disabled;
+    const groups = el(`${paneId}-move-groups`);
+    groups.replaceChildren();
+    (pane.culling?.folders || []).filter((folder) => folder.role === 'group').forEach((folder) => {
+      const name = folder.group_name || folder.name.replace(/^Compare:\s*/, '');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'quiet-button compact-button';
+      button.textContent = name;
+      button.disabled = disabled || folder.path === pane.directory;
+      button.addEventListener('click', () => moveSelectedAssets('group', paneId, name));
+      groups.appendChild(button);
+    });
+    const taggingDisabled = !pane.selectedAssets.size || Boolean(pane.tagging);
+    el(`${paneId}-tag-input`).disabled = taggingDisabled;
+    el(`${paneId}-tag-form`).querySelector('button').disabled = taggingDisabled || !el(`${paneId}-tag-input`).value.trim();
+    const tags = el(`${paneId}-tag-list`);
+    const focusedTag = tags.contains(document.activeElement) ? document.activeElement.dataset.tag : null;
+    tags.replaceChildren();
+    const selected = pane.assets.filter((asset) => pane.selectedAssets.has(asset.id));
+    knownTags().forEach(([tag]) => {
+      const count = selected.filter((asset) => (asset.tags || []).includes(tag)).length;
+      const all = selected.length > 0 && count === selected.length;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'quiet-button compact-button tag-choice';
+      button.dataset.tag = tag;
+      button.setAttribute('role', 'checkbox');
+      button.setAttribute('aria-checked', all ? 'true' : count ? 'mixed' : 'false');
+      button.title = `${all ? 'Remove' : 'Apply'} tag on selection`;
+      button.innerHTML = `<span aria-hidden="true">${all ? '✓' : count ? '−' : '+'}</span>${escapeHtml(tag)}`;
+      button.disabled = taggingDisabled;
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        updateSelectedTags(all ? 'remove' : 'add', paneId, tag);
+      });
+      tags.appendChild(button);
+    });
+    if (focusedTag) {
+      const replacement = [...tags.children].find((button) => button.dataset.tag === focusedTag);
+      (replacement || el(`${paneId}-tag-input`)).focus();
+    }
   }
 
   function previewUrl(path, size, version) {
@@ -845,11 +824,9 @@
     const fragment = document.createDocumentFragment();
     visible.forEach((asset) => {
       const selected = pane.selectedAssets.has(asset.id);
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = `photo-tile${selected ? ' selected' : ''}`;
-      button.setAttribute('aria-pressed', String(selected));
-      button.dataset.assetId = asset.id;
+      const tile = document.createElement('div');
+      tile.className = `photo-tile${selected ? ' selected' : ''}`;
+      tile.dataset.assetId = asset.id;
       let media;
       if (asset.preview_path) {
         media = `<img src="${escapeHtml(previewUrl(asset.preview_path, 480, asset.preview_version))}" alt="${escapeHtml(asset.stem)}" loading="lazy" decoding="async">`;
@@ -871,38 +848,20 @@
         formatTags.push(`<span class="format-tag">${escapeHtml(asset.other_files[0].filename.split('.').pop().toUpperCase())}</span>`);
       }
       const tags = formatTags.join('');
-      button.innerHTML = `${media}<span class="pick-check">${selected ? '✓' : '+'}</span><span class="photo-tile-info"><strong>${escapeHtml(asset.stem)}</strong><span class="format-tags">${tags}</span></span>`;
-      button.addEventListener('click', (event) => {
+      tile.innerHTML = `<button class="photo-open" type="button" data-photo-name="${escapeHtml(asset.stem)}" data-has-preview="${Boolean(asset.preview_path)}" aria-label="Open ${escapeHtml(asset.stem)}">${media}<span class="photo-tile-info"><strong>${escapeHtml(asset.stem)}</strong><span class="format-tags">${tags}</span></span></button><input type="checkbox" class="pick-check" aria-label="Select ${escapeHtml(asset.stem)}" ${selected ? 'checked' : ''}>`;
+      tile.querySelector('.photo-open').addEventListener('click', (event) => {
         setActivePane(paneId);
-        if (event.shiftKey && state.tileAnchor[paneId]) {
-          pane.selectedAssets.clear();
-          const anchorIndex = visible.findIndex((item) => item.id === state.tileAnchor[paneId]);
-          const targetIndex = visible.indexOf(asset);
-          const [from, to] = anchorIndex <= targetIndex ? [anchorIndex, targetIndex] : [targetIndex, anchorIndex];
-          for (let i = from; i <= to; i++) pane.selectedAssets.add(visible[i].id);
-          state.tileAnchor[paneId] = asset.id;
-          state.selectedAssets = pane.selectedAssets;
-          syncSelectionTiles();
-          updateSelectionUi();
-        } else if (event.ctrlKey || event.metaKey) {
-          state.tileAnchor[paneId] = asset.id;
-          toggleAsset(asset.id, button, paneId);
+        if (event.ctrlKey || event.metaKey || event.shiftKey || pane.selectMode || !asset.preview_path) {
+          selectPaneAsset(paneId, asset.id, event.shiftKey || !pane.selectedAssets.has(asset.id), event.shiftKey);
         } else {
-          state.tileAnchor[paneId] = asset.id;
-          pane.selectedAssets.clear();
-          pane.selectedAssets.add(asset.id);
-          state.selectedAssets = pane.selectedAssets;
-          syncSelectionTiles();
-          updateSelectionUi();
+          openLightbox(asset);
         }
       });
-      if (asset.preview_path) {
-        button.addEventListener('dblclick', () => {
-          setActivePane(paneId);
-          openLightbox(asset);
-        });
-      }
-      fragment.appendChild(button);
+      tile.querySelector('.pick-check').addEventListener('click', (event) => {
+        event.stopPropagation();
+        selectPaneAsset(paneId, asset.id, event.target.checked, event.shiftKey);
+      });
+      fragment.appendChild(tile);
     });
     grid.appendChild(fragment);
   }
@@ -917,16 +876,34 @@
     updateSelectionUi();
   }
 
-  function toggleAsset(assetId, tile, paneId = state.activePaneId) {
+  function openLightbox(asset) {
+    if (!asset.preview_path) return;
+    el('lightbox-title').textContent = asset.stem;
+    el('lightbox-image').alt = asset.stem;
+    el('lightbox-image').src = `${previewUrl(asset.preview_path, 1600, asset.preview_version)}&original=1`;
+    el('lightbox-modal').showModal();
+  }
+
+  function selectPaneAsset(paneId, assetId, selected, range = false) {
+    setActivePane(paneId);
     const pane = paneFor(paneId);
-    if (pane.selectedAssets.has(assetId)) pane.selectedAssets.delete(assetId);
-    else pane.selectedAssets.add(assetId);
-    state.selectedAssets = pane.selectedAssets;
-    const selected = pane.selectedAssets.has(assetId);
-    tile.classList.toggle('selected', selected);
-    tile.setAttribute('aria-pressed', String(selected));
-    tile.querySelector('.pick-check').textContent = selected ? '✓' : '+';
-    renderPaneHeaders();
+    const visible = visiblePaneAssets(pane);
+    const anchorIndex = visible.findIndex((asset) => asset.id === state.tileAnchor[paneId]);
+    const targetIndex = visible.findIndex((asset) => asset.id === assetId);
+    if (targetIndex === -1) return;
+    if (range && anchorIndex !== -1) {
+      const from = Math.min(anchorIndex, targetIndex);
+      const to = Math.max(anchorIndex, targetIndex);
+      for (let i = from; i <= to; i++) {
+        if (selected) pane.selectedAssets.add(visible[i].id);
+        else pane.selectedAssets.delete(visible[i].id);
+      }
+    } else {
+      if (selected) pane.selectedAssets.add(assetId);
+      else pane.selectedAssets.delete(assetId);
+      state.tileAnchor[paneId] = assetId;
+    }
+    syncSelectionTiles();
     updateSelectionUi();
   }
 
@@ -936,8 +913,7 @@
       document.querySelectorAll(`#photo-grid-${paneId} .photo-tile`).forEach((tile) => {
         const selected = pane.selectedAssets.has(tile.dataset.assetId);
         tile.classList.toggle('selected', selected);
-        tile.setAttribute('aria-pressed', String(selected));
-        tile.querySelector('.pick-check').textContent = selected ? '✓' : '+';
+        tile.querySelector('.pick-check').checked = selected;
       });
     });
     renderPaneHeaders();
@@ -950,6 +926,14 @@
     ['left', 'right'].forEach((paneId) => {
       const pane = paneFor(paneId);
       const visible = visiblePaneAssets(pane);
+      const selectMode = Boolean(pane.selectMode);
+      el(`${paneId}-select-mode`).setAttribute('aria-pressed', String(selectMode));
+      el(`${paneId}-select-mode`).title = selectMode ? 'Photo clicks select. Turn off to open photos.' : 'Make photo clicks select instead of opening photos.';
+      el(`photo-grid-${paneId}`).classList.toggle('select-mode', selectMode);
+      el(`photo-grid-${paneId}`).querySelectorAll('.photo-open').forEach((button) => {
+        const selecting = selectMode || button.dataset.hasPreview !== 'true';
+        button.setAttribute('aria-label', `${selecting ? 'Select' : 'Open'} ${button.dataset.photoName}`);
+      });
       el(`${paneId}-select-all`).disabled = !visible.length || visible.every((asset) => pane.selectedAssets.has(asset.id));
       el(`${paneId}-clear-picked`).disabled = !pane.selectedAssets.size;
       el(`${paneId}-compare-picked`).disabled = pane.assets.filter((asset) => pane.selectedAssets.has(asset.id) && asset.preview_path).length < 2;
@@ -957,15 +941,8 @@
       el(`${paneId}-auto-compare`).textContent = pane.comparing ? 'Comparing…' : 'Auto-compare folder';
       el(`${paneId}-google-upload`).disabled = !pane.selectedAssets.size || !state.google.connected || pane.uploading;
       el(`${paneId}-google-upload`).textContent = pane.uploading ? 'Uploading…' : 'Upload to Google Photos';
-      document.querySelector(`[data-organize-pane="${paneId}"]`).disabled = !pane.directory;
+      renderPaneOrganizers(paneId);
     });
-    el('mark-unselect').disabled = count === 0;
-    el('mark-select').disabled = count === 0;
-    el('restore-inbox').disabled = count === 0;
-    el('group-selected').disabled = count === 0 || !selectedComparisonGroupName();
-    const tagValue = effectiveTagValue();
-    el('tag-add').disabled = count === 0 || !tagValue;
-    el('tag-remove').disabled = count === 0 || !tagValue;
     const left = paneFor('left');
     const right = paneFor('right');
     [['left', left, right], ['right', right, left]].forEach(([paneId, source, destination]) => {
@@ -977,10 +954,12 @@
     el('move-selected-right').disabled = !left.directory || !right.directory || right.selectedAssets.size === 0;
   }
 
-  async function updateSelectedTags(action) {
-    const value = effectiveTagValue();
-    if (!value || !state.selectedAssets.size) return;
-    const assetIds = Array.from(state.selectedAssets);
+  async function updateSelectedTags(action, paneId, value) {
+    const pane = paneFor(paneId);
+    if (!value || !pane.selectedAssets.size || pane.tagging) return;
+    const assetIds = Array.from(pane.selectedAssets);
+    pane.tagging = true;
+    updateSelectionUi();
     const body = action === 'add'
       ? {asset_ids: assetIds, add_tags: [value]}
       : {asset_ids: assetIds, remove_tags: [value]};
@@ -993,20 +972,21 @@
           }
         });
       });
-      el('tag-input').value = '';
-      el('tag-existing-select').value = '';
+      el(`${paneId}-tag-input`).value = '';
       renderTagFilterBar();
       renderPhotoGrid();
       toast(`${action === 'add' ? 'Added' : 'Removed'} tag “${value}” ${action === 'add' ? 'on' : 'from'} ${assetIds.length} photo group${assetIds.length === 1 ? '' : 's'}.`);
     } catch (error) {
       toast(error.message);
+    } finally {
+      pane.tagging = false;
+      updateSelectionUi();
     }
   }
 
-  async function moveSelectedAssets(action) {
-    if (!state.selectedAssets.size) return;
-    const paneId = state.activePaneId;
+  async function moveSelectedAssets(action, paneId, groupName = '') {
     const pane = paneFor(paneId);
+    if (!pane.selectedAssets.size || pane.organizing) return;
     const directory = pane.directory;
     const labels = {
       select: 'Move the selected photo groups into the select folder?',
@@ -1015,17 +995,15 @@
       group: 'Move the selected photo groups into this comparison group?',
     };
     if (!window.confirm(labels[action])) return;
-    const controls = ['mark-unselect', 'mark-select', 'restore-inbox', 'group-selected'].map(el);
-    controls.forEach((button) => { button.disabled = true; });
-    const groupButton = el('group-selected');
-    if (action === 'group') groupButton.textContent = 'Checking photos…';
-    const groupName = selectedComparisonGroupName();
+    pane.organizing = true;
+    el(`${paneId}-move-menu`).open = false;
+    updateSelectionUi();
     try {
       const result = await api('/api/local/cull', {
         method: 'POST',
         body: JSON.stringify({
-          source_directory: state.libraryDirectory,
-          asset_ids: Array.from(state.selectedAssets),
+          source_directory: directory,
+          asset_ids: Array.from(pane.selectedAssets),
           action,
           group_name: groupName,
         }),
@@ -1033,7 +1011,6 @@
       if (paneFor(paneId) === pane && pane.directory === directory) {
         applyLibraryScan(result, paneId);
         await renderPaneBrowserForDirectory(paneId, result.directory);
-        if (action === 'group') renderGroupPicker(result.destination_group_name || groupName);
       }
       const closedGroup = result.group_deleted ? ' The empty comparison group was removed.' : '';
       const duplicates = result.deleted_duplicate_files || 0;
@@ -1047,7 +1024,7 @@
     } catch (error) {
       toast(error.message);
     } finally {
-      groupButton.textContent = 'Group';
+      pane.organizing = false;
       updateSelectionUi();
     }
   }
@@ -1516,6 +1493,11 @@
   }
 
   ['left', 'right'].forEach((paneId) => {
+    el(`${paneId}-select-mode`).addEventListener('click', () => {
+      const pane = paneFor(paneId);
+      pane.selectMode = !pane.selectMode;
+      setActivePane(paneId);
+    });
     el(`${paneId}-close-folder`).addEventListener('click', () => closePane(paneId));
     el(`${paneId}-select-all`).addEventListener('click', () => {
       setActivePane(paneId);
@@ -1536,26 +1518,24 @@
     });
     el(`${paneId}-auto-compare`).addEventListener('click', () => autoCompareGroups(paneId));
     el(`${paneId}-google-upload`).addEventListener('click', () => uploadPaneSelection(paneId));
-    document.querySelector(`[data-organize-pane="${paneId}"]`).addEventListener('click', (event) => {
-      setActivePane(paneId);
-      event.target.closest('details').open = false;
-      el('organize-selection').open = true;
-      el('organize-selection').scrollIntoView({block: 'nearest', behavior: 'smooth'});
-      el('organize-selection').querySelector('summary').focus();
+    el(`${paneId}-move-menu`).querySelectorAll('[data-cull-action]').forEach((button) => {
+      button.addEventListener('click', () => moveSelectedAssets(button.dataset.cullAction, paneId));
+    });
+    el(`${paneId}-new-group`).addEventListener('click', () => {
+      const name = window.prompt('New comparison group name:');
+      if (name?.trim()) moveSelectedAssets('group', paneId, name.trim());
+    });
+    el(`${paneId}-tag-input`).addEventListener('input', () => {
+      el(`${paneId}-tag-form`).querySelector('button').disabled = !el(`${paneId}-tag-input`).value.trim();
+    });
+    el(`${paneId}-tag-form`).addEventListener('submit', (event) => {
+      event.preventDefault();
+      updateSelectedTags('add', paneId, el(`${paneId}-tag-input`).value.trim());
     });
     el(`library-pane-${paneId}`).addEventListener('click', (event) => {
       if (!event.target.closest('button')) setActivePane(paneId);
     });
     el(`${paneId}-folder-up`).addEventListener('click', () => navigatePane(paneId, paneFor(paneId).parent || '').catch(showError));
-    el(`${paneId}-reveal`).addEventListener('click', async () => {
-      const path = paneFor(paneId).directory;
-      if (!path) return;
-      try {
-        await api('/api/local/reveal', {method: 'POST', body: JSON.stringify({path})});
-      } catch (error) {
-        showError(error);
-      }
-    });
     el(`${paneId}-new-folder`).addEventListener('click', () => createFolderInPane(paneId).catch(showError));
   });
 
@@ -1584,17 +1564,6 @@
   });
   el('move-selected-left').addEventListener('click', () => moveSelectedAssetsBetweenDirectories('left', 'right'));
   el('move-selected-right').addEventListener('click', () => moveSelectedAssetsBetweenDirectories('right', 'left'));
-  el('mark-unselect').addEventListener('click', () => moveSelectedAssets('unselect'));
-  el('mark-select').addEventListener('click', () => moveSelectedAssets('select'));
-  el('restore-inbox').addEventListener('click', () => moveSelectedAssets('restore'));
-  el('group-selected').addEventListener('click', () => moveSelectedAssets('group'));
-  el('compare-group-name').addEventListener('input', updateSelectionUi);
-  el('compare-group-select').addEventListener('change', () => {
-    const creating = el('compare-group-select').value === '__new__';
-    el('compare-group-name').classList.toggle('hidden', !creating);
-    if (creating) el('compare-group-name').focus();
-    updateSelectionUi();
-  });
   el('tag-clear').addEventListener('click', () => {
     state.tagFilter.clear();
     renderTagFilterBar();
@@ -1634,17 +1603,11 @@
     renderPhotoGrid();
     toast(state.showRawOnly ? 'Showing all files including RAW-only' : 'Hiding RAW-only photos');
   });
-  el('tag-input').addEventListener('input', () => {
-    if (el('tag-input').value.trim()) el('tag-existing-select').value = '';
-    updateSelectionUi();
+  el('close-lightbox').addEventListener('click', () => el('lightbox-modal').close());
+  el('lightbox-modal').addEventListener('click', (event) => {
+    if (event.target === el('lightbox-modal') || event.target.classList.contains('lightbox-stage')) el('lightbox-modal').close();
   });
-  el('tag-existing-select').addEventListener('change', () => {
-    const chosen = el('tag-existing-select').value.trim();
-    if (chosen) el('tag-input').value = chosen;
-    updateSelectionUi();
-  });
-  el('tag-add').addEventListener('click', () => updateSelectedTags('add'));
-  el('tag-remove').addEventListener('click', () => updateSelectedTags('remove'));
+  el('lightbox-modal').addEventListener('close', () => el('lightbox-image').removeAttribute('src'));
   el('close-compare').addEventListener('click', () => {
     el('compare-modal').classList.add('hidden');
     syncSelectionTiles();

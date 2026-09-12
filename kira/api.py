@@ -452,7 +452,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
             requested_size = int(query.get("size", ["480"])[0])
         except ValueError:
             requested_size = 480
-        thumbnail = self.server.store.preview_thumbnail(preview, requested_size)
+        thumbnail = preview if query.get("original", [""])[0] == "1" else self.server.store.preview_thumbnail(preview, requested_size)
         self._serve_file(
             thumbnail,
             f"{preview.stem}-preview.jpg",

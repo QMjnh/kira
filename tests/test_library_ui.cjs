@@ -31,7 +31,7 @@ beforeEach(async () => {
   releaseScan = null;
   let groupCreated = false;
   page.on('pageerror', (error) => errors.push(error.message));
-  page.on('dialog', (dialog) => dialog.accept());
+  page.on('dialog', (dialog) => dialog.accept(dialog.type() === 'prompt' ? 'Best shots' : undefined));
   await page.route('http://kira.test/**', async (route) => {
     const url = new URL(route.request().url());
     const folder = url.searchParams.get('path') || '';
@@ -57,6 +57,10 @@ beforeEach(async () => {
       requests.push(request);
       groupCreated = true;
       body = {...scan(request.source_directory), moved_assets: 4, destination_group_name: request.group_name};
+    } else if (url.pathname === '/api/local/tags') {
+      const request = route.request().postDataJSON();
+      requests.push(request);
+      body = {assignments: Object.fromEntries(request.asset_ids.map((id) => [id, request.add_tags || []]))};
     } else if (url.pathname === '/api/google/uploads') {
       requests.push(route.request().postDataJSON());
       body = {id: 'test-upload'};
@@ -121,8 +125,8 @@ test('both close buttons work and closing the left preserves the other selection
 test('select all uses visible asset identities, preserving filtered-out selections', async () => {
   await openFolder('left', 'photos');
   const tiles = page.locator('#photo-grid-left .photo-tile');
-  await tiles.nth(0).click();
-  await tiles.nth(1).click({modifiers: ['Control']});
+  await tiles.nth(0).locator('.pick-check').check();
+  await tiles.nth(1).locator('.pick-check').check();
   assert.equal(await selected('left'), '2 selected');
   await page.locator('#library-filters > summary').click();
   await page.locator('#date-from').fill('2025-01-01');
@@ -153,16 +157,16 @@ test('a delayed scan cannot reopen a closed panel or overwrite its replacement',
 test('More actions stay scoped to their folder and close with Escape', async () => {
   await openPair();
   await page.locator('#right-select-all').click();
-  await page.locator('#library-pane-right .pane-more > summary').click();
+  await page.locator('#right-more-menu > summary').click();
   await page.locator('#right-compare-min-size').fill('4');
   await page.locator('#right-auto-compare').click();
   await page.waitForFunction(() => !document.getElementById('right-auto-compare').disabled);
   assert.equal(requests[0].source_directory, '/camera');
   assert.equal(requests[0].min_group_size, 4);
   await page.keyboard.press('Escape');
-  assert.equal(await page.locator('#library-pane-right .pane-more').getAttribute('open'), null);
+  assert.equal(await page.locator('#right-more-menu').getAttribute('open'), null);
   await page.locator('#right-select-all').click();
-  await page.locator('#library-pane-right .pane-more > summary').click();
+  await page.locator('#right-more-menu > summary').click();
   await page.locator('#right-google-upload').click();
   await page.waitForFunction(() => document.getElementById('right-google-upload').textContent === 'Upload to Google Photos');
   assert.equal(requests[1].source_directory, '/camera');
@@ -172,11 +176,8 @@ test('More actions stay scoped to their folder and close with Escape', async () 
 test('organizing a panel names its folder and refreshes new comparison folders', async () => {
   await openPair();
   await page.locator('#left-select-all').click();
-  await page.locator('#library-pane-left .pane-more > summary').click();
-  await page.locator('[data-organize-pane="left"]').click();
-  assert.equal(await page.locator('#organize-folder-name').innerText(), 'photos');
-  await page.locator('#compare-group-name').fill('Best shots');
-  await page.locator('#group-selected').click();
+  await page.locator('#left-move-menu > summary').click();
+  await page.locator('#left-new-group').click();
   await page.locator('#left-folder-list .folder-row-name').filter({hasText: 'compare_groups'}).waitFor();
   assert.equal(requests[0].source_directory, '/photos');
   assert.equal(requests[0].group_name, 'Best shots');
@@ -195,15 +196,107 @@ test('empty folders and expanded tools fit desktop and mobile widths', async () 
   for (const width of [1566, 1024, 768, 390]) {
     await page.setViewportSize({width, height: 1080});
     await page.locator('#library-filters').evaluate((node) => { node.open = true; });
-    await page.locator('#organize-selection').evaluate((node) => { node.open = true; });
     const overflows = await page.locator('#create-job-card').evaluate((node) => node.scrollWidth > node.clientWidth);
     assert.equal(overflows, false, `No horizontal overflow at ${width}px`);
-    await page.locator('#library-pane-right .pane-more > summary').click();
-    const menu = await page.locator('#library-pane-right .pane-more-menu').boundingBox();
+    await page.locator('#right-more-menu > summary').click();
+    const menu = await page.locator('#right-more-menu .pane-more-menu').boundingBox();
     assert.ok(menu.x >= 0 && menu.x + menu.width <= width, `More menu stays on screen at ${width}px`);
+    const newFolder = await page.locator('#right-new-folder').boundingBox();
+    const move = await page.locator('#right-move-menu > summary').boundingBox();
+    const tags = await page.locator('#right-tags-menu > summary').boundingBox();
+    assert.ok(Math.abs(newFolder.y - move.y) < 1 && Math.abs(move.y - tags.y) < 1, `Organize controls share the New folder row at ${width}px`);
+    const arrowButton = await page.locator('#move-selected-left').boundingBox();
+    const arrow = await page.locator('#move-selected-left svg').boundingBox();
+    assert.ok(Math.abs(arrow.x + arrow.width / 2 - arrowButton.x - arrowButton.width / 2) < 1, 'Move arrow is horizontally centered');
+    assert.ok(Math.abs(arrow.y + arrow.height / 2 - arrowButton.y - arrowButton.height / 2) < 1, 'Move arrow is vertically centered');
     await page.keyboard.press('Escape');
   }
   if (process.env.KIRA_UI_SCREENSHOTS) {
     await page.locator('#create-job-card').screenshot({path: path.join(process.env.KIRA_UI_SCREENSHOTS, 'compare-mobile.png'), style: '.topbar { visibility: hidden; }'});
   }
+});
+
+
+test('photo clicks open original-size images without changing checkbox selections', async () => {
+  await openFolder('left', 'photos');
+  const tiles = page.locator('#photo-grid-left .photo-tile');
+  await tiles.nth(0).locator('.pick-check').check();
+  await tiles.nth(1).locator('.pick-check').check();
+  assert.equal(await selected('left'), '2 selected');
+  await tiles.nth(2).locator('.photo-open').click();
+  assert.equal(await page.locator('#lightbox-modal').isVisible(), true);
+  assert.match(await page.locator('#lightbox-image').getAttribute('src'), /original=1/);
+  assert.equal(await selected('left'), '2 selected');
+  if (process.env.KIRA_UI_SCREENSHOTS) {
+    await page.locator('#lightbox-modal').screenshot({path: path.join(process.env.KIRA_UI_SCREENSHOTS, 'photo-viewer.png')});
+  }
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#lightbox-modal').isVisible(), false);
+  await tiles.nth(3).locator('.pick-check').click({modifiers: ['Shift']});
+  assert.equal(await selected('left'), '4 selected');
+  await tiles.nth(1).locator('.pick-check').uncheck();
+  assert.equal(await selected('left'), '3 selected');
+  await tiles.nth(0).locator('.photo-open').focus();
+  await page.keyboard.press('Enter');
+  await page.locator('#close-lightbox').click();
+  assert.equal(await selected('left'), '3 selected');
+});
+
+test('Tags applies and removes a tag using the same control, only in its panel', async () => {
+  await openPair();
+  await page.locator('#left-select-all').click();
+  await page.locator('#right-select-all').click();
+  await page.locator('#left-tags-menu > summary').click();
+  await page.locator('#left-tag-input').fill('Favorite');
+  await page.locator('#left-tag-input').press('Enter');
+  await page.waitForFunction(() => document.querySelector('#left-tag-list [aria-checked="true"]'));
+  assert.deepEqual(requests[0].asset_ids, assets('/photos').map((asset) => asset.id));
+  assert.equal(await page.locator('#photo-grid-right .tile-tag').count(), 0);
+  await page.locator('#left-tag-list [role="checkbox"]').click();
+  await page.waitForFunction(() => document.querySelector('#left-tag-list').children.length === 0);
+  assert.deepEqual(requests[1].remove_tags, ['Favorite']);
+});
+
+test('Ctrl, Cmd and Shift photo clicks select instead of opening the viewer', async () => {
+  await openFolder('left', 'photos');
+  const photos = page.locator('#photo-grid-left .photo-open');
+  await photos.nth(0).click({modifiers: ['Control']});
+  await photos.nth(1).click({modifiers: ['Meta']});
+  assert.equal(await selected('left'), '2 selected');
+  await photos.nth(3).click({modifiers: ['Shift']});
+  assert.equal(await selected('left'), '4 selected');
+  await photos.nth(2).click({modifiers: ['Control']});
+  assert.equal(await selected('left'), '3 selected');
+  assert.equal(await page.locator('#lightbox-modal').isVisible(), false);
+  await page.locator('#left-clear-picked').click();
+  await photos.nth(2).click({modifiers: ['Shift']});
+  assert.equal(await selected('left'), '1 selected', 'Shift without an anchor selects the clicked photo');
+  await photos.nth(0).click();
+  assert.equal(await page.locator('#lightbox-modal').isVisible(), true);
+  assert.equal(await selected('left'), '1 selected');
+});
+
+test('Select mode toggles ordinary photo clicks independently in each panel', async () => {
+  await openPair();
+  const leftPhotos = page.locator('#photo-grid-left .photo-open');
+  await page.locator('#left-select-mode').click();
+  assert.equal(await page.locator('#left-select-mode').getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.locator('#right-select-mode').getAttribute('aria-pressed'), 'false');
+  await leftPhotos.nth(0).click();
+  await leftPhotos.nth(1).click();
+  await leftPhotos.nth(0).click();
+  assert.equal(await selected('left'), '1 selected');
+  assert.equal(await page.locator('#lightbox-modal').isVisible(), false);
+  await leftPhotos.nth(3).click({modifiers: ['Shift']});
+  assert.equal(await selected('left'), '4 selected');
+  await page.locator('#photo-grid-right .photo-open').first().click();
+  assert.equal(await page.locator('#lightbox-modal').isVisible(), true);
+  assert.equal(await selected('right'), '0 selected');
+  await page.keyboard.press('Escape');
+  await page.locator('#left-select-mode').click();
+  assert.equal(await page.locator('#left-select-mode').getAttribute('aria-pressed'), 'false');
+  assert.equal(await selected('left'), '4 selected');
+  await leftPhotos.nth(0).click();
+  assert.equal(await page.locator('#lightbox-modal').isVisible(), true);
+  assert.equal(await selected('left'), '4 selected');
 });
