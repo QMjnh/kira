@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from http import HTTPStatus
-
 
 class KiraError(Exception):
     def __init__(self, status: int, message: str, **extra: object) -> None:

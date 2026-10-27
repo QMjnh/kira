@@ -6,31 +6,17 @@ import importlib
 import json
 import os
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
-from .google_photos import GooglePhotosError, _name_key, _windows_protect, _windows_unprotect
-from .visual import (
-    VISUAL_COLOR_THRESHOLD,
-    VISUAL_HASH_THRESHOLD,
-    VISUAL_PALETTE_THRESHOLD,
-    VISUAL_PHASH_THRESHOLD,
-    VISUAL_SIZE,
-    dimensions_compatible as _visual_dimensions_compatible,
-    image_signature as _visual_image_signature,
-    palette_similarity as _visual_palette_similarity,
-    perceptual_hash_distance as _visual_perceptual_hash_distance,
-    signature_distance as _visual_signature_distance,
-)
-
-try:
-    from PIL import Image, ImageOps
-except ImportError:
-    Image = None
-    ImageOps = None
+from . import visual
+from .google_photos import GooglePhotosError, _windows_protect, _windows_unprotect
+from .google_signin import GoogleSignInBrowser, GoogleSignInError, find_browser
+from .media import atomic_json_write, match_key
 
 
 class GooglePhotosWebError(GooglePhotosError):
@@ -47,12 +33,6 @@ class GooglePhotosWebService:
     INFO_BATCH_SIZE = 100
     VERIFY_ATTEMPTS = 10
     VERIFY_INTERVAL_SECONDS = 0.5
-    VISUAL_SIZE = VISUAL_SIZE
-    VISUAL_COLOR_THRESHOLD = VISUAL_COLOR_THRESHOLD
-    VISUAL_HASH_THRESHOLD = VISUAL_HASH_THRESHOLD
-    VISUAL_PALETTE_THRESHOLD = VISUAL_PALETTE_THRESHOLD
-    VISUAL_PHASH_THRESHOLD = VISUAL_PHASH_THRESHOLD
-    VISUAL_DIMENSION_TOLERANCE = 0.7
     VISUAL_NARROW_FALLBACK_LIMIT = 6
 
     def __init__(
@@ -65,6 +45,10 @@ class GooglePhotosWebService:
         self.session_path = self.root / "google-web-session.json"
         self._client_factory = client_factory
         self._payloads_module = payloads_module
+        self._signin_lock = threading.RLock()
+        self._signin_cancelled = threading.Event()
+        self._signin_thread = None
+        self._signin_state = {"status": "idle"}
 
     def status(self) -> dict:
         metadata = self._session_metadata()
@@ -79,13 +63,79 @@ class GooglePhotosWebService:
             "account": metadata.get("account"),
             "account_index": metadata.get("account_index", 0),
             "session_path": str(self.session_path),
+            "browser_available": find_browser() is not None,
+            "sign_in": self.sign_in_status(),
         }
+
+    def sign_in_status(self) -> dict:
+        with self._signin_lock:
+            return dict(self._signin_state)
+
+    def start_sign_in(self) -> dict:
+        self._dependency()
+        if not find_browser():
+            raise GooglePhotosWebError("Install Google Chrome or Microsoft Edge to sign in to Google Photos.")
+        with self._signin_lock:
+            if self._signin_thread and self._signin_thread.is_alive():
+                return dict(self._signin_state)
+            cancelled = threading.Event()
+            self._signin_cancelled = cancelled
+            self._signin_state = {"status": "starting"}
+            self._signin_thread = threading.Thread(target=self._run_sign_in, args=(cancelled,), daemon=True)
+            self._signin_thread.start()
+            return dict(self._signin_state)
+
+    def cancel_sign_in(self) -> dict:
+        with self._signin_lock:
+            self._signin_cancelled.set()
+            if self._signin_state["status"] in {"starting", "waiting"}:
+                self._signin_state = {"status": "cancelled"}
+            return dict(self._signin_state)
+
+    def close(self) -> None:
+        self.cancel_sign_in()
+        if self._signin_thread:
+            self._signin_thread.join(timeout=10)
+
+    def _run_sign_in(self, cancelled: threading.Event) -> None:
+        try:
+            wrapper = None
+            deadline = time.monotonic() + 600
+            with GoogleSignInBrowser(self.root, cancelled) as browser:
+                with self._signin_lock:
+                    if cancelled.is_set():
+                        return
+                    self._signin_state = {"status": "waiting"}
+                next_verification = 0.0
+                while not cancelled.is_set() and time.monotonic() < deadline:
+                    session = browser.session()
+                    if session and time.monotonic() >= next_verification:
+                        cookies, account_index = session
+                        raw = self._normalize_cookie_export(json.dumps(cookies).encode("utf-8"))
+                        try:
+                            wrapper = self._verified_session(raw, account_index)
+                            break
+                        except GooglePhotosWebError:
+                            next_verification = time.monotonic() + 5
+                    cancelled.wait(1)
+            with self._signin_lock:
+                if cancelled.is_set():
+                    return
+                if wrapper is None:
+                    raise GoogleSignInError("Sign-in timed out. Click Sign in to Google Photos and try again.")
+                self._write_session(wrapper)
+                self._signin_state = {"status": "completed"}
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, GoogleSignInError) else "The Google sign-in window closed or could not be verified. Try again."
+            with self._signin_lock:
+                if not cancelled.is_set():
+                    self._signin_state = {"status": "failed", "error": message}
 
     def check(self) -> None:
         """Verify the stored cookie JSON can be decrypted and used."""
         if not self.session_path.exists():
             raise GooglePhotosWebError(
-                "Import a Google Photos cookie JSON so album and Archive automation works."
+                "Sign in to Google Photos to connect album and Archive automation."
             )
         with self._client():
             pass
@@ -100,6 +150,7 @@ class GooglePhotosWebService:
             return False
 
     def import_session(self, cookies_path: Path, account_index: int = 0) -> dict:
+        self.cancel_sign_in()
         try:
             source = cookies_path.expanduser().resolve(strict=True)
         except (OSError, RuntimeError) as exc:
@@ -120,6 +171,12 @@ class GooglePhotosWebService:
         if b"google.com" not in normalized.lower():
             raise GooglePhotosWebError("Cookie file does not contain a Google browser session")
 
+        wrapper = self._verified_session(normalized, account_index)
+        with self._signin_lock:
+            self._write_session(wrapper)
+        return self.status()
+
+    def _verified_session(self, normalized: bytes, account_index: int) -> dict:
         account = ""
         client_factory, _ = self._dependency()
         with self._temporary_cookie_file(normalized) as temporary:
@@ -137,15 +194,13 @@ class GooglePhotosWebService:
                 self._close_client(client)
 
         protected = _windows_protect(normalized) if os.name == "nt" else normalized
-        wrapper = {
+        return {
             "version": 1,
             "encrypted": os.name == "nt",
             "account": account or None,
             "account_index": account_index,
             "data": base64.b64encode(protected).decode("ascii"),
         }
-        self._write_session(wrapper)
-        return self.status()
 
     @staticmethod
     def _normalize_cookie_export(raw: bytes) -> bytes:
@@ -198,7 +253,9 @@ class GooglePhotosWebService:
         return ("\n".join(lines) + "\n").encode("utf-8")
 
     def disconnect(self) -> dict:
-        self.session_path.unlink(missing_ok=True)
+        with self._signin_lock:
+            self.cancel_sign_in()
+            self.session_path.unlink(missing_ok=True)
         return self.status()
 
     def list_albums(self) -> list[dict]:
@@ -234,14 +291,11 @@ class GooglePhotosWebService:
 
     def find_visual_matches(self, paths: list[Path]) -> tuple[list[dict], list[dict]]:
         """Match photos by decoded visual content, independent of names and encoding."""
-        if Image is None or ImageOps is None:
-            raise GooglePhotosWebError("Pillow is required for visual photo matching")
-
         errors: list[dict] = []
         local_groups: dict[tuple, dict] = {}
         for path in paths:
             try:
-                signature = self._image_signature(path)
+                signature = visual.image_signature(path)
                 key = (signature["width"], signature["height"], signature["pixels"])
                 group = local_groups.setdefault(
                     key,
@@ -252,7 +306,7 @@ class GooglePhotosWebService:
                     },
                 )
                 group["paths"].append(str(path))
-                group["name_keys"].add(_name_key(path.name))
+                group["name_keys"].add(match_key(path.name))
             except Exception as exc:
                 errors.append(
                     {
@@ -276,7 +330,7 @@ class GooglePhotosWebService:
                 candidates = [
                     group
                     for group in local_groups_list
-                    if self._dimensions_compatible(
+                    if visual.dimensions_compatible(
                         (group["signature"]["width"], group["signature"]["height"]),
                         (remote["width"], remote["height"]),
                     )
@@ -318,7 +372,7 @@ class GooglePhotosWebService:
             response = client.session.get(remote["download_url"], timeout=60)
             if response.status_code < 200 or response.status_code >= 300:
                 raise GooglePhotosWebError(f"original download returned HTTP {response.status_code}")
-            return self._image_signature(response.content)
+            return visual.image_signature(response.content)
         except GooglePhotosWebError:
             raise
         except Exception as exc:
@@ -350,7 +404,7 @@ class GooglePhotosWebService:
                 if pair is None:
                     continue
                 remote, groups = pair
-                remote_name = _name_key(str(getattr(metadata, "file_name", "") or ""))
+                remote_name = match_key(str(getattr(metadata, "file_name", "") or ""))
                 remote_capture = self._remote_capture_time(
                     getattr(metadata, "timestamp", None),
                     getattr(metadata, "timezone_offset", None),
@@ -417,49 +471,23 @@ class GooglePhotosWebService:
         exact_rows: list[tuple[dict, dict]] = []
         variant_rows: list[tuple[dict, dict]] = []
         for candidate in candidates:
-            other = candidate["signature"]
-            color_distance, hash_distance = self._signature_distance(signature, other)
-            palette_similarity = self._palette_similarity(signature, other)
-            perceptual_distance = self._perceptual_hash_distance(signature, other)
-            if (
-                color_distance <= self.VISUAL_COLOR_THRESHOLD
-                and hash_distance <= self.VISUAL_HASH_THRESHOLD
-            ):
-                exact_rows.append(
-                    (
-                        {
-                            "color": color_distance,
-                            "hash": hash_distance,
-                            "palette": palette_similarity,
-                            "phash": perceptual_distance,
-                        },
-                        candidate,
-                    )
-                )
-            elif (
-                palette_similarity >= self.VISUAL_PALETTE_THRESHOLD
-                and perceptual_distance <= self.VISUAL_PHASH_THRESHOLD
-            ):
-                variant_rows.append(
-                    (
-                        {
-                            "color": color_distance,
-                            "hash": hash_distance,
-                            "palette": palette_similarity,
-                            "phash": perceptual_distance,
-                        },
-                        candidate,
-                    )
-                )
+            metrics = visual.similarity_metrics(signature, candidate["signature"])
+            tier = visual.match_tier(metrics)
+            if tier == "reencoded":
+                exact_rows.append((metrics, candidate))
+            elif tier == "edited":
+                variant_rows.append((metrics, candidate))
 
         if exact_rows:
-            ranked = sorted(exact_rows, key=lambda value: (value[0]["color"], value[0]["hash"]))
+            ranked = sorted(
+                exact_rows, key=lambda value: (value[0]["color"], value[0]["difference_hash"])
+            )
             best_metrics, best = ranked[0]
             if len(ranked) > 1:
                 next_metrics = ranked[1][0]
                 if (
                     next_metrics["color"] - best_metrics["color"] < 1.0
-                    and next_metrics["hash"] - best_metrics["hash"] < 3
+                    and next_metrics["difference_hash"] - best_metrics["difference_hash"] < 3
                 ):
                     return
             matches[remote["media_key"]] = {
@@ -467,19 +495,21 @@ class GooglePhotosWebService:
                 "local_files": list(best["paths"]),
                 "visual_match_tier": "reencoded",
                 "visual_color_distance": round(best_metrics["color"], 3),
-                "visual_hash_distance": best_metrics["hash"],
+                "visual_hash_distance": best_metrics["difference_hash"],
             }
             return
 
         if not variant_rows:
             return
-        ranked = sorted(variant_rows, key=lambda value: (-value[0]["palette"], value[0]["phash"]))
+        ranked = sorted(
+            variant_rows, key=lambda value: (-value[0]["palette"], value[0]["perceptual_hash"])
+        )
         best_metrics, best = ranked[0]
         if len(ranked) > 1:
             next_metrics = ranked[1][0]
             if (
                 next_metrics["palette"] - best_metrics["palette"] < 0.01
-                and abs(next_metrics["phash"] - best_metrics["phash"]) < 3
+                and abs(next_metrics["perceptual_hash"] - best_metrics["perceptual_hash"]) < 3
             ):
                 return
         matches[remote["media_key"]] = {
@@ -487,7 +517,7 @@ class GooglePhotosWebService:
             "local_files": list(best["paths"]),
             "visual_match_tier": "edited",
             "visual_palette_similarity": round(best_metrics["palette"], 4),
-            "visual_phash_distance": best_metrics["phash"],
+            "visual_phash_distance": best_metrics["perceptual_hash"],
         }
 
     def _list_library(self, client: object, payloads: object) -> list[dict]:
@@ -532,26 +562,6 @@ class GooglePhotosWebService:
             seen_pages.add(token)
             page_id = next_page
             timestamp = page.last_item_timestamp
-
-    @classmethod
-    def _image_signature(cls, source: Path | bytes) -> dict:
-        return _visual_image_signature(source)
-
-    @classmethod
-    def _dimensions_compatible(cls, left: tuple[int, int], right: tuple[int, int]) -> bool:
-        return _visual_dimensions_compatible(left, right)
-
-    @staticmethod
-    def _signature_distance(left: dict, right: dict) -> tuple[float, int]:
-        return _visual_signature_distance(left, right)
-
-    @staticmethod
-    def _perceptual_hash_distance(left: dict, right: dict) -> int:
-        return _visual_perceptual_hash_distance(left, right)
-
-    @staticmethod
-    def _palette_similarity(left: dict, right: dict) -> float:
-        return _visual_palette_similarity(left, right)
 
     def ensure_album(self, album_title: str) -> dict:
         """Resolve one exact album once, creating it when it does not exist."""
@@ -690,10 +700,8 @@ class GooglePhotosWebService:
             return {}
 
     def _write_session(self, wrapper: dict) -> None:
-        temp = self.session_path.with_suffix(".tmp")
         try:
-            temp.write_text(json.dumps(wrapper), encoding="utf-8")
-            os.replace(temp, self.session_path)
+            atomic_json_write(self.session_path, wrapper)
             if os.name != "nt":
                 try:
                     os.chmod(self.session_path, 0o600)
@@ -701,12 +709,10 @@ class GooglePhotosWebService:
                     pass
         except OSError as exc:
             raise GooglePhotosWebError(f"Could not store Google Photos web session: {exc}") from exc
-        finally:
-            temp.unlink(missing_ok=True)
 
     def _load_session(self) -> tuple[bytes, int]:
         if not self.session_path.exists():
-            raise GooglePhotosWebError("Import a Google Photos cookies.txt file first")
+            raise GooglePhotosWebError("Sign in to Google Photos first")
         try:
             wrapper = json.loads(self.session_path.read_text(encoding="utf-8"))
             if isinstance(wrapper, dict) and "data" not in wrapper and (
@@ -758,7 +764,7 @@ class GooglePhotosWebService:
                 raise
             except IndexError as exc:
                 raise GooglePhotosWebError(
-                    "Google Photos web session expired; import a fresh cookie export"
+                    "Google Photos web session expired; click Sign in to Google Photos again"
                 ) from exc
             except Exception as exc:
                 raise GooglePhotosWebError(f"Google Photos web session failed: {exc}") from exc

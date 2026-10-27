@@ -46,6 +46,9 @@ AUTHED_ROUTES: list[tuple[tuple[str, ...], tuple[str, ...], str, bool]] = [
     (("api", "google", "disconnect"), ("POST",), "_h_google_disconnect", True),
     (("api", "google", "web-session"), ("POST",), "_h_google_web_session_import", True),
     (("api", "google", "web-session"), ("DELETE",), "_h_google_web_session_delete", True),
+    (("api", "google", "web-signin"), ("POST",), "_h_google_web_signin_start", True),
+    (("api", "google", "web-signin"), ("GET",), "_h_google_web_signin_status", True),
+    (("api", "google", "web-signin"), ("DELETE",), "_h_google_web_signin_cancel", True),
     (("api", "google", "albums"), ("GET",), "_h_google_albums", True),
     (("api", "google", "match-folder"), ("POST",), "_h_google_match_folder", True),
     (("api", "google", "organize"), ("POST",), "_h_google_organize", True),
@@ -141,6 +144,10 @@ class KiraHTTPServer(ThreadingHTTPServer):
         self.google_photos = GooglePhotosService(store.root, APP_ROOT)
         super().__init__(address, KiraRequestHandler)
 
+    def server_close(self) -> None:
+        self.google_photos.close()
+        super().server_close()
+
 
 class KiraRequestHandler(BaseHTTPRequestHandler):
     server: KiraHTTPServer
@@ -205,8 +212,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
                 getattr(self, handler_name)(params, query)
                 return
             if seen_methods:
-                self._method_not_allowed()
-                return
+                raise KiraError(HTTPStatus.METHOD_NOT_ALLOWED, "Method not allowed")
             raise KiraError(HTTPStatus.NOT_FOUND, "Not found")
         except KiraError as exc:
             if method == "PUT":
@@ -276,6 +282,17 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
     def _h_google_web_session_delete(self, params: dict, query: dict) -> None:
         self._discard_optional_body()
         self._send_json(self.server.google_photos.disconnect_web_session())
+
+    def _h_google_web_signin_start(self, params: dict, query: dict) -> None:
+        self._discard_optional_body()
+        self._send_json(self.server.google_photos.start_web_sign_in())
+
+    def _h_google_web_signin_status(self, params: dict, query: dict) -> None:
+        self._send_json(self.server.google_photos.web_sign_in_status())
+
+    def _h_google_web_signin_cancel(self, params: dict, query: dict) -> None:
+        self._discard_optional_body()
+        self._send_json(self.server.google_photos.cancel_web_sign_in())
 
     def _h_google_albums(self, params: dict, query: dict) -> None:
         self._send_json(self.server.google_photos.albums())
@@ -760,6 +777,3 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(encoded)
-
-    def _method_not_allowed(self) -> None:
-        raise KiraError(HTTPStatus.METHOD_NOT_ALLOWED, "Method not allowed")

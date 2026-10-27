@@ -6,25 +6,21 @@
     bootstrap: null,
     jobs: [],
     currentJob: null,
-    libraryDirectory: '',
-    libraryAssets: [],
-    culling: null,
-    selectedAssets: new Set(),
     tagFilter: new Set(),
     dateFrom: '',
     dateTo: '',
     rightPaneOpen: false,
     tileAnchor: {left: null, right: null},
     libraryPanes: {
-      left: {directory: '', assets: [], culling: null, selectedAssets: new Set(), selectMode: false, parent: null, breadcrumbs: [], directories: []},
-      right: {directory: '', assets: [], culling: null, selectedAssets: new Set(), selectMode: false, parent: null, breadcrumbs: [], directories: []},
+      left: emptyPane(),
+      right: emptyPane(),
     },
     activePaneId: 'left',
     compareZoom: 1,
     comparePan: {x: 0, y: 0},
     googleDownloadSettingsOpen: false,
     showRawOnly: localStorage.getItem('kira-show-raw-only') === 'true',
-    google: {configured: false, connected: false},
+    google: {configured: false, connected: false, organizer: {}},
   };
 
   const el = (id) => document.getElementById(id);
@@ -32,6 +28,7 @@
   const dashboardView = el('dashboard-view');
   const jobView = el('job-view');
   const connectionState = el('connection-state');
+  let googleSignInPolling = false;
 
   function showOnly(view) {
     [pairView, dashboardView, jobView].forEach((item) => item.classList.toggle('hidden', item !== view));
@@ -161,11 +158,11 @@
         notice.textContent = '';
         return health;
       }
-      notice.textContent = health.message || 'Google Photos picker or cookie JSON is not working.';
+      notice.textContent = health.message || 'Google Photos needs to reconnect.';
       notice.classList.remove('hidden');
       return health;
     } catch (error) {
-      notice.textContent = error.message || 'Could not check Google Photos picker or cookie JSON.';
+      notice.textContent = error.message || 'Could not check the Google Photos connection.';
       notice.classList.remove('hidden');
       return null;
     }
@@ -192,6 +189,7 @@
   function renderGoogleOrganizer() {
     const organizer = state.google.organizer || {};
     const connected = Boolean(organizer.connected);
+    const directory = paneFor().directory;
     const organizerStatus = el('google-organizer-status');
     organizerStatus.textContent = connected
       ? 'Connected'
@@ -201,21 +199,58 @@
       : '';
     el('google-organizer-connect').classList.toggle('hidden', connected);
     el('google-organizer-controls').classList.toggle('hidden', !connected);
-    el('google-organizer-connect-button').disabled = organizer.available === false;
+    renderGoogleSignIn(organizer.sign_in);
+    if (['starting', 'waiting'].includes(organizer.sign_in?.status)) pollGoogleSignIn().catch(showError);
     if (!el('google-album-title').value) {
       el('google-album-title').value = localStorage.getItem('kira-google-album-title') || '';
     }
     const matchSource = el('google-match-source');
-    matchSource.querySelector('strong').textContent = state.libraryDirectory
-      ? state.libraryDirectory
-      : 'Open a local folder below first.';
+    matchSource.querySelector('strong').textContent = directory || 'Open a local folder below first.';
     const matchButton = el('google-match-folder');
     matchButton.disabled = !connected
-      || !state.libraryDirectory
+      || !directory
       || !el('google-album-title').value.trim();
     matchButton.textContent = el('google-archive-after-upload').checked
       ? 'Match folder → album + archive'
       : 'Match folder → album';
+  }
+
+  function renderGoogleSignIn(signIn = {status: 'idle'}) {
+    const pending = ['starting', 'waiting'].includes(signIn.status);
+    const unavailable = state.google.organizer?.available === false || state.google.organizer?.browser_available === false;
+    el('google-organizer-signin').disabled = pending || unavailable;
+    el('google-organizer-reconnect').disabled = pending || unavailable;
+    el('google-organizer-connect-button').disabled = pending || state.google.organizer?.available === false;
+    el('google-signin-cancel').classList.toggle('hidden', !pending);
+    el('google-signin-message').textContent = signIn.status === 'starting'
+      ? 'Opening Google Photos on this desktop…'
+      : signIn.status === 'waiting' ? 'Complete sign-in in the Google Photos window. Kira will connect automatically.'
+      : signIn.status === 'failed' ? signIn.error || 'Google Photos sign-in failed. Try again.'
+      : signIn.status === 'cancelled' ? 'Sign-in cancelled.'
+      : unavailable && state.google.organizer?.available !== false ? 'Install Chrome or Edge to sign in, or import a session manually.' : '';
+  }
+
+  async function pollGoogleSignIn() {
+    if (googleSignInPolling) return;
+    googleSignInPolling = true;
+    try {
+      while (true) {
+        const signIn = await api('/api/google/web-signin');
+        state.google.organizer.sign_in = signIn;
+        renderGoogleSignIn(signIn);
+        if (signIn.status === 'completed') {
+          await refreshGoogleStatus();
+          await checkGoogleHealth();
+          toast('Google Photos organizer connected.');
+          return;
+        }
+        if (signIn.status === 'failed') throw new Error(signIn.error || 'Google Photos sign-in failed. Try again.');
+        if (!['starting', 'waiting'].includes(signIn.status)) return;
+        await wait(1000);
+      }
+    } finally {
+      googleSignInPolling = false;
+    }
   }
 
   function googleImportPreferences() {
@@ -573,8 +608,6 @@
     let summary = `${photoCount} photo group${photoCount === 1 ? '' : 's'} · ${videoCount} video group${videoCount === 1 ? '' : 's'}`;
     if (hiddenCount > 0 && !state.showRawOnly) {
       summary += ` · ${hiddenCount} RAW-only hidden`;
-    } else if (state.showRawOnly && hiddenCount === 0 && pane.assets.length !== displayable.length) {
-      // no-op
     } else if (state.showRawOnly) {
       const rawOnly = displayable.filter((asset) => asset.raw_files.length > 0 && asset.jpeg_files.length === 0 && !(asset.video_files || []).length).length;
       if (rawOnly) summary += ` · ${rawOnly} RAW-only`;
@@ -632,11 +665,6 @@
   function setActivePane(paneId) {
     if (!state.libraryPanes[paneId]) return;
     state.activePaneId = paneId;
-    const pane = paneFor(paneId);
-    state.libraryDirectory = pane.directory;
-    state.libraryAssets = pane.assets;
-    state.culling = pane.culling;
-    state.selectedAssets = pane.selectedAssets;
     renderPaneHeaders();
     renderGoogleDestination();
     renderGoogleOrganizer();
@@ -920,8 +948,9 @@
   }
 
   function updateSelectionUi() {
-    const count = state.selectedAssets.size;
-    el('selection-summary').textContent = `${count} selected in ${folderLabel(state.libraryDirectory)}`;
+    const active = paneFor();
+    const count = active.selectedAssets.size;
+    el('selection-summary').textContent = `${count} selected in ${folderLabel(active.directory)}`;
     el('selection-job-form').querySelector('button[type="submit"]').disabled = count === 0;
     ['left', 'right'].forEach((paneId) => {
       const pane = paneFor(paneId);
@@ -936,7 +965,7 @@
       });
       el(`${paneId}-select-all`).disabled = !visible.length || visible.every((asset) => pane.selectedAssets.has(asset.id));
       el(`${paneId}-clear-picked`).disabled = !pane.selectedAssets.size;
-      el(`${paneId}-compare-picked`).disabled = pane.assets.filter((asset) => pane.selectedAssets.has(asset.id) && asset.preview_path).length < 2;
+      el(`${paneId}-compare-picked`).disabled = selectedPreviewAssets(pane).length < 2;
       el(`${paneId}-auto-compare`).disabled = !pane.directory || pane.comparing || !pane.assets.length;
       el(`${paneId}-auto-compare`).textContent = pane.comparing ? 'Comparing…' : 'Auto-compare folder';
       el(`${paneId}-google-upload`).disabled = !pane.selectedAssets.size || !state.google.connected || pane.uploading;
@@ -1100,12 +1129,13 @@
     }
   }
 
-  function selectedPreviewAssets() {
-    return state.libraryAssets.filter((asset) => state.selectedAssets.has(asset.id) && asset.preview_path);
+  function selectedPreviewAssets(pane) {
+    return pane.assets.filter((asset) => pane.selectedAssets.has(asset.id) && asset.preview_path);
   }
 
   function openCompare() {
-    const assets = selectedPreviewAssets();
+    const pane = paneFor();
+    const assets = selectedPreviewAssets(pane);
     if (assets.length < 2) {
       toast('Select at least two photos that have JPEG previews.');
       return;
@@ -1129,9 +1159,9 @@
       const pickButton = item.querySelector('button');
       pickButton.addEventListener('click', (event) => {
         event.stopPropagation();
-        if (state.selectedAssets.has(asset.id)) state.selectedAssets.delete(asset.id);
-        else state.selectedAssets.add(asset.id);
-        const picked = state.selectedAssets.has(asset.id);
+        if (pane.selectedAssets.has(asset.id)) pane.selectedAssets.delete(asset.id);
+        else pane.selectedAssets.add(asset.id);
+        const picked = pane.selectedAssets.has(asset.id);
         pickButton.classList.toggle('is-picked', picked);
         pickButton.textContent = picked ? 'Selected' : 'Removed';
         updateSelectionUi();
@@ -1401,6 +1431,28 @@
     }
   });
 
+  async function signInToGooglePhotos() {
+    try {
+      const signIn = await api('/api/google/web-signin', {method: 'POST', body: '{}'});
+      state.google.organizer.sign_in = signIn;
+      renderGoogleSignIn(signIn);
+      await pollGoogleSignIn();
+    } catch (error) {
+      showError(error);
+    }
+  }
+  el('google-organizer-signin').addEventListener('click', signInToGooglePhotos);
+  el('google-organizer-reconnect').addEventListener('click', signInToGooglePhotos);
+  el('google-signin-cancel').addEventListener('click', async () => {
+    try {
+      const signIn = await api('/api/google/web-signin', {method: 'DELETE'});
+      state.google.organizer.sign_in = signIn;
+      renderGoogleSignIn(signIn);
+    } catch (error) {
+      showError(error);
+    }
+  });
+
   el('google-organizer-disconnect').addEventListener('click', async () => {
     if (!window.confirm('Remove the encrypted Google Photos web session from Kira?')) return;
     try {
@@ -1422,9 +1474,10 @@
   el('google-match-folder').addEventListener('click', async () => {
     const albumTitle = el('google-album-title').value.trim();
     const archive = el('google-archive-after-upload').checked;
-    if (!state.libraryDirectory || !albumTitle || !state.google.organizer?.connected) return;
+    const directory = paneFor().directory;
+    if (!directory || !albumTitle || !state.google.organizer?.connected) return;
     const confirmed = window.confirm(
-      `Match every supported file directly inside:\n${state.libraryDirectory}\n\n` +
+      `Match every supported file directly inside:\n${directory}\n\n` +
       `Confirmed Google Photos matches will be added to “${albumTitle}”` +
       `${archive ? ' and archived' : ''}. Continue?`
     );
@@ -1436,7 +1489,7 @@
       const operation = await api('/api/google/match-folder', {
         method: 'POST',
         body: JSON.stringify({
-          source_directory: state.libraryDirectory,
+          source_directory: directory,
           album_title: albumTitle,
           archive,
         }),
@@ -1501,13 +1554,14 @@
     el(`${paneId}-close-folder`).addEventListener('click', () => closePane(paneId));
     el(`${paneId}-select-all`).addEventListener('click', () => {
       setActivePane(paneId);
-      visiblePaneAssets(paneFor(paneId)).forEach((asset) => state.selectedAssets.add(asset.id));
+      const pane = paneFor(paneId);
+      visiblePaneAssets(pane).forEach((asset) => pane.selectedAssets.add(asset.id));
       syncSelectionTiles();
       updateSelectionUi();
     });
     el(`${paneId}-clear-picked`).addEventListener('click', () => {
       setActivePane(paneId);
-      state.selectedAssets.clear();
+      paneFor(paneId).selectedAssets.clear();
       state.tileAnchor[paneId] = null;
       syncSelectionTiles();
       updateSelectionUi();
@@ -1556,7 +1610,6 @@
     const pane = paneFor('right');
     state.rightPaneOpen = true;
     setActivePane('right');
-    renderPaneHeaders();
     // Render the navigator shell immediately so the pane is never a dead end,
     // then fill in the real drive/folder listing.
     renderPaneBrowser('right');
@@ -1588,8 +1641,7 @@
   el('show-raw-toggle').addEventListener('change', (event) => {
     state.showRawOnly = event.target.checked;
     localStorage.setItem('kira-show-raw-only', String(state.showRawOnly));
-    // Keep existing selections but re-render so hidden assets disappear/appear.
-    // If hiding, deselect any now-hidden assets to keep counts accurate.
+    // Deselect hidden assets so selection counts match the RAW display setting.
     if (!state.showRawOnly) {
       ['left', 'right'].forEach((paneId) => {
         const pane = paneFor(paneId);
@@ -1598,7 +1650,6 @@
           if (!visibleIds.has(id)) pane.selectedAssets.delete(id);
         }
       });
-      state.selectedAssets = paneFor().selectedAssets;
     }
     renderPhotoGrid();
     toast(state.showRawOnly ? 'Showing all files including RAW-only' : 'Hiding RAW-only photos');
@@ -1646,8 +1697,8 @@
         method: 'POST',
         body: JSON.stringify({
           name: el('job-name').value,
-          source_directory: state.libraryDirectory,
-          selected_ids: Array.from(state.selectedAssets),
+          source_directory: paneFor().directory,
+          selected_ids: Array.from(paneFor().selectedAssets),
           source_format: el('edit-source-format').value,
         }),
       });
@@ -1659,7 +1710,7 @@
       toast(error.message);
     } finally {
       button.textContent = originalLabel;
-      button.disabled = state.selectedAssets.size === 0;
+      button.disabled = paneFor().selectedAssets.size === 0;
     }
   });
 

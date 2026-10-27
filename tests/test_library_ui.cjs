@@ -7,7 +7,7 @@ const path = require('node:path');
 const {chromium} = require('playwright');
 
 const root = path.resolve(__dirname, '..');
-let browser, page, errors, requests, releaseScan;
+let browser, page, errors, requests, releaseScan, releaseSignIn;
 const assets = (folder) => Array.from({length: 4}, (_, i) => ({
   id: `${folder}-${i}`, stem: `Photo ${i + 1}`, jpeg_files: [{}], raw_files: [],
   video_files: [], tags: [], preview_path: `${folder}/${i}.jpg`,
@@ -29,7 +29,10 @@ beforeEach(async () => {
   errors = [];
   requests = [];
   releaseScan = null;
+  releaseSignIn = null;
   let groupCreated = false;
+  let signIn = {status: 'idle'};
+  let organizerConnected = false;
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('dialog', (dialog) => dialog.accept(dialog.type() === 'prompt' ? 'Best shots' : undefined));
   await page.route('http://kira.test/**', async (route) => {
@@ -42,7 +45,19 @@ beforeEach(async () => {
     }
     if (url.pathname === '/api/bootstrap') body = {token: 'test-token', ipad_url: 'http://kira.test', pair_code: '123456', data_dir: 'Test library', pair_qr_url: '/qr'};
     else if (url.pathname === '/api/jobs') body = {jobs: []};
-    else if (url.pathname === '/api/google/status') body = {configured: true, connected: true, inbox: '/photos', organizer: {available: false}};
+    else if (url.pathname === '/api/google/status') body = {configured: true, connected: true, inbox: '/photos', organizer: {available: true, browser_available: true, connected: organizerConnected, sign_in: signIn}};
+    else if (url.pathname === '/api/google/web-signin') {
+      const method = route.request().method();
+      if (method === 'POST') {
+        requests.push({method, body: route.request().postDataJSON()});
+        signIn = {status: 'waiting'};
+        releaseSignIn = () => { signIn = {status: 'completed'}; organizerConnected = true; };
+      } else if (method === 'DELETE') {
+        requests.push({method});
+        signIn = {status: 'cancelled'};
+      }
+      body = signIn;
+    }
     else if (url.pathname === '/api/google/health') body = {ok: true};
     else if (url.pathname === '/api/local/browse') body = {parent: null, breadcrumbs: folder ? [{name: folder.slice(1), path: folder}] : [], directories: folder ? (groupCreated ? [{name: 'compare_groups', path: `${folder}/compare_groups`}] : []) : roots};
     else if (url.pathname === '/api/local/scan') {
@@ -87,6 +102,35 @@ async function openPair() {
   await openFolder('right', 'camera');
 }
 async function selected(side) { return page.locator(`#selection-count-${side}`).innerText(); }
+
+test('Google Photos connects after browser sign-in without a cookie file', async () => {
+  await page.locator('#google-organizer > summary').click();
+  assert.equal(await page.locator('#google-cookies-path').isVisible(), false);
+  await page.locator('#google-organizer-signin').click();
+  await page.locator('#google-signin-cancel').waitFor();
+  assert.equal(await page.locator('#google-organizer-signin').isDisabled(), true);
+  assert.equal(await page.locator('#google-signin-message').innerText(), 'Complete sign-in in the Google Photos window. Kira will connect automatically.');
+  assert.ok(releaseSignIn);
+  releaseSignIn();
+  await page.locator('#google-organizer-controls').waitFor();
+  assert.equal(await page.locator('#google-organizer-status').innerText(), 'Connected');
+  assert.equal(await page.locator('#google-cookies-path').inputValue(), '');
+  assert.deepEqual(requests, [{method: 'POST', body: {}}]);
+});
+
+test('pending Google sign-in survives a page reload and can be cancelled', async () => {
+  await page.locator('#google-organizer > summary').click();
+  await page.locator('#google-organizer-signin').click();
+  await page.locator('#google-signin-cancel').waitFor();
+  await page.reload();
+  await page.locator('#google-organizer > summary').click();
+  await page.locator('#google-signin-cancel').waitFor();
+  assert.equal(await page.locator('#google-organizer-signin').isDisabled(), true);
+  await page.locator('#google-signin-cancel').click();
+  await page.waitForFunction(() => document.getElementById('google-signin-message').textContent === 'Sign-in cancelled.');
+  assert.equal(await page.locator('#google-organizer-signin').isDisabled(), false);
+  assert.deepEqual(requests, [{method: 'POST', body: {}}, {method: 'DELETE'}]);
+});
 
 test('selection and comparison belong to the panel that owns the button', async () => {
   await openPair();

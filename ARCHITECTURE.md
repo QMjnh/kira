@@ -4,7 +4,7 @@ Kira is a small, local-first photo-transfer service. It runs on the desktop, ser
 
 ## Run locally
 
-Kira needs Python 3 **and Pillow** (thumbnails, previews, and pixel-identity matching are core behavior). The remaining dependencies are vendored in `vendor/`, including the pinned `gpwc` web client (see `vendor/gpwc-PINNED.txt`).
+Kira needs Python 3 **and Pillow** (thumbnails, previews, and pixel-identity matching are core behavior). The remaining dependencies are vendored in `vendor/`, including the pinned `gpwc` web client and `websocket-client` (see their `*-PINNED.txt` files). Browser sign-in uses installed Chrome or Edge.
 
 ```powershell
 git clone git@github.com:QMjnh/kira.git
@@ -24,13 +24,15 @@ The folder-panel browser regression checks use Node.js and Playwright (`npm inst
 
 | Path | Responsibility |
 | --- | --- |
-| `server.py` | Entry-point shim: runs `kira.main.main()`, re-exports public names. The only Python file outside `kira/`. |
+| `server.py` | Entry-point shim: runs `kira.main.main()`, re-exports public names. |
 | `kira/main.py` | CLI arguments and server startup. |
 | `kira/api.py` | HTTP layer: declarative route table, auth, request handlers, file serving with range support. |
 | `kira/store.py` | Job manifests, resumable uploads, transfer bundles, source-folder organization, thumbnail cache. |
 | `kira/media.py` | Folder scanning, photo grouping, culling moves, media identity (pixel or byte hashing). |
+| `kira/visual.py` | Shared visual signatures, photo similarity, and comparison clustering. |
 | `kira/google_photos.py` | Google Picker/Library OAuth client: imports, uploads, operations, folder matching. |
 | `kira/google_photos_web.py` | Album/Archive automation through the vendored `gpwc` web client. |
+| `kira/google_signin.py` | Desktop browser sign-in and automatic Google session capture. |
 | `kira/errors.py` | Shared `KiraError` type. |
 | `web/` | Static browser UI served by the Python server. |
 | `vendor/` | Bundled dependencies used when Kira starts. |
@@ -67,7 +69,15 @@ This controls access; it is not transport encryption. Kira serves plain HTTP on 
 
 `kira/google_photos.py` owns OAuth (DPAPI-encrypted tokens beside the data dir), picker sessions, background import/upload operations persisted as JSON records, and content-hash matching back to web media keys (SHA-1 remote match first, then visual-signature matching for re-encoded photos).
 
-`kira/google_photos_web.py` wraps `gpwc` for album assignment and Archive only. Cookie sessions are imported explicitly, normalized to Netscape format, DPAPI-encrypted at rest, decrypted into a temporary cookie file per client session, and deleted after each use.
+`kira/google_photos_web.py` wraps `gpwc` for album assignment and Archive only. Sessions come from browser sign-in or the optional manual import, are normalized to Netscape format, DPAPI-encrypted at rest, decrypted into a temporary cookie file per client session, and deleted after each use.
+
+### Automatic organizer sign-in
+
+`POST /api/google/web-signin` starts a background sign-in; `GET` returns its state and `DELETE` cancels it. All three routes require authentication and a loopback client. Kira launches installed Chrome or Edge with a fresh temporary profile and an automatically allocated, loopback-only DevTools port. It never opens the everyday browser profile or disables browser security. The user handles Google's login, MFA, and consent directly. Kira detects the Photos account, collects only Google-domain cookies through the browser protocol, and verifies them with `gpwc` before replacing the saved session. The browser and its temporary profile are closed and removed afterward. Cancellation or disconnect prevents a late verification from saving credentials. A failed sign-in preserves any existing connection. Sign-in expires after ten minutes, and server shutdown cancels it.
+
+The saved encrypted session is reused across Kira restarts. This does not silently renew a revoked Google login: the user clicks **Sign in again** when Google requires fresh authentication. Picker/upload OAuth remains separate because it grants different permissions.
+
+The approach follows the browser-login pattern demonstrated by [gphotohandler](https://github.com/hensenx/gphotohandler), using our own implementation and the small Apache-2.0 `websocket-client` library instead of adding Playwright and a bundled browser at runtime. Google's [Library API changes](https://developers.google.com/photos/support/updates) restrict official access to app-created content, so OAuth alone cannot replace the existing organizer. Reading the user's default Chrome cookie database is unsuitable on Windows because of [App-Bound Encryption](https://security.googleblog.com/2024/07/improving-security-of-chrome-cookies-on.html); Chrome also [requires a separate profile for remote debugging](https://developer.chrome.com/blog/remote-debugging-port). The web organizer still uses an unofficial API and can require maintenance when Google changes its site.
 
 ## API behavior worth preserving
 

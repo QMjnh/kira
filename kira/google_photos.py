@@ -8,19 +8,25 @@ import http.client
 import json
 import mimetypes
 import os
-import re
 import secrets
 import tempfile
 import threading
 import time
 import uuid
-import zipfile
 from ctypes import wintypes
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .media import (
+    VIDEO_EXTENSIONS,
+    atomic_json_write,
+    match_key,
+    safe_filename,
+    sha256_file,
+    unique_destination,
+)
 
 PICKER_SCOPE = "https://www.googleapis.com/auth/photospicker.mediaitems.readonly"
 UPLOAD_SCOPE = "https://www.googleapis.com/auth/photoslibrary.appendonly"
@@ -29,21 +35,12 @@ TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 PICKER_ENDPOINT = "https://photospicker.googleapis.com/v1"
 LIBRARY_HOST = "photoslibrary.googleapis.com"
-INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 PHOTO_SUFFIXES = {
     ".avif", ".bmp", ".gif", ".heic", ".heif", ".ico", ".jpeg", ".jpg",
     ".png", ".tif", ".tiff", ".webp", ".dng", ".cr2", ".cr3", ".nef",
     ".arw", ".orf", ".raf", ".rw2", ".pef", ".srw", ".raw",
 }
-VIDEO_SUFFIXES = {
-    ".3g2", ".3gp", ".asf", ".avi", ".divx", ".m2t", ".m2ts", ".m4v",
-    ".mkv", ".mmv", ".mod", ".mov", ".mp4", ".mpg", ".mts", ".tod", ".wmv",
-}
-MEDIA_SUFFIXES = PHOTO_SUFFIXES | VIDEO_SUFFIXES
-VARIANT_SUFFIX = re.compile(
-    r"(?:[\s_-]+(?:(?:edited?|edit|final|copy|lr|lightroom|google)(?:[\s_-]*v?\d+)?|v\d+)|\s*\(\d+\))$",
-    re.IGNORECASE,
-)
+MEDIA_SUFFIXES = PHOTO_SUFFIXES | VIDEO_EXTENSIONS
 IMPORT_DOWNLOAD_MODES = {"automatic", "zip", "files"}
 DEFAULT_ZIP_THRESHOLD = 50
 MIN_ZIP_THRESHOLD = 2
@@ -85,43 +82,6 @@ def _windows_unprotect(data: bytes) -> bytes:
         return ctypes.string_at(outgoing.pbData, outgoing.cbData)
     finally:
         ctypes.windll.kernel32.LocalFree(outgoing.pbData)
-
-
-def _safe_filename(value: str) -> str:
-    name = Path(str(value).replace("\\", "/")).name.strip().rstrip(". ")
-    name = INVALID_FILENAME.sub("_", name)
-    if not name or name in {".", ".."}:
-        name = "google-photo"
-    return f"{Path(name).stem[:150]}{Path(name).suffix[:20]}"
-
-
-def _unique_destination(folder: Path, filename: str, marker: str = "v") -> Path:
-    candidate = folder / _safe_filename(filename)
-    if not candidate.exists():
-        return candidate
-    index = 2
-    while True:
-        versioned = folder / f"{candidate.stem}__{marker}{index}{candidate.suffix}"
-        if not versioned.exists():
-            return versioned
-        index += 1
-
-
-def _name_key(filename: str) -> str:
-    stem = Path(filename).stem.strip()
-    previous = None
-    while stem != previous:
-        previous = stem
-        stem = VARIANT_SUFFIX.sub("", stem).strip(" _-")
-    return stem.casefold()
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(4 * 1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _google_remote_hash(path: Path) -> str:
@@ -186,7 +146,7 @@ class GooglePhotosService:
         }
 
     def health(self) -> dict:
-        """Check the Photos Picker and the stored cookie JSON."""
+        """Check the Photos Picker and the saved organizer connection."""
         json_ok = False
         picker_ok = False
         issues: list[str] = []
@@ -247,9 +207,7 @@ class GooglePhotosService:
             "encrypted": os.name == "nt",
             "data": base64.b64encode(protected).decode("ascii"),
         }
-        temp = self.token_path.with_suffix(".tmp")
-        temp.write_text(json.dumps(wrapper), encoding="utf-8")
-        os.replace(temp, self.token_path)
+        atomic_json_write(self.token_path, wrapper)
         if os.name != "nt":
             try:
                 os.chmod(self.token_path, 0o600)
@@ -361,6 +319,18 @@ class GooglePhotosService:
 
     def import_web_session(self, cookies_path: Path, account_index: int = 0) -> dict:
         return self.web.import_session(cookies_path, account_index)
+
+    def start_web_sign_in(self) -> dict:
+        return self.web.start_sign_in()
+
+    def web_sign_in_status(self) -> dict:
+        return self.web.sign_in_status()
+
+    def cancel_web_sign_in(self) -> dict:
+        return self.web.cancel_sign_in()
+
+    def close(self) -> None:
+        self.web.close()
 
     def disconnect_web_session(self) -> dict:
         return self.web.disconnect()
@@ -535,9 +505,7 @@ class GooglePhotosService:
 
     def _save_operation(self, operation: dict) -> None:
         path = self.operations_root / f"{operation['id']}.json"
-        temp = path.with_suffix(".tmp")
-        temp.write_text(json.dumps(operation, indent=2), encoding="utf-8")
-        os.replace(temp, path)
+        atomic_json_write(path, operation)
 
     def _update_operation(self, operation_id: str, **changes: object) -> dict:
         with self.lock:
@@ -586,7 +554,7 @@ class GooglePhotosService:
                         {
                             "path": path,
                             "name": path.name.casefold(),
-                            "name_key": _name_key(path.name),
+                            "name_key": match_key(path.name),
                             "size": stat.st_size,
                             "sha256": None,
                         }
@@ -596,26 +564,26 @@ class GooglePhotosService:
         return records
 
     def _classify_download(
-        self, incoming: Path, filename: str, size: int, digest: str, existing: list[dict]
+        self, filename: str, size: int, digest: str, existing: list[dict]
     ) -> tuple[str, Path | None]:
         for record in existing:
             if record["size"] != size:
                 continue
             if record["sha256"] is None:
-                record["sha256"] = _sha256_file(record["path"])
+                record["sha256"] = sha256_file(record["path"])
             if record["sha256"] == digest:
                 return "exact_duplicate", record["path"]
         same_name = [record for record in existing if record["name"] == filename.casefold()]
         if same_name:
             return "possible_edit", same_name[0]["path"]
-        related = [record for record in existing if record["name_key"] == _name_key(filename)]
+        related = [record for record in existing if record["name_key"] == match_key(filename)]
         if related:
             return "related_variant", related[0]["path"]
         return "new", None
 
     def _download_picked_item(self, index: int, item: dict, token: str, folder: Path) -> dict:
         media = item.get("mediaFile") or {}
-        filename = _safe_filename(str(media.get("filename", "google-photo")))
+        filename = safe_filename(str(media.get("filename", "google-photo")), fallback="google-photo")
         media_type = str(item.get("type", "PHOTO"))
         base_url = str(media.get("baseUrl", ""))
         if media_type not in {"PHOTO", "VIDEO"} or not base_url:
@@ -642,7 +610,7 @@ class GooglePhotosService:
         incoming = Path(download["path"])
         filename = download["filename"]
         classification, related_path = self._classify_download(
-            incoming, filename, download["size"], download["sha256"], existing
+            filename, download["size"], download["sha256"], existing
         )
         result = {
             "filename": filename,
@@ -659,13 +627,13 @@ class GooglePhotosService:
             self._append_result(operation_id, result, True)
             return
 
-        final = _unique_destination(target, filename, marker="google")
+        final = unique_destination(target, filename, marker="google")
         os.replace(incoming, final)
         existing.append(
             {
                 "path": final,
                 "name": final.name.casefold(),
-                "name_key": _name_key(final.name),
+                "name_key": match_key(final.name),
                 "size": download["size"],
                 "sha256": download["sha256"],
             }

@@ -12,6 +12,7 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import quote
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -192,6 +193,18 @@ class KiraTransferTests(unittest.TestCase):
             def disconnect_web_session(self):
                 return {"available": True, "connected": False}
 
+            def start_web_sign_in(self):
+                return {"status": "waiting"}
+
+            def web_sign_in_status(self):
+                return {"status": "completed"}
+
+            def cancel_web_sign_in(self):
+                return {"status": "cancelled"}
+
+            def close(self):
+                pass
+
             def albums(self):
                 return {"albums": [{"media_key": "album-1", "title": "Trips"}]}
 
@@ -266,6 +279,14 @@ class KiraTransferTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertTrue(web_session["connected"])
         self.assertEqual(fake.web_session, (source / "cookies.txt", 2))
+
+        for method, expected in (("POST", "waiting"), ("GET", "completed"), ("DELETE", "cancelled")):
+            response, raw = self.request(method, "/api/google/web-signin", b"{}" if method != "GET" else None)
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(raw)["status"], expected)
+        with patch("kira.api.KiraRequestHandler._is_loopback", return_value=False):
+            response, _ = self.request("POST", "/api/google/web-signin")
+            self.assertEqual(response.status, 403)
 
         response, invalid_account = self.json_request(
             "POST",

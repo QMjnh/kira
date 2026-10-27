@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
 kira-data/
 test_data_delete/
 *.json

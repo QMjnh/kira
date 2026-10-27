@@ -97,14 +97,14 @@ class GooglePhotosServiceTests(unittest.TestCase):
         self.assertTrue(health["picker_ok"])
         self.assertIn("unreadable", health["message"].casefold())
 
-    def test_health_reports_missing_cookie_json(self) -> None:
+    def test_health_prompts_sign_in_when_organizer_is_disconnected(self) -> None:
         service = self.service()
         with patch("kira.google_photos.urlopen", side_effect=_http_error(401)):
             health = service.health()
         self.assertFalse(health["ok"])
         self.assertFalse(health["json_ok"])
         self.assertTrue(health["picker_ok"])
-        self.assertIn("cookie json", health["message"].casefold())
+        self.assertIn("sign in to google photos", health["message"].casefold())
 
     def test_health_reports_unreachable_picker(self) -> None:
         service = self.service()

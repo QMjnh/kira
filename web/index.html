@@ -109,11 +109,19 @@
             </summary>
             <div class="google-organizer-body">
               <p class="google-organizer-description">Kira checks the open local folder against Google Photos using cryptographic file content—not filenames—then adds confirmed matches to an album.</p>
-              <div id="google-organizer-connect" class="google-organizer-fields">
-                <label><span>Cookie export path</span><input id="google-cookies-path" type="text" placeholder="C:\Users\you\Downloads\photos.google.com.json"></label>
-                <label><span>Google account index</span><input id="google-account-index" type="number" min="0" max="99" value="0"></label>
-                <button id="google-organizer-connect-button" class="quiet-button" type="button">Import session</button>
+              <div id="google-organizer-connect" class="google-signin">
+                <p>Sign in in the browser window that opens on this desktop. Kira finishes connecting automatically.</p>
+                <button id="google-organizer-signin" class="primary-button" type="button">Sign in to Google Photos</button>
+                <details class="google-manual-session">
+                  <summary>Import a session manually</summary>
+                  <div class="google-organizer-fields">
+                    <label><span>Cookie export path</span><input id="google-cookies-path" type="text" placeholder="C:\Users\you\Downloads\photos.google.com.json"></label>
+                    <label><span>Google account index</span><input id="google-account-index" type="number" min="0" max="99" value="0"></label>
+                    <button id="google-organizer-connect-button" class="quiet-button" type="button">Import session</button>
+                  </div>
+                </details>
               </div>
+              <div class="google-signin-progress"><p id="google-signin-message" role="status" aria-live="polite"></p><button id="google-signin-cancel" class="quiet-button hidden" type="button">Cancel sign-in</button></div>
               <div id="google-organizer-controls" class="google-organizer-fields hidden">
                 <div id="google-match-source" class="google-match-source"><span>Source folder</span><strong>Open a local folder below first.</strong></div>
                 <div class="google-organizer-control-row">
@@ -122,6 +130,7 @@
                   <button id="google-match-folder" class="primary-button" type="button" disabled>Match folder → album + archive</button>
                 </div>
                 <div class="google-organizer-footer">
+                  <button id="google-organizer-reconnect" class="link-button quiet-button" type="button">Sign in again</button>
                   <button id="google-organizer-disconnect" class="link-button quiet-button" type="button">Remove web session</button>
                 </div>
               </div>

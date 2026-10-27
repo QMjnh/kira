@@ -67,6 +67,8 @@ Click **Connect Google Photos** on the dashboard once. This needs a free one-tim
 
 After connecting you can import picked media into any local folder, upload selected photos and videos to Google Photos, and optionally have imports added to a matching album and archived automatically. Disconnecting never deletes anything already downloaded.
 
+For album and Archive automation, open **Google Photos organizer** and click **Sign in to Google Photos**. Kira opens a separate Chrome or Edge window on the desktop. Sign in there (including any Google verification); Kira connects automatically and closes the window. No cookie export or browser extension is needed. The saved session is reused until Google requires another sign-in; use **Sign in again** if it expires. Cookie-file import remains available under **Import a session manually**.
+
 ## Keeping your photos private
 
 Pairing is required: an unpaired device cannot use Kira just by finding the desktop on the network. But traffic between the desktop and iPad is not encrypted, so use Kira on a trusted home network or a private hotspot — not hotel, café, or school Wi-Fi. Keep the desktop awake until transfers finish. Tokens and sessions stay on your desktop.

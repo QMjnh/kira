@@ -51,18 +51,21 @@ def utc_now() -> str:
 def atomic_json_write(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
-    with temp.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, ensure_ascii=False)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temp, path)
+    try:
+        with temp.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
-def safe_filename(value: str) -> str:
+def safe_filename(value: str, fallback: str = "unnamed-file") -> str:
     name = Path(value.replace("\\", "/")).name.strip().rstrip(". ")
     name = INVALID_FILENAME.sub("_", name)
     if not name or name in {".", ".."}:
-        name = "unnamed-file"
+        name = fallback
     stem = Path(name).stem[:150]
     suffix = Path(name).suffix[:20]
     return f"{stem}{suffix}"
@@ -113,7 +116,7 @@ def asset_taken_at(paths: list[Path], file_stats: dict) -> str:
     return datetime.fromtimestamp(earliest).date().isoformat()
 
 
-def unique_destination(folder: Path, filename: str) -> Path:
+def unique_destination(folder: Path, filename: str, marker: str = "v") -> Path:
     candidate = folder / safe_filename(filename)
     if not candidate.exists():
         return candidate
@@ -121,7 +124,7 @@ def unique_destination(folder: Path, filename: str) -> Path:
     suffix = candidate.suffix
     index = 2
     while True:
-        versioned = folder / f"{stem}__v{index}{suffix}"
+        versioned = folder / f"{stem}__{marker}{index}{suffix}"
         if not versioned.exists():
             return versioned
         index += 1

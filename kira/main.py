@@ -6,7 +6,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from . import APP_NAME, APP_VERSION
+from . import APP_VERSION
 from .api import KiraHTTPServer, discover_local_ip
 from .store import KiraStore
 

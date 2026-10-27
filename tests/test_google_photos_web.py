@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from PIL import Image
 
+from kira import visual
 from kira.google_photos_web import GooglePhotosWebError, GooglePhotosWebService
+from kira.google_signin import GoogleSignInError
 
 
 class FakePayload:
@@ -189,7 +193,69 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         FakeClient.archive_visibility_delay = 0
 
     def tearDown(self) -> None:
+        self.service.close()
         self.temp.cleanup()
+
+    def test_browser_sign_in_verifies_and_encrypts_the_session(self) -> None:
+        browser = SimpleNamespace(session=lambda: ([{
+            "domain": ".google.com", "name": "SID", "value": "automatic-session", "session": True,
+        }], 2))
+        with patch("kira.google_photos_web.find_browser", return_value="chrome.exe"), \
+             patch("kira.google_photos_web.GoogleSignInBrowser") as factory:
+            factory.return_value.__enter__.return_value = browser
+            self.service.start_sign_in()
+            self.service._signin_thread.join(timeout=3)
+        self.assertEqual(self.service.sign_in_status(), {"status": "completed"})
+        self.assertTrue(self.service.status()["connected"])
+        self.assertEqual(self.service.status()["account_index"], 2)
+        self.assertNotIn("automatic-session", self.service.session_path.read_text(encoding="utf-8"))
+        self.assertEqual(list(self.root.glob(".kira-google-web-*.txt")), [])
+
+    def test_disconnect_during_verification_cannot_restore_the_connection(self) -> None:
+        verifying, release = threading.Event(), threading.Event()
+        browser = SimpleNamespace(session=lambda: ([{
+            "domain": ".google.com", "name": "SID", "value": "cancelled-session", "session": True,
+        }], 0))
+        verify = self.service._verified_session
+
+        def delayed_verification(*args):
+            wrapper = verify(*args)
+            verifying.set()
+            release.wait(3)
+            return wrapper
+
+        with patch("kira.google_photos_web.find_browser", return_value="chrome.exe"), \
+             patch("kira.google_photos_web.GoogleSignInBrowser") as factory, \
+             patch.object(self.service, "_verified_session", side_effect=delayed_verification):
+            factory.return_value.__enter__.return_value = browser
+            self.service.start_sign_in()
+            try:
+                self.assertTrue(verifying.wait(3))
+                original_thread = self.service._signin_thread
+                self.service.start_sign_in()
+                self.assertIs(self.service._signin_thread, original_thread)
+                self.service.disconnect()
+            finally:
+                release.set()
+                self.service._signin_thread.join(timeout=3)
+        self.assertEqual(self.service.sign_in_status()["status"], "cancelled")
+        self.assertFalse(self.service.session_path.exists())
+
+    def test_browser_failure_leaves_existing_connection_intact(self) -> None:
+        self.service.import_session(self.cookies)
+        stored = self.service.session_path.read_bytes()
+        with patch("kira.google_photos_web.find_browser", return_value="chrome.exe"), \
+             patch("kira.google_photos_web.GoogleSignInBrowser") as factory:
+            factory.return_value.__enter__.side_effect = GoogleSignInError("Browser could not open.")
+            self.service.start_sign_in()
+            self.service._signin_thread.join(timeout=3)
+        self.assertEqual(self.service.sign_in_status(), {"status": "failed", "error": "Browser could not open."})
+        self.assertEqual(self.service.session_path.read_bytes(), stored)
+
+    def test_sign_in_reports_a_missing_browser(self) -> None:
+        with patch("kira.google_photos_web.find_browser", return_value=None):
+            with self.assertRaisesRegex(GooglePhotosWebError, "Install Google Chrome or Microsoft Edge"):
+                self.service.start_sign_in()
 
     def test_session_import_is_verified_and_stored_without_plaintext_cookie(self) -> None:
         status = self.service.import_session(self.cookies, account_index=1)
@@ -273,13 +339,13 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         image.save(first, quality=96)
         image.save(second, quality=78)
 
-        left = self.service._image_signature(first)
-        right = self.service._image_signature(second)
-        color, perceptual = self.service._signature_distance(left, right)
+        left = visual.image_signature(first)
+        right = visual.image_signature(second)
+        color, perceptual = visual.signature_distance(left, right)
 
         self.assertEqual((left["width"], left["height"]), (128, 96))
-        self.assertLessEqual(color, self.service.VISUAL_COLOR_THRESHOLD)
-        self.assertLessEqual(perceptual, self.service.VISUAL_HASH_THRESHOLD)
+        self.assertLessEqual(color, visual.VISUAL_COLOR_THRESHOLD)
+        self.assertLessEqual(perceptual, visual.VISUAL_HASH_THRESHOLD)
 
     @staticmethod
     def _scene(size: tuple[int, int], warm: bool) -> Image.Image:
@@ -309,12 +375,12 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
             {"media_key": "remote-1"},
             [
                 {
-                    "signature": self.service._image_signature(left),
+                    "signature": visual.image_signature(left),
                     "paths": [str(left)],
                     "name_keys": set(),
                 }
             ],
-            self.service._image_signature(right),
+            visual.image_signature(right),
         )
         return matches.get("remote-1")
 
@@ -331,19 +397,19 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         edited = edited.resize((96, 128))
         edited.save(edited_path, quality=90)
 
-        original = self.service._image_signature(original_path)
-        variant = self.service._image_signature(edited_path)
-        color, perceptual = self.service._signature_distance(original, variant)
-        palette = self.service._palette_similarity(original, variant)
-        phash = self.service._perceptual_hash_distance(original, variant)
+        original = visual.image_signature(original_path)
+        variant = visual.image_signature(edited_path)
+        color, perceptual = visual.signature_distance(original, variant)
+        palette = visual.palette_similarity(original, variant)
+        phash = visual.perceptual_hash_distance(original, variant)
 
         strict_match = (
-            color <= self.service.VISUAL_COLOR_THRESHOLD
-            and perceptual <= self.service.VISUAL_HASH_THRESHOLD
+            color <= visual.VISUAL_COLOR_THRESHOLD
+            and perceptual <= visual.VISUAL_HASH_THRESHOLD
         )
         self.assertFalse(strict_match)
-        self.assertGreaterEqual(palette, self.service.VISUAL_PALETTE_THRESHOLD)
-        self.assertLessEqual(phash, self.service.VISUAL_PHASH_THRESHOLD)
+        self.assertGreaterEqual(palette, visual.VISUAL_PALETTE_THRESHOLD)
+        self.assertLessEqual(phash, visual.VISUAL_PHASH_THRESHOLD)
 
         record = self._match_pair(original_path, edited_path)
         self.assertIsNotNone(record)
@@ -362,7 +428,7 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         self.assertIsNone(record)
 
     def test_dimension_compatibility_allows_orientation_and_crop_variants(self) -> None:
-        compatible = self.service._dimensions_compatible
+        compatible = visual.dimensions_compatible
         self.assertTrue(compatible((3072, 4096), (5472, 3648)))
         self.assertTrue(compatible((3648, 5472), (3072, 4096)))
         self.assertTrue(compatible((4000, 3000), (3000, 2250)))
@@ -469,7 +535,7 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         self.service.check()
 
     def test_check_reports_missing_and_unreadable_cookie_json(self) -> None:
-        with self.assertRaisesRegex(GooglePhotosWebError, "cookie JSON"):
+        with self.assertRaisesRegex(GooglePhotosWebError, "Sign in to Google Photos"):
             self.service.check()
         self.service.session_path.write_text("{broken", encoding="utf-8")
         self.assertFalse(self.service.status()["connected"])
