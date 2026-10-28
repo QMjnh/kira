@@ -6,3 +6,12 @@ kira-data/
 test_data_delete/
 *.json
 .venv
+.test-deps/
+local-audit/
+/scripts/audit_*.py
+!/scripts/audit_similarity.py
+/docs/*audit*.md
+/docs/image-version-control-plan.md
+/docs/local-transfer-verification.md
+/docs/real-photo-transform-results.md
+/docs/version-control-due-diligence.md

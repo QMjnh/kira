@@ -443,3 +443,8 @@ progress::-moz-progress-bar { background: var(--success); }
   .folder-preview { grid-template-columns: 1fr; }
   .toggle-switch { margin-left: 0; padding-left: 0; border-left: 0; width: 100%; justify-content: flex-start; padding-top: 10px; border-top: 1px solid var(--line); margin-top: 4px; }
 }
+.history-modal { width: min(800px, calc(100vw - 32px)); max-height: 85vh; overflow: auto; border: 1px solid var(--line, #d6ddd5); border-radius: 18px; padding: 24px; background: var(--surface, #fff); color: var(--ink, #173b2d); }
+.history-modal::backdrop { background: rgb(10 25 18 / 45%); }
+.saved-file-row { display: flex; gap: 16px; align-items: center; justify-content: space-between; padding: 14px 0; border-bottom: 1px solid #e1e6de; }
+.saved-file-row strong { overflow-wrap: anywhere; }
+.saved-file-row small { display: block; margin-top: 4px; color: #59675d; }

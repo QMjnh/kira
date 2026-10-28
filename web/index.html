@@ -16,6 +16,7 @@
         <a class="brand" href="/" aria-label="Kira home">
           <img class="brand-mark" src="/media/kira_light.png" alt="Kira" width="72" height="36">
         </a>
+        <button id="open-history" class="quiet-button hidden" type="button">Saved files</button>
         <div id="connection-state" class="connection-state"><span></span>Connecting…</div>
       </div>
     </header>
@@ -356,7 +357,7 @@
             <div class="panel-heading"><div><div class="eyebrow">Step 2</div><h2>Return Lightroom exports</h2></div></div>
             <p class="panel-copy">In Lightroom, export with the original filename to Files. Select those exports here and Kira will upload them to the desktop.</p>
             <label class="return-picker">
-              <input id="return-files" type="file" multiple accept="image/*,.dng,.tif,.tiff,.avif,.jxl,.zip,application/zip">
+              <input id="return-files" type="file" multiple accept="image/*,video/*,.dng,.tif,.tiff,.avif,.jxl,.zip,.xmp,.aae,.psd,.psb,.xcf,.kra,.ora,.afphoto,application/zip">
               <span class="return-picker-content"><strong>Choose edited photos or ZIP</strong><small>JPG, DNG, TIFF, AVIF, JXL, or ZIP</small></span>
             </label>
             <button id="upload-returns" class="primary-button full-button" type="button" disabled>Upload returned edits</button>
@@ -374,13 +375,14 @@
           <p class="panel-copy">Kira moves the existing camera files inside the chosen source folder and copies—or extracts—the returned Lightroom edits into that same folder structure.</p>
           <button id="organize-source" class="primary-button" type="button">Finish &amp; organize source folder</button>
           <p id="organize-result" class="organize-result hidden" role="status"></p>
+          <ul id="organize-errors" class="error-text hidden"></ul>
           <div class="folder-preview" aria-label="Organized folder structure">
             <code>selected/</code>
             <code>selected/raw/</code>
             <code>selected/pre-edit/</code>
             <code>unselected_jpeg/</code>
           </div>
-          <p class="panel-copy">After this finishes, deleting the Kira job removes only its transfer cache and manifest. These organized folders remain.</p>
+          <p class="panel-copy">Sending and organizing retain verified copies in Kira’s working folder, using extra disk space. Removing the transfer job keeps these checkpoints and your organized folders. You can restore copies from Saved files.</p>
         </section>
       </section>
     </main>
@@ -402,8 +404,15 @@
       <div class="lightbox-stage"><img id="lightbox-image" alt=""></div>
     </dialog>
 
+    <dialog id="history-modal" class="history-modal" aria-labelledby="history-title">
+      <header class="panel-heading"><h2 id="history-title">Saved files</h2><button id="close-history" class="quiet-button" type="button">Close</button></header>
+      <p class="panel-copy">Verified local checkpoints stay here after transfer jobs are removed. Keep a separate backup of Kira’s working folder to protect against losing this drive.</p>
+      <div id="history-list" class="return-list" aria-live="polite"></div>
+    </dialog>
+
     <div id="toast" class="toast hidden" role="status"></div>
   </div>
+  <script src="/sha256.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

@@ -35,6 +35,9 @@ VIDEO_EXTENSIONS = {
     ".mkv", ".mmv", ".mod", ".mov", ".mp4", ".mpg", ".mts", ".tod", ".wmv",
 }
 MEDIA_EXTENSIONS = PHOTO_EXTENSIONS | VIDEO_EXTENSIONS
+SIDECAR_EXTENSIONS = {".xmp", ".aae"}
+PROJECT_EXTENSIONS = {".psd", ".psb", ".xcf", ".kra", ".ora", ".afphoto"}
+COMPONENT_EXTENSIONS = SIDECAR_EXTENSIONS | PROJECT_EXTENSIONS
 _EXIF_DATETIME_ORIGINAL = 36867
 _EXIF_IFD_POINTER = 34665
 
@@ -441,7 +444,8 @@ def move_culling_assets(
             duplicate_of = destination_identities.get(identity)
             if duplicate_of is not None and source.resolve() != duplicate_of.resolve():
                 duplicate_files.append({"source": str(source), "duplicate_of": str(duplicate_of)})
-                continue
+                # Pixel equality is useful evidence, never permission to delete
+                # a metadata variant or even the user's requested exact copy.
             unique_records.append((record, source, identity))
 
         if not unique_records:
@@ -479,15 +483,10 @@ def move_culling_assets(
             moved_assets += 1
 
     moved: list[tuple[Path, Path]] = []
-    deleted_duplicates: list[Path] = []
     try:
         for source, target in planned:
             shutil.move(str(source), str(target))
             moved.append((source, target))
-        for duplicate in duplicate_files:
-            source = Path(duplicate["source"])
-            source.unlink()
-            deleted_duplicates.append(source)
     except OSError as exc:
         for source, target in reversed(moved):
             try:
@@ -515,7 +514,7 @@ def move_culling_assets(
     refreshed["moved_files"] = len(moved)
     refreshed["duplicate_assets"] = duplicate_assets
     refreshed["duplicate_files"] = duplicate_files
-    refreshed["deleted_duplicate_files"] = len(deleted_duplicates)
+    refreshed["deleted_duplicate_files"] = 0
     refreshed["renamed_files"] = renamed_files
     refreshed["destination"] = str(destination)
     refreshed["destination_group_name"] = destination.name if action == "group" else None
@@ -575,14 +574,15 @@ def scan_photo_directory(value: str) -> dict:
     groups: dict[str, dict] = {}
     try:
         files = sorted(
-            (item for item in current.iterdir() if item.is_file() and item.suffix.casefold() in MEDIA_EXTENSIONS),
+            (item for item in current.iterdir() if item.is_file()
+             and item.suffix.casefold() in MEDIA_EXTENSIONS | COMPONENT_EXTENSIONS),
             key=lambda item: natural_key(item.name),
         )
     except PermissionError as exc:
         raise KiraError(HTTPStatus.FORBIDDEN, "Windows denied access to this folder") from exc
 
     for path in files:
-        stem_key = match_key(path.name)
+        stem_key = match_key(path.stem if path.suffix.casefold() in SIDECAR_EXTENSIONS else path.name)
         group = groups.setdefault(
             stem_key,
             {

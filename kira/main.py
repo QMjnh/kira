@@ -9,12 +9,21 @@ from pathlib import Path
 from . import APP_VERSION
 from .api import KiraHTTPServer, discover_local_ip
 from .store import KiraStore
+from .writer import WriterLease
+from .errors import KiraError
 
 STATIC_ROOT = Path(__file__).resolve().parent.parent / "web"
 
 
 def build_server(host: str, port: int, data_dir: Path) -> KiraHTTPServer:
-    return KiraHTTPServer((host, port), KiraStore(data_dir), STATIC_ROOT)
+    lease = WriterLease(data_dir.resolve())
+    try:
+        server = KiraHTTPServer((host, port), KiraStore(data_dir), STATIC_ROOT)
+        server.writer_lease = lease
+        return server
+    except BaseException:
+        lease.close()
+        raise
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,7 +42,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    server = build_server(args.host, args.port, args.data_dir)
+    try:
+        server = build_server(args.host, args.port, args.data_dir)
+    except KiraError as exc:
+        raise SystemExit(str(exc)) from exc
     actual_port = server.server_address[1]
     local_url = f"http://127.0.0.1:{actual_port}"
     ipad_url = f"http://{discover_local_ip()}:{actual_port}"

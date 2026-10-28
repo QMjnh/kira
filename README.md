@@ -19,13 +19,14 @@ Camera folder on your desktop → Kira → iPad (Lightroom) → Kira → organiz
 
 You plug the camera card or photo drive into your Windows desktop. In Kira, you pick the photos worth editing. Kira sends only those photos directly to your iPad over your home Wi-Fi. You edit in Lightroom, send the finished images back, and Kira puts everything in its proper place in the original folder.
 
-Kira is not an editor, a backup service, or a photo library. Lightroom is still where you edit. Your backup is still your backup. Kira just keeps the trip between your desktop and iPad from turning into a mess.
+Kira now keeps verified local checkpoints of files it sends, receives, and organizes. Lightroom is still where you edit. Keep a separate backup of Kira's working folder to protect those checkpoints against losing the drive. The wider image version-control hub is being built in stages; see the [implementation status](docs/preservation-implementation.md).
 
 ## What Kira does
 
 - **Choose before you transfer.** Browse a fast grid of JPEG previews from the camera folder, mark keepers, move misses to Unselected, and put close alternatives into named groups for side-by-side comparison. If a photo has a matching RAW file, Kira keeps the pair together while you decide.
-- **Send only the selection.** Pick JPEG (smaller, faster) or RAW (full editing range) for each job. Only that selection makes the trip — nothing is copied twice.
-- **Bring the edits home.** Upload finished Lightroom exports back to Kira. It matches each returned file to its original by name, verifies every transfer, and on *Finish* reorganizes the source folder into `selected/` (with `raw/` and `pre-edit/` inside) plus `unselected_jpeg/`. Nothing gets deleted without you asking.
+- **Send only the selection.** Pick JPEG (smaller, faster) or RAW (full editing range) for each job. Kira retains a verified local copy before sending it, including accompanying settings and project files.
+- **Bring the edits home.** Upload finished exports back to Kira. The browser and desktop compare checksums, and Kira suggests originals by filename. On *Finish*, it reorganizes the source folder into `selected/` (with `raw/` and `pre-edit/` inside) plus `unselected_jpeg/`. ZIP returns keep their folder structure and every component, including projects, settings and videos.
+- **Recover a saved file.** Open **Saved files** on the desktop to restore a copy, even after its transfer job has been removed. Checkpoints use extra space in Kira's working folder; identical contents share storage.
 - **Optional: combine phone photos.** Connect Google Photos to pull chosen pictures and videos straight into a local collection folder, skipping exact duplicates, or upload local JPEGs/videos to Google Photos.
 
 ## Start Kira
@@ -60,6 +61,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 4. Edit. Export with original filenames via **Share → Export As**.
 5. Upload the exports back to Kira, then click **Finish & organize source folder**.
 6. Check the result and delete the job. The organized folders stay; only Kira's temporary files go.
+7. Use **Saved files → Restore a copy** whenever you need a retained original or returned file. This is file-level recovery; complete editor project history and automatic version-family discovery are still being developed.
 
 ## Using Google Photos
 

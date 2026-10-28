@@ -4,6 +4,7 @@ const {test, before, after, beforeEach, afterEach} = require('node:test');
 const assert = require('node:assert/strict');
 const {readFileSync, existsSync} = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const {chromium} = require('playwright');
 
 const root = path.resolve(__dirname, '..');
@@ -33,6 +34,10 @@ beforeEach(async () => {
   let groupCreated = false;
   let signIn = {status: 'idle'};
   let organizerConnected = false;
+  let jobCreated = false;
+  let uploaded = Buffer.alloc(0);
+  const job = {id:'aaaaaaaaaaaa',name:'Test edit job',created_at:'2026-10-27T12:00:00Z',
+    source_directory:'/photos',files:[],returns:[],postprocess:{status:'pending'}};
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('dialog', (dialog) => dialog.accept(dialog.type() === 'prompt' ? 'Best shots' : undefined));
   await page.route('http://kira.test/**', async (route) => {
@@ -40,11 +45,22 @@ beforeEach(async () => {
     const folder = url.searchParams.get('path') || '';
     let body;
     if (url.pathname === '/') return route.fulfill({contentType: 'text/html', body: readFileSync(path.join(root, 'web/index.html'), 'utf8')});
-    if (['/app.js', '/styles.css'].includes(url.pathname)) {
+    if (['/app.js', '/sha256.js', '/styles.css'].includes(url.pathname)) {
       return route.fulfill({contentType: url.pathname.endsWith('.js') ? 'text/javascript' : 'text/css', body: readFileSync(path.join(root, 'web', url.pathname.slice(1)), 'utf8')});
     }
     if (url.pathname === '/api/bootstrap') body = {token: 'test-token', ipad_url: 'http://kira.test', pair_code: '123456', data_dir: 'Test library', pair_qr_url: '/qr'};
-    else if (url.pathname === '/api/jobs') body = {jobs: []};
+    else if (url.pathname === '/api/jobs') body = {jobs: jobCreated ? [{...job,file_count:0,return_count:job.returns.length}] : []};
+    else if (url.pathname === '/api/jobs/from-selection') { jobCreated=true;body=job; }
+    else if (url.pathname === '/api/jobs/aaaaaaaaaaaa') body=job;
+    else if (url.pathname.endsWith('/uploads/start')) {
+      const request=route.request().postDataJSON();requests.push(request);
+      body={upload_id:'bbbbbbbbbbbbbbbbbbbbbbbb',offset:0,complete:false};
+    } else if (url.pathname.endsWith('/chunk')) {
+      uploaded=Buffer.concat([uploaded,route.request().postDataBuffer()]);body={offset:uploaded.length};
+    } else if (url.pathname.endsWith('/complete')) {
+      body={id:'r1',filename:'edit.jpg',size:uploaded.length,match_status:'unmatched'};job.returns.push(body);
+    } else if (url.pathname === '/api/local/history') body={revisions:[{id:'revision-1',created_at:'2026-10-27T12:00:00Z',record:{filename:'edit.jpg',size:123}}]};
+    else if (url.pathname === '/api/local/restore') { requests.push(route.request().postDataJSON());body={path:'/Best shots/edit.jpg'}; }
     else if (url.pathname === '/api/google/status') body = {configured: true, connected: true, inbox: '/photos', organizer: {available: true, browser_available: true, connected: organizerConnected, sign_in: signIn}};
     else if (url.pathname === '/api/google/web-signin') {
       const method = route.request().method();
@@ -102,6 +118,33 @@ async function openPair() {
   await openFolder('right', 'camera');
 }
 async function selected(side) { return page.locator(`#selection-count-${side}`).innerText(); }
+
+test('saved checkpoints can be restored after transfer jobs have gone', async () => {
+  await page.locator('#open-history').click();
+  await page.locator('#history-list .saved-file-row').waitFor();
+  if (process.env.KIRA_TEST_SCREENSHOT) await page.screenshot({path:process.env.KIRA_TEST_SCREENSHOT});
+  assert.match(await page.locator('#history-modal').innerText(),/edit.jpg/);
+  await page.getByRole('button',{name:'Restore a copy'}).click();
+  await page.waitForFunction(() => document.getElementById('toast').textContent.includes('Restored'));
+  assert.deepEqual(requests,[{revision_id:'revision-1',directory:'Best shots'}]);
+  await page.locator('#close-history').click();
+  assert.equal(await page.locator('#history-modal').isVisible(),false);
+});
+
+test('browser uploads supply an independent checksum of the selected bytes', async () => {
+  await openFolder('left','photos');
+  await page.locator('#left-select-all').click();
+  await page.locator('#job-name').fill('Test edit job');
+  await page.locator('#selection-job-form button[type=submit]').click();
+  await page.locator('#return-files').waitFor({state:'attached'});
+  const bytes=Buffer.from('independent browser checksum fixture');
+  await page.locator('#return-files').setInputFiles({name:'edit.jpg',mimeType:'image/jpeg',buffer:bytes});
+  await page.locator('#upload-returns').click();
+  await page.waitForFunction(() => document.getElementById('return-progress-label').textContent==='Verified 1 file');
+  const start=requests.find(r=>r.filename==='edit.jpg');
+  assert.equal(start.sha256,crypto.createHash('sha256').update(bytes).digest('hex'));
+  assert.equal(start.size,bytes.length);
+});
 
 test('Google Photos connects after browser sign-in without a cookie file', async () => {
   await page.locator('#google-organizer > summary').click();

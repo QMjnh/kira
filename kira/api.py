@@ -30,6 +30,9 @@ from .media import (
     rename_directory,
     reveal_directory,
     safe_download_name,
+    safe_filename,
+    unique_destination,
+    resolve_directory,
     scan_photo_directory,
 )
 from .store import KiraStore
@@ -59,6 +62,8 @@ AUTHED_ROUTES: list[tuple[tuple[str, ...], tuple[str, ...], str, bool]] = [
     (("api", "google", "operations", "{operation_id}"), ("GET",), "_h_google_operation", True),
     (("api", "local", "browse"), ("GET",), "_h_local_browse", True),
     (("api", "local", "scan"), ("GET",), "_h_local_scan", True),
+    (("api", "local", "history"), ("GET",), "_h_history", True),
+    (("api", "local", "restore"), ("POST",), "_h_restore", True),
     (("api", "local", "tags"), ("GET",), "_h_local_tags", True),
     (("api", "local", "tags"), ("POST",), "_h_local_tags_update", True),
     (("api", "local", "cull"), ("POST",), "_h_local_cull", True),
@@ -82,7 +87,7 @@ AUTHED_ROUTES: list[tuple[tuple[str, ...], tuple[str, ...], str, bool]] = [
     (("api", "jobs", "{job_id}", "bundle.zip"), ("GET", "HEAD"), "_h_bundle", False),
 ]
 
-STATIC_PATHS = {"/", "/index.html", "/app.js", "/styles.css"}
+STATIC_PATHS = {"/", "/index.html", "/app.js", "/sha256.js", "/styles.css"}
 MEDIA_ROOT = Path(__file__).resolve().parent.parent / "media"
 MEDIA_FILES = {"/media/kira_light.png", "/media/kira_k_light.png"}
 
@@ -145,8 +150,34 @@ class KiraHTTPServer(ThreadingHTTPServer):
         super().__init__(address, KiraRequestHandler)
 
     def server_close(self) -> None:
-        self.google_photos.close()
-        super().server_close()
+        try:
+            self.google_photos.close()
+        finally:
+            try:
+                super().server_close()
+            finally:
+                lease = getattr(self, "writer_lease", None)
+                if lease:
+                    lease.close()
+
+    def process_request(self, request, client_address) -> None:
+        lease = getattr(self, "writer_lease", None)
+        if lease:
+            lease.retain_request()
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            if lease:
+                lease.release_request()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            lease = getattr(self, "writer_lease", None)
+            if lease:
+                lease.release_request()
 
 
 class KiraRequestHandler(BaseHTTPRequestHandler):
@@ -511,6 +542,21 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
     def _h_jobs_list(self, params: dict, query: dict) -> None:
         self._send_json({"jobs": self.server.store.list_jobs()})
 
+    def _h_history(self, params: dict, query: dict) -> None:
+        offset = max(0, int(query.get("offset", ["0"])[0]))
+        rows = self.server.store.preservation.history(limit=101, offset=offset)
+        self._send_json({"revisions": rows[:100],
+                         "next_offset": offset + 100 if len(rows) > 100 else None,
+                         "protection": "local_checkpoint"})
+
+    def _h_restore(self, params: dict, query: dict) -> None:
+        body = self._read_json()
+        folder = resolve_directory(str(body.get("directory", "")))
+        revision = str(body.get("revision_id", ""))
+        saved = self.server.store.preservation.revision(revision)
+        destination = unique_destination(folder, safe_filename(saved["record"]["filename"]))
+        self._send_json(self.server.store.preservation.restore(revision, destination), status=201)
+
     def _h_jobs_create(self, params: dict, query: dict) -> None:
         body = self._read_json()
         self._send_json(self.server.store.create_job(str(body.get("name", ""))), status=201)
@@ -533,6 +579,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
             str(body.get("filename", "")),
             int(body.get("size", -1)),
             int(body.get("last_modified", 0)),
+            body.get("sha256"),
         )
         self._send_json(result)
 

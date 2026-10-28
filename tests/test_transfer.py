@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import hashlib
 import json
 import os
 import struct
@@ -385,7 +386,8 @@ class KiraTransferTests(unittest.TestCase):
         response, started = self.json_request(
             "POST",
             f"/api/jobs/{job_id}/uploads/start",
-            {"kind": kind, "filename": filename, "size": len(content), "last_modified": last_modified},
+            {"kind": kind, "filename": filename, "size": len(content), "last_modified": last_modified,
+             "sha256": hashlib.sha256(content).hexdigest()},
         )
         self.assertEqual(response.status, 200)
         upload_id = started["upload_id"]
@@ -515,7 +517,8 @@ class KiraTransferTests(unittest.TestCase):
         _, started = self.json_request(
             "POST",
             f"/api/jobs/{job_id}/uploads/start",
-            {"kind": "returns", "filename": "resume.nef", "size": len(content), "last_modified": 9},
+            {"kind": "returns", "filename": "resume.nef", "size": len(content), "last_modified": 9,
+             "sha256": hashlib.sha256(content).hexdigest()},
         )
         upload_id = started["upload_id"]
         response, _ = self.request(
@@ -528,7 +531,8 @@ class KiraTransferTests(unittest.TestCase):
         _, resumed = self.json_request(
             "POST",
             f"/api/jobs/{job_id}/uploads/start",
-            {"kind": "returns", "filename": "resume.nef", "size": len(content), "last_modified": 9},
+            {"kind": "returns", "filename": "resume.nef", "size": len(content), "last_modified": 9,
+             "sha256": hashlib.sha256(content).hexdigest()},
         )
         self.assertEqual(resumed["offset"], 4)
 
@@ -537,7 +541,8 @@ class KiraTransferTests(unittest.TestCase):
         _, started = self.json_request(
             "POST",
             f"/api/jobs/{job_id}/uploads/start",
-            {"kind": "returns", "filename": "conflict.cr3", "size": 8, "last_modified": 10},
+            {"kind": "returns", "filename": "conflict.cr3", "size": 8, "last_modified": 10,
+             "sha256": hashlib.sha256(b"12345678").hexdigest()},
         )
         upload_id = started["upload_id"]
         response, _ = self.request(
@@ -560,7 +565,8 @@ class KiraTransferTests(unittest.TestCase):
         response, resumed = self.json_request(
             "POST",
             f"/api/jobs/{job_id}/uploads/start",
-            {"kind": "returns", "filename": "conflict.cr3", "size": 8, "last_modified": 10},
+            {"kind": "returns", "filename": "conflict.cr3", "size": 8, "last_modified": 10,
+             "sha256": hashlib.sha256(b"12345678").hexdigest()},
         )
         self.assertEqual(response.status, 200)
         self.assertEqual(resumed["offset"], 4)
@@ -617,10 +623,9 @@ class KiraTransferTests(unittest.TestCase):
             b"selected-camera-jpeg",
         )
         self.assertEqual((source / "unselected_jpeg" / "IMG_0002.JPG").read_bytes(), b"unselected-camera-jpeg")
-        self.assertEqual(
-            (source / "selected" / "IMG_0001.jpg").read_bytes(),
-            b"lightroom-edit",
-        )
+        extracted = next((source / "selected").rglob("IMG_0001.jpg"))
+        self.assertEqual(extracted.read_bytes(), b"lightroom-edit")
+        self.assertEqual(next((source / "selected").rglob("notes.txt")).read_bytes(), b"not a photo")
         report = source / f"KIRA-ORGANIZED-{job_id}.json"
         self.assertTrue(report.exists())
 
@@ -636,7 +641,7 @@ class KiraTransferTests(unittest.TestCase):
         self.assertTrue(json.loads(deleted_raw)["deleted"])
         self.assertFalse(job_folder.exists())
         self.assertTrue((source / "selected" / "raw" / "IMG_0001.CR3").exists())
-        self.assertTrue((source / "selected" / "IMG_0001.jpg").exists())
+        self.assertTrue(extracted.exists())
         self.assertTrue(report.exists())
 
     def test_local_move_transfers_a_photo_group_between_open_folders(self) -> None:
@@ -946,7 +951,7 @@ class KiraTransferTests(unittest.TestCase):
         self.assertTrue((source / f"{eliminated_stem}.ARW").exists())
         self.assertTrue((source / f"{eliminated_stem}.JPG").exists())
 
-    def test_culling_deletes_source_when_pixel_identical_photo_already_exists(self) -> None:
+    def test_culling_preserves_metadata_when_pixel_identical_photo_already_exists(self) -> None:
         source = Path(self.temp.name) / "visual-duplicates"
         group = source / "compare_groups" / "baker"
         group.mkdir(parents=True)
@@ -975,12 +980,14 @@ class KiraTransferTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status, 200)
-        self.assertEqual(result["moved_assets"], 0)
-        self.assertEqual(result["duplicate_assets"], 1)
+        self.assertEqual(result["moved_assets"], 1)
+        self.assertEqual(result["duplicate_assets"], 0)
         self.assertEqual(len(result["duplicate_files"]), 1)
-        self.assertEqual(result["deleted_duplicate_files"], 1)
+        self.assertEqual(result["deleted_duplicate_files"], 0)
         self.assertFalse(inbox_photo.exists())
         self.assertTrue(grouped_photo.exists())
+        self.assertTrue((group / "IMG_100.JPG").exists())
+        self.assertNotEqual((group / "IMG_100.JPG").read_bytes(), grouped_photo.read_bytes())
 
     def test_culling_preserves_edited_same_name_photo_as_a_variant(self) -> None:
         source = Path(self.temp.name) / "same-name-edits"
@@ -1093,6 +1100,36 @@ class KiraTransferTests(unittest.TestCase):
         self.assertEqual(response.status, 400)
         self.assertIn("Minimum group size", result["error"])
         self.assertTrue((source / "ONLY.JPG").exists())
+
+
+    def test_permanent_history_and_restore_survive_job_cleanup(self) -> None:
+        job_id = self.create_job()
+        self.upload(job_id, "returns", "saved.jpg", b"saved export")
+        response, _ = self.request("DELETE", f"/api/jobs/{job_id}")
+        self.assertEqual(response.status, 200)
+        response, raw = self.request("GET", "/api/local/history")
+        history = json.loads(raw)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(history["revisions"]), 1)
+        revision = history["revisions"][0]
+        restored_folder = Path(self.temp.name) / "restore"
+        restored_folder.mkdir()
+        # Restore adds a copy without overwriting an existing name.
+        (restored_folder / "saved.jpg").write_bytes(b"other image")
+        response, restored = self.json_request("POST", "/api/local/restore", {
+            "revision_id": revision["id"], "directory": str(restored_folder),
+        })
+        self.assertEqual(response.status, 201)
+        self.assertEqual(Path(restored["path"]).read_bytes(), b"saved export")
+        self.assertEqual((restored_folder / "saved.jpg").read_bytes(), b"other image")
+        from kira.api import KiraRequestHandler
+        with patch.object(KiraRequestHandler, "_is_loopback", return_value=False):
+            response, _ = self.request("GET", "/api/local/history")
+            self.assertEqual(response.status, 403)
+            response, _ = self.json_request("POST", "/api/local/restore", {
+                "revision_id": revision["id"], "directory": str(restored_folder),
+            })
+            self.assertEqual(response.status, 403)
 
 
 if __name__ == "__main__":

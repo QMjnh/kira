@@ -119,6 +119,7 @@
     showOnly(dashboardView);
     el('desktop-services').classList.toggle('hidden', !state.desktop);
     el('desktop-setup').classList.toggle('hidden', !state.desktop);
+    el('open-history').classList.toggle('hidden', !state.desktop);
     el('create-job-card').classList.toggle('hidden', !state.desktop);
     el('google-photos-card').classList.toggle('hidden', !state.desktop);
     el('photo-workspace').classList.toggle('hidden', !state.desktop);
@@ -1230,12 +1231,20 @@
     if (state.desktop) {
       const postprocess = job.postprocess || {status: 'pending'};
       const result = el('organize-result');
-      const finished = (postprocess.status === 'complete' || postprocess.status === 'complete_with_warnings')
-        && postprocess.layout_version === 2;
+      const finished = postprocess.status === 'complete' && postprocess.layout_version >= 2;
+      const hasResult = ['complete', 'complete_with_warnings'].includes(postprocess.status);
       el('organize-source').disabled = finished;
-      el('organize-source').textContent = finished ? 'Source folder organized' : 'Finish & organize source folder';
-      result.classList.toggle('hidden', !finished);
-      if (finished) {
+      el('organize-source').textContent = finished ? 'Source folder organized' : hasResult ? 'Retry organization' : 'Finish & organize source folder';
+      result.classList.toggle('hidden', !hasResult);
+      const warnings = el('organize-errors');
+      warnings.replaceChildren();
+      warnings.classList.toggle('hidden', !postprocess.errors?.length);
+      for (const message of postprocess.errors || []) {
+        const item = document.createElement('li');
+        item.textContent = message;
+        warnings.append(item);
+      }
+      if (hasResult) {
         const warningText = postprocess.errors?.length ? ` · ${postprocess.errors.length} warning(s)` : '';
         result.textContent = `${postprocess.source_directory} · ${postprocess.moved_count} moved · ${postprocess.copied_count} edits copied${warningText}`;
       }
@@ -1262,13 +1271,16 @@
     job.returns.forEach((file) => {
       const row = document.createElement('div');
       row.className = 'return-row';
-      row.innerHTML = `<div class="file-name"><strong>${escapeHtml(file.filename)}</strong><small>${formatBytes(file.size)}${file.matched_filename ? ` · matched to ${escapeHtml(file.matched_filename)}` : ''}</small></div><span class="match-badge ${escapeHtml(file.match_status)}">${escapeHtml(file.match_status)}</span>`;
+      const label = file.association_status === 'suggested' ? 'Possible original' : file.match_status;
+      row.innerHTML = `<div class="file-name"><strong>${escapeHtml(file.filename)}</strong><small>${formatBytes(file.size)}${file.matched_filename ? ` · possible original: ${escapeHtml(file.matched_filename)}` : ''}</small></div><span class="match-badge ${escapeHtml(file.match_status)}">${escapeHtml(label)}</span>`;
       returns.appendChild(row);
     });
     if (!job.returns.length) returns.innerHTML = '<p class="panel-copy">No edits returned yet.</p>';
   }
 
   async function uploadFile(jobId, file, kind, onProgress) {
+    const sha256 = await KiraHash.fileSHA256(file, bytes => onProgress(bytes, 'checking'));
+    onProgress(0, 'sending');
     const started = await api(`/api/jobs/${jobId}/uploads/start`, {
       method: 'POST',
       body: JSON.stringify({
@@ -1276,6 +1288,7 @@
         filename: file.name,
         size: file.size,
         last_modified: file.lastModified || 0,
+        sha256,
       }),
     });
     if (started.complete) {
@@ -1316,11 +1329,12 @@
     for (let index = 0; index < files.length; index += 1) {
       const file = files[index];
       progressElements.label.textContent = `${kind === 'originals' ? 'Sending' : 'Returning'} ${index + 1} of ${files.length}: ${file.name}`;
-      await uploadFile(jobId, file, kind, (currentBytes) => {
+      await uploadFile(jobId, file, kind, (currentBytes, phase) => {
+        progressElements.label.textContent = `${phase === 'checking' ? 'Checking' : 'Returning'} ${index + 1} of ${files.length}: ${file.name}`;
         const transferred = completedBeforeCurrent + currentBytes;
         const percent = total ? Math.round((transferred / total) * 100) : 100;
         progressElements.bar.value = percent;
-        progressElements.value.textContent = `${percent}%`;
+        progressElements.value.textContent = phase === 'checking' ? 'Checking…' : `${percent}%`;
       });
       completedBeforeCurrent += file.size;
     }
@@ -1752,7 +1766,7 @@
     button.textContent = 'Organizing…';
     try {
       const result = await api(`/api/jobs/${state.currentJob.id}/organize`, {method: 'POST', body: '{}'});
-      toast(`Organized ${result.source_directory}`);
+      toast(result.errors?.length ? 'Some files need attention. Review the details and retry.' : `Organized ${result.source_directory}`);
       await openJob(state.currentJob.id);
     } catch (error) {
       button.disabled = false;
@@ -1762,23 +1776,70 @@
   });
   el('delete-job').addEventListener('click', async () => {
     if (!state.currentJob) return;
-    const finished = ['complete', 'complete_with_warnings'].includes(state.currentJob.postprocess?.status);
-    const message = finished
-      ? `Delete the Kira job “${state.currentJob.name}”?\n\nThe organized source folders will be kept.`
-      : `Delete the Kira job “${state.currentJob.name}”?\n\nThis job has not been organized. Its Kira transfer copies and returned edits will be deleted.`;
+    const message = `Remove the transfer job “${state.currentJob.name}”?\n\nCompleted files and their local checkpoints will be kept. Unfinished uploads must be recovered first.`;
     if (!window.confirm(message)) return;
     const button = el('delete-job');
     button.disabled = true;
     try {
       await api(`/api/jobs/${state.currentJob.id}`, {method: 'DELETE'});
       state.currentJob = null;
-      toast('Job deleted. Source folders were kept.');
+      toast('Transfer job removed. Checkpoints remain in Saved files.');
       await loadDashboard();
     } catch (error) {
       button.disabled = false;
       toast(error.message);
     }
   });
+
+  el('open-history').addEventListener('click', async () => {
+    const list = el('history-list');
+    list.textContent = 'Loading saved files…';
+    el('history-modal').showModal();
+    async function loadSavedFiles(offset = 0) {
+      const response = await api(`/api/local/history?offset=${offset}`);
+      if (!offset) list.replaceChildren();
+      if (!offset && !response.revisions.length) list.textContent = 'Files appear here after they are sent, received, or organized.';
+      for (const saved of response.revisions) {
+        const row = document.createElement('div');
+        row.className = 'saved-file-row';
+        const details = document.createElement('div');
+        const title = document.createElement('strong');
+        title.textContent = saved.record.original_filename || saved.record.filename;
+        const subtitle = document.createElement('small');
+        subtitle.textContent = `${formatBytes(saved.record.size)} · ${new Date(saved.created_at).toLocaleString()} · Local checkpoint`;
+        details.append(title, subtitle);
+        const restore = document.createElement('button');
+        restore.className = 'quiet-button';
+        restore.textContent = 'Restore a copy';
+        restore.addEventListener('click', async () => {
+          const directory = window.prompt('Restore into this folder:', state.libraryPanes[state.activePaneId].directory || '');
+          if (!directory) return;
+          restore.disabled = true;
+          try {
+            const result = await api('/api/local/restore', {method:'POST',body:JSON.stringify({revision_id:saved.id,directory})});
+            toast(`Restored ${result.path}`);
+          } catch (error) { toast(error.message); }
+          finally { restore.disabled = false; }
+        });
+        row.append(details, restore);
+        list.append(row);
+      }
+      if (response.next_offset != null) {
+        const more = document.createElement('button');
+        more.className = 'quiet-button';
+        more.textContent = 'Load older files';
+        more.addEventListener('click', async () => {
+          more.disabled = true;
+          try { await loadSavedFiles(response.next_offset); more.remove(); }
+          catch (error) { toast(error.message); more.disabled = false; }
+        });
+        list.append(more);
+      }
+    }
+    try { await loadSavedFiles(); }
+    catch (error) { list.textContent = error.message; }
+  });
+  el('close-history').addEventListener('click', () => el('history-modal').close());
 
   let toastTimer;
   function toast(message) {

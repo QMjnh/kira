@@ -28,6 +28,8 @@ The folder-panel browser regression checks use Node.js and Playwright (`npm inst
 | `kira/main.py` | CLI arguments and server startup. |
 | `kira/api.py` | HTTP layer: declarative route table, auth, request handlers, file serving with range support. |
 | `kira/store.py` | Job manifests, resumable uploads, transfer bundles, source-folder organization, thumbnail cache. |
+| `kira/preservation.py` | Immutable local objects, SQLite receipts/operation journal, catalog reconstruction and verified restore. |
+| `kira/organization.py` | Journaled source moves, component preservation and staged, verified ZIP extraction. |
 | `kira/media.py` | Folder scanning, photo grouping, culling moves, media identity (pixel or byte hashing). |
 | `kira/visual.py` | Shared visual signatures, photo similarity, and comparison clustering. |
 | `kira/google_photos.py` | Google Picker/Library OAuth client: imports, uploads, operations, folder matching. |
@@ -42,22 +44,29 @@ The server uses `ThreadingHTTPServer`. It discovers the adapter owning the defau
 
 ## Photo workflow and data model
 
-Kira works against an existing camera/source directory. Creating an edit job records paths and metadata for selected sources; it never copies them into Kira's data directory.
+Kira works against an existing camera/source directory. Creating an edit job initially records references. Before an original is downloaded individually or bundled, it is copied into immutable local checkpoint storage. Source organization also checkpoints its components before moving them. This deliberately uses additional working storage.
 
 - The culling view presents JPEG-backed groups. A JPEG and RAW sharing a stem form a pair: the JPEG previews, the RAW remains the transfer source.
-- Checked groups move reversibly into `select/`, `unselect/`, or `compare_groups/<name>/` below the source root. Moves reject name collisions by renaming to `__variantN`, delete byte/pixel-identical duplicates at the destination, and roll back on OS errors.
+- Checked groups move into `select/`, `unselect/`, or `compare_groups/<name>/` below the source root. Name collisions receive `__variantN`. Pixel-identical and byte-identical files are preserved, and ordinary OS move failures trigger rollback. There is no duplicate-deletion step.
+- XMP and AAE companions and supported project extensions participate in groups. Both `stem.xmp` and `filename.JPG.xmp` conventions are recognized. These are filename-based component groupings, not a validated editor dependency graph.
 - Media identity: photos are hashed by decoded pixels (EXIF-transposed, 256px strips); everything else by file bytes. Results are memoized with `functools.lru_cache` keyed on resolved path + size + mtime + suffix.
 - Grid thumbnails (480 px) and compare previews (1600 px) are cached under `<DataDir>\thumbnails\`, generated two at a time behind a semaphore.
 
-For an edit job the user chooses `jpeg` or `raw`. On first bundle download, each selected source is read once — simultaneously written into an uncompressed ZIP and SHA-256-hashed. The ZIP is reused until any source signature (path/size/mtime) changes.
+For an edit job the user chooses `jpeg` or `raw`. Downloads are bound to verified retained bytes. The uncompressed ZIP is keyed by immutable content hashes and entry names, so later external changes to the working original do not silently change what the job sends. Bundle completion merges its snapshot fields into the newest manifest instead of replacing concurrent return/organization updates.
 
-Returned JPEG, TIFF, DNG, and JXL files match originals by filename stem (edit-suffix aware). Uploads are resumable in 16 MiB chunks; the server validates offsets and final size before completion.
+Returned files receive filename-based association suggestions (edit-suffix aware), not recorded parent relationships. The browser hashes files incrementally in bounded slices using `web/sha256.js`, including on plain local HTTP. Upload identities bind the job, name, size and sender SHA-256. The server validates offsets, final size and the independently computed received digest. Legacy clients without a sender digest get fresh upload sessions with receiver-only verification, never metadata-only resume or skip. A failed whole-file checksum requires resending the stream.
 
 ## Job files
 
 Manifests, partial uploads, and ZIP caches live under `<DataDir>\jobs\<job-id>\` (`manifest.json`, `uploads/`, `.cache/originals.zip`). Writes use atomic JSON updates (temp file + fsync + replace). Manifest writes happen under the store lock; multi-gigabyte ZIP I/O happens outside it, guarded by a separate bundle lock that job deletion also respects.
 
-Finishing a job reorganizes the source directory in place (layout above in the README), extracts returned ZIPs directly into `selected/`, updates stored source references, and leaves `KIRA-ORGANIZED-<job-id>.json`. Deleting a job removes only Kira's cache.
+Permanent data lives under `<DataDir>/library/`: content-addressed `objects/`, immutable `receipts/`, `catalog.sqlite3`, and final job receipts under `jobs/`. SQLite uses full synchronous commits, and missing catalog rows are reconstructed from verified permanent manifests at startup. Publication intents are committed before destination writes. Returns are copied through staging on the destination volume and published without overwriting existing files; staging is removed only after records commit. Source organization checkpoints and journals moves of the actual files, preserving an editor's changed bytes if content verification detects a concurrent edit.
+
+ZIPs are retained. Every member is checkpointed and CRC-checked before any member of that archive is published. Extraction preserves relative paths inside a unique archive folder under `selected/`; member names, digests and association suggestions remain recorded. Unsafe paths/symlinks, more than 50,000 entries, and more than 100 GiB expanded bytes are rejected with the original archive preserved. Retries reuse planned member destinations. Reports include component hashes. Repeating organization verifies or repairs owned targets instead of trusting an old success flag; conflicting user changes remain untouched and produce warnings.
+
+Removing a job retains all completed files and receipts in checkpoint storage, archives the final job manifest, and refuses unfinished or unrecorded upload bytes. Generic jobs therefore retain their returned files through **Saved files**, even though their old disposable `jobs/<id>/returns/` paths are removed. `GET /api/local/history` paginates saved receipts, and `POST /api/local/restore` restores a verified copy into a chosen existing folder with collision-safe naming. Both routes are authenticated and desktop-only.
+
+These are file checkpoints, not a complete asset/revision graph or an independent backup. Copy the complete working directory using a consistent backup while Kira is stopped. Automatic Drive backup, stable volume enrollment, project-wide save boundaries, ordinary-folder version discovery, and actual iPad/editor compatibility validation remain later gates. See [implementation status](docs/preservation-implementation.md).
 
 ## Pairing and network security
 
@@ -82,9 +91,9 @@ The approach follows the browser-login pattern demonstrated by [gphotohandler](h
 ## API behavior worth preserving
 
 - Large file downloads support HTTP range requests.
-- Uploads are resumable; offsets and sizes are validated server-side.
+- Content-bound uploads are resumable; offsets, sizes and sender/receiver digests are validated server-side.
 - File and manifest writes use atomic JSON updates where applicable.
-- Source folders are reorganized only when **Finish & organize** is explicitly requested; the operation is idempotent once complete.
+- Source folders are reorganized only when **Finish & organize** is explicitly requested; retries verify targets and preserve conflicting changes. Failed steps remain retryable.
 - Culling moves are reversible and never overwrite silently.
 - Cross-folder moves reject destination-name collisions without partial moves.
-- Folder management (`/api/local/mkdir`, `/rename`, `/delete`, `/reveal`) is desktop-only. Delete always sends folders to the Windows Recycle Bin — there is no permanent-delete path anywhere in Kira.
+- Folder management (`/api/local/mkdir`, `/rename`, `/delete`, `/reveal`) is desktop-only. Folder deletion uses the Windows Recycle Bin. Disposable transfer staging/cache cleanup is separate from permanent checkpoint storage.
