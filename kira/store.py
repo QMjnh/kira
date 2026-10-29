@@ -1,4 +1,5 @@
 """Job manifests, resumable uploads, and transfer-bundle creation."""
+
 from __future__ import annotations
 
 import hashlib
@@ -17,7 +18,6 @@ from typing import BinaryIO
 from PIL import Image, ImageOps
 
 from .errors import KiraError
-from .preservation import Preservation
 from .media import (
     CHUNK_COPY_SIZE,
     atomic_json_write,
@@ -29,6 +29,8 @@ from .media import (
     unique_destination,
     utc_now,
 )
+from .organization import organize
+from .preservation import Preservation
 
 MAX_TAGS_PER_ASSET = 32
 MAX_TAG_LENGTH = 40
@@ -106,10 +108,7 @@ class KiraStore:
         for names in self._load_tags().values():
             for name in names:
                 counts[name.casefold()] = counts.get(name.casefold(), 0) + 1
-        return [
-            {"name": name, "count": count}
-            for name, count in sorted(counts.items(), key=lambda item: item[0])
-        ]
+        return [{"name": name, "count": count} for name, count in sorted(counts.items(), key=lambda item: item[0])]
 
     def update_asset_tags(self, asset_ids: list[str], add_values: list, remove_values: list) -> dict:
         adds = [normalize_tag(value) for value in add_values]
@@ -134,10 +133,7 @@ class KiraStore:
                         seen.add(key)
                         merged.append(name)
                 if len(merged) > MAX_TAGS_PER_ASSET:
-                    raise KiraError(
-                        HTTPStatus.BAD_REQUEST,
-                        f"A photo can hold at most {MAX_TAGS_PER_ASSET} tags",
-                    )
+                    raise KiraError(HTTPStatus.BAD_REQUEST, f"A photo can hold at most {MAX_TAGS_PER_ASSET} tags")
                 assignments[asset_id] = merged
                 if merged:
                     tags[asset_id] = merged
@@ -173,11 +169,21 @@ class KiraStore:
         manifest["updated_at"] = utc_now()
         atomic_json_write(self._manifest_path(manifest["id"]), manifest)
 
+    def _upload_paths(self, job_id: str, upload_id: str) -> tuple[Path, Path]:
+        """Return the metadata and partial-data paths of an existing upload."""
+        if not re.fullmatch(r"[a-f0-9]{24}", upload_id):
+            raise KiraError(HTTPStatus.NOT_FOUND, "Upload not found")
+        uploads = self._job_dir(job_id) / "uploads"
+        metadata_path = uploads / f"{upload_id}.json"
+        if not metadata_path.exists():
+            raise KiraError(HTTPStatus.NOT_FOUND, "Upload not found")
+        return metadata_path, uploads / f"{upload_id}.part"
+
     def preview_thumbnail(self, source: Path, requested_size: int) -> Path:
         size = 1600 if requested_size > 640 else 480
         stat = source.stat()
         cache_key = hashlib.sha256(
-            f"{source.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}\0{size}".encode("utf-8")
+            f"{source.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}\0{size}".encode()
         ).hexdigest()
         destination = self.thumbnails_root / f"{cache_key}.jpg"
         if destination.exists():
@@ -252,11 +258,7 @@ class KiraStore:
             return self._load_manifest(job_id)
 
     def create_job_from_selection(
-        self,
-        name: str,
-        source_directory: str,
-        selected_ids: list[str],
-        source_format: str,
+        self, name: str, source_directory: str, selected_ids: list[str], source_format: str
     ) -> dict:
         if source_format not in {"raw", "jpeg"}:
             raise KiraError(HTTPStatus.BAD_REQUEST, "Choose RAW or JPEG as the edit source")
@@ -266,10 +268,7 @@ class KiraStore:
         if not chosen:
             raise KiraError(HTTPStatus.BAD_REQUEST, "Select at least one photo")
         if len(chosen) != len(selected):
-            raise KiraError(
-                HTTPStatus.CONFLICT,
-                "The folder changed; scan it again before creating the job",
-            )
+            raise KiraError(HTTPStatus.CONFLICT, "The folder changed; scan it again before creating the job")
 
         summary = self.create_job(name)
         job_id = summary["id"]
@@ -301,8 +300,11 @@ class KiraStore:
                         HTTPStatus.BAD_REQUEST,
                         f"{asset['stem']} does not have a {label} file. Change the edit source or deselect it.",
                     )
-                sources = (([photo_candidates[0]] if photo_candidates else [])
-                           + asset.get("video_files", []) + asset["other_files"])
+                sources = (
+                    ([photo_candidates[0]] if photo_candidates else [])
+                    + asset.get("video_files", [])
+                    + asset["other_files"]
+                )
                 if not sources:
                     shutil.rmtree(self._job_dir(job_id))
                     raise KiraError(HTTPStatus.BAD_REQUEST, f"{asset['stem']} has no transferable media")
@@ -329,20 +331,15 @@ class KiraStore:
             return self.job_summary(manifest)
 
     def start_upload(
-        self,
-        job_id: str,
-        kind: str,
-        filename: str,
-        size: int,
-        last_modified: int,
-        expected_sha256: str | None = None,
+        self, job_id: str, kind: str, filename: str, size: int, last_modified: int, expected_sha256: str | None = None
     ) -> dict:
         if kind != "returns":
             raise KiraError(HTTPStatus.BAD_REQUEST, "Upload kind must be returns")
         if size < 0:
             raise KiraError(HTTPStatus.BAD_REQUEST, "File size is invalid")
-        if expected_sha256 is not None and (not isinstance(expected_sha256, str)
-                                           or not re.fullmatch(r"[a-f0-9]{64}", expected_sha256)):
+        if expected_sha256 is not None and (
+            not isinstance(expected_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", expected_sha256)
+        ):
             raise KiraError(HTTPStatus.BAD_REQUEST, "A valid SHA-256 checksum is required")
         clean_name = safe_filename(filename)
         # A content-bound identity supports safe retries. Older clients without
@@ -361,19 +358,9 @@ class KiraStore:
                     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     metadata = {}
-                if metadata.get("status") == "complete":
+                if metadata.get("status") in {"complete", "publishing"}:
                     record = self.complete_upload(job_id, upload_id)
-                    return {
-                        "upload_id": upload_id,
-                        "offset": size,
-                        "size": size,
-                        "complete": True,
-                        "record": record,
-                    }
-                if metadata.get("status") == "publishing":
-                    record = self.complete_upload(job_id, upload_id)
-                    return {"upload_id": upload_id, "offset": size, "size": size,
-                            "complete": True, "record": record}
+                    return {"upload_id": upload_id, "offset": size, "size": size, "complete": True, "record": record}
                 if metadata.get("status") == "checksum_failed":
                     # The whole-file sender check proved this staged stream is
                     # not the selected file. A new selection can resend it.
@@ -397,22 +384,8 @@ class KiraStore:
             atomic_json_write(metadata_path, metadata)
         return {"upload_id": upload_id, "offset": offset, "size": size, "complete": False}
 
-    def append_upload(
-        self,
-        job_id: str,
-        upload_id: str,
-        offset: int,
-        content_length: int,
-        source: BinaryIO,
-    ) -> dict:
-        if not re.fullmatch(r"[a-f0-9]{24}", upload_id):
-            raise KiraError(HTTPStatus.NOT_FOUND, "Upload not found")
-        uploads = self._job_dir(job_id) / "uploads"
-        metadata_path = uploads / f"{upload_id}.json"
-        part_path = uploads / f"{upload_id}.part"
-        if not metadata_path.exists():
-            raise KiraError(HTTPStatus.NOT_FOUND, "Upload not found")
-
+    def append_upload(self, job_id: str, upload_id: str, offset: int, content_length: int, source: BinaryIO) -> dict:
+        metadata_path, part_path = self._upload_paths(job_id, upload_id)
         with self.lock:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             expected_size = int(metadata["size"])
@@ -437,14 +410,7 @@ class KiraStore:
         return {"upload_id": upload_id, "offset": new_offset, "size": expected_size}
 
     def complete_upload(self, job_id: str, upload_id: str) -> dict:
-        if not re.fullmatch(r"[a-f0-9]{24}", upload_id):
-            raise KiraError(HTTPStatus.NOT_FOUND, "Upload not found")
-        uploads = self._job_dir(job_id) / "uploads"
-        metadata_path = uploads / f"{upload_id}.json"
-        part_path = uploads / f"{upload_id}.part"
-        if not metadata_path.exists():
-            raise KiraError(HTTPStatus.NOT_FOUND, "Upload not found")
-
+        metadata_path, part_path = self._upload_paths(job_id, upload_id)
         with self.lock:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             manifest = self._load_manifest(job_id)
@@ -452,11 +418,9 @@ class KiraStore:
             if saved:
                 record = next((r for r in manifest["returns"] if r["id"] == saved["id"]), saved)
                 # Legacy completed uploads are adopted only after verifying bytes.
-                object_path = self.preservation.object_path(record["sha256"])
-                if not object_path.exists():
-                    self.preservation.retain(Path(record["storage_path"]), record["sha256"])
-                self.preservation.receipt(job_id, "returns", record)
                 destination = Path(record["storage_path"])
+                self.preservation.ensure(record, destination)
+                self.preservation.receipt(job_id, "returns", record)
                 operation = f"return:{job_id}:{upload_id}:{destination}"
                 self.preservation.publish(operation, record["sha256"], destination)
                 if not any(r["id"] == record["id"] for r in manifest["returns"]):
@@ -470,10 +434,7 @@ class KiraStore:
             actual_size = part_path.stat().st_size if part_path.exists() else 0
             if not part_path.exists() or actual_size != expected_size:
                 raise KiraError(
-                    HTTPStatus.CONFLICT,
-                    "Upload is incomplete",
-                    expected_size=expected_size,
-                    actual_size=actual_size,
+                    HTTPStatus.CONFLICT, "Upload is incomplete", expected_size=expected_size, actual_size=actual_size
                 )
 
             try:
@@ -484,16 +445,12 @@ class KiraStore:
                     atomic_json_write(metadata_path, metadata)
                 raise
             if manifest.get("source_directory"):
-                source_root = resolve_directory(str(manifest["source_directory"]))
-                edited_folder = source_root / "selected"
+                folder = resolve_directory(str(manifest["source_directory"])) / "selected"
                 if Path(metadata["filename"]).suffix.casefold() == ".zip":
-                    folder = edited_folder / ".kira-incoming"
-                else:
-                    folder = edited_folder
-                folder.mkdir(parents=True, exist_ok=True)
+                    folder /= ".kira-incoming"
             else:
                 folder = self._job_dir(job_id) / "returns"
-                folder.mkdir(parents=True, exist_ok=True)
+            folder.mkdir(parents=True, exist_ok=True)
             destination = unique_destination(folder, metadata["filename"])
             record = {
                 "id": uuid.uuid4().hex[:12],
@@ -517,8 +474,7 @@ class KiraStore:
             if manifest.get("source_directory"):
                 manifest["postprocess"] = {"status": "pending"}
             self._save_manifest(manifest)
-            metadata["status"] = "complete"
-            metadata["record"] = record
+            metadata.update(status="complete", record=record)
             atomic_json_write(metadata_path, metadata)
             part_path.unlink(missing_ok=True)
             return record
@@ -546,13 +502,7 @@ class KiraStore:
                 if record["id"] != record_id:
                     continue
                 stored_path = record["source_path"] if kind == "originals" else record["storage_path"]
-                if not record.get("sha256") or not self.preservation.object_path(record["sha256"]).exists():
-                    source = Path(stored_path)
-                    if not source.exists():
-                        raise KiraError(HTTPStatus.NOT_FOUND, "File is missing from disk")
-                    retained = self.preservation.retain(source, record.get("sha256"))
-                    record.update(sha256=retained["sha256"], size=retained["size"])
-                path = self.preservation.verified_object(record["sha256"])
+                path = self.preservation.ensure(record, Path(stored_path))
                 record["revision_id"] = self.preservation.receipt(job_id, collection_name, record)
                 if kind == "originals":
                     record["snapshot_path"] = str(path)
@@ -572,15 +522,7 @@ class KiraStore:
             sources: list[tuple[dict, Path]] = []
             signature_parts: list[str] = []
             for record in manifest["files"]:
-                source = Path(record["source_path"])
-                if record.get("sha256") and self.preservation.object_path(record["sha256"]).exists():
-                    snapshot = self.preservation.verified_object(record["sha256"])
-                else:
-                    if not source.exists():
-                        raise KiraError(HTTPStatus.NOT_FOUND, f"Source file is missing: {record['filename']}")
-                    retained = self.preservation.retain(source, record.get("sha256"))
-                    record.update(sha256=retained["sha256"], size=retained["size"])
-                    snapshot = Path(retained["path"])
+                snapshot = self.preservation.ensure(record, Path(record["source_path"]))
                 record["snapshot_path"] = str(snapshot)
                 record["bundle_filename"] = record.get("bundle_filename", record["original_filename"])
                 record["revision_id"] = self.preservation.receipt(job_id, "files", record)
@@ -588,8 +530,12 @@ class KiraStore:
                 signature_parts.append(f"{record['id']}\0{record['bundle_filename']}\0{record['sha256']}")
             signature = hashlib.sha256("\n".join(signature_parts).encode("utf-8")).hexdigest()
             cached_digest = manifest.get("bundle_sha256")
-            valid_cache = (cache_path.is_file() and manifest.get("bundle_signature") == signature
-                           and cached_digest and sha256_file(cache_path) == cached_digest)
+            valid_cache = (
+                cache_path.is_file()
+                and manifest.get("bundle_signature") == signature
+                and cached_digest
+                and sha256_file(cache_path) == cached_digest
+            )
             if not valid_cache:
                 temp = cache_path.with_suffix(".zip.tmp")
                 with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
@@ -624,7 +570,6 @@ class KiraStore:
             return cache_path, f"{safe_filename(manifest['name'])}-originals.zip"
 
     def organize_source_folder(self, job_id: str) -> dict:
-        from .organization import organize
         return organize(self, job_id)
 
     def delete_job(self, job_id: str) -> dict:
@@ -642,20 +587,28 @@ class KiraStore:
                     if metadata.get("status") != "complete" and (
                         metadata.get("record") or (part.exists() and part.stat().st_size)
                     ):
-                        raise KiraError(HTTPStatus.CONFLICT, "A received or partial upload still needs recovery; finish it before removing this job")
+                        raise KiraError(
+                            HTTPStatus.CONFLICT,
+                            "A received or partial upload still needs recovery; finish it before removing this job",
+                        )
                 for part in (folder / "uploads").glob("*.part"):
                     if not part.with_suffix(".json").exists() and part.stat().st_size:
-                        raise KiraError(HTTPStatus.CONFLICT, "Unrecorded upload bytes need recovery before this job can be removed")
+                        raise KiraError(
+                            HTTPStatus.CONFLICT, "Unrecorded upload bytes need recovery before this job can be removed"
+                        )
                 for kind, path_key in (("files", "source_path"), ("returns", "storage_path")):
                     for record in manifest[kind]:
-                        if not record.get("sha256") or not self.preservation.object_path(record["sha256"]).exists():
-                            retained = self.preservation.retain(Path(record[path_key]), record.get("sha256"))
-                            record.update(sha256=retained["sha256"], size=retained["size"])
+                        self.preservation.ensure(record, Path(record[path_key]))
                         self.preservation.receipt(job_id, kind, record)
                 history_folder = self.preservation.root / "jobs"
                 history_folder.mkdir(parents=True, exist_ok=True)
                 atomic_json_write(history_folder / f"{job_id}.json", manifest)
                 preserved = manifest.get("source_directory")
                 shutil.rmtree(folder)
-                return {"deleted": True, "job_id": job_id, "preserved_source_directory": preserved,
-                        "history_preserved": True, "checkpoint_count": len(self.preservation.history(job_id))}
+                return {
+                    "deleted": True,
+                    "job_id": job_id,
+                    "preserved_source_directory": preserved,
+                    "history_preserved": True,
+                    "checkpoint_count": len(self.preservation.history(job_id)),
+                }

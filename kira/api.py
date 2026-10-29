@@ -1,6 +1,8 @@
 """HTTP layer: request dispatch, authentication, and API route handlers."""
+
 from __future__ import annotations
 
+import html
 import ipaddress
 import json
 import mimetypes
@@ -20,7 +22,9 @@ from . import APP_NAME, APP_VERSION
 from .errors import KiraError
 from .google_photos import GooglePhotosError, GooglePhotosService
 from .media import (
+    CHUNK_COPY_SIZE,
     PREVIEW_EXTENSIONS,
+    asset_files,
     browse_directories,
     build_compare_groups,
     create_directory,
@@ -28,17 +32,17 @@ from .media import (
     move_assets_between_directories,
     move_culling_assets,
     rename_directory,
+    resolve_directory,
     reveal_directory,
     safe_download_name,
     safe_filename,
-    unique_destination,
-    resolve_directory,
     scan_photo_directory,
+    unique_destination,
 )
 from .store import KiraStore
 
 MAX_JSON_BODY = 1024 * 1024
-CHUNK_COPY_SIZE = 4 * 1024 * 1024
+MAX_DRAINED_BODY = 16 * 1024 * 1024
 APP_ROOT = Path(__file__).resolve().parent.parent
 
 # (pattern, methods, handler, requires_local). "{name}" segments become params.
@@ -88,7 +92,7 @@ AUTHED_ROUTES: list[tuple[tuple[str, ...], tuple[str, ...], str, bool]] = [
 ]
 
 STATIC_PATHS = {"/", "/index.html", "/app.js", "/sha256.js", "/styles.css"}
-MEDIA_ROOT = Path(__file__).resolve().parent.parent / "media"
+MEDIA_ROOT = APP_ROOT / "media"
 MEDIA_FILES = {"/media/kira_light.png", "/media/kira_k_light.png"}
 
 
@@ -124,7 +128,7 @@ def _match_route(pattern: tuple[str, ...], segments: list[str]) -> dict[str, str
     if len(pattern) != len(segments):
         return None
     params: dict[str, str] = {}
-    for expected, actual in zip(pattern, segments):
+    for expected, actual in zip(pattern, segments, strict=False):
         if expected.startswith("{") and expected.endswith("}"):
             params[expected[1:-1]] = actual
         elif expected != actual:
@@ -137,6 +141,16 @@ def _string_list(body: dict, key: str) -> list[str]:
     if not isinstance(values, list):
         raise KiraError(HTTPStatus.BAD_REQUEST, f"{key} must be a list")
     return [str(item) for item in values]
+
+
+def _album_request(body: dict) -> tuple[str, bool]:
+    """Validate the album title and explicit archive flag shared by organize requests."""
+    album_title = str(body.get("album_title", "")).strip()
+    if not album_title:
+        raise KiraError(HTTPStatus.BAD_REQUEST, "album_title is required")
+    if not isinstance(body.get("archive"), bool):
+        raise KiraError(HTTPStatus.BAD_REQUEST, "archive must be an explicit JSON boolean")
+    return album_title, body["archive"]
 
 
 class KiraHTTPServer(ThreadingHTTPServer):
@@ -212,7 +226,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
                 self._google_oauth_callback(query)
                 return
             if path in STATIC_PATHS | MEDIA_FILES and method in {"GET", "HEAD"}:
-                self._serve_static(path, method == "HEAD")
+                self._serve_static(path)
                 return
             if path == "/api/system" and method == "GET":
                 self._send_json({"name": APP_NAME, "version": APP_VERSION})
@@ -221,7 +235,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
                 self._bootstrap()
                 return
             if path == "/api/pair-qr.svg" and method in {"GET", "HEAD"}:
-                self._pair_qr(method == "HEAD")
+                self._pair_qr()
                 return
             if path == "/api/pair" and method == "POST":
                 self._pair()
@@ -251,9 +265,9 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
                 # it so a retry can safely reuse the same HTTP connection.
                 try:
                     unread = int(self.headers.get("Content-Length", "0"))
-                    if 0 < unread <= 16 * 1024 * 1024:
+                    if 0 < unread <= MAX_DRAINED_BODY:
                         self.rfile.read(unread)
-                    elif unread > 16 * 1024 * 1024:
+                    elif unread > MAX_DRAINED_BODY:
                         self.close_connection = True
                 except (OSError, ValueError):
                     self.close_connection = True
@@ -263,7 +277,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
             if path == "/" and "state" in query:
                 self._send_html(
                     "<!doctype html><meta charset='utf-8'><title>Kira</title>"
-                    f"<body style='font:16px system-ui;padding:40px'><h1>Could not connect</h1><p>{self._html_escape(str(exc))}</p></body>",
+                    f"<body style='font:16px system-ui;padding:40px'><h1>Could not connect</h1><p>{html.escape(str(exc))}</p></body>",
                     status=HTTPStatus.BAD_REQUEST,
                 )
             else:
@@ -302,13 +316,8 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         try:
             account_index = int(body.get("account_index", 0))
         except (TypeError, ValueError) as exc:
-            raise KiraError(
-                HTTPStatus.BAD_REQUEST,
-                "account_index must be a number between 0 and 99",
-            ) from exc
-        self._send_json(
-            self.server.google_photos.import_web_session(Path(cookies_path), account_index)
-        )
+            raise KiraError(HTTPStatus.BAD_REQUEST, "account_index must be a number between 0 and 99") from exc
+        self._send_json(self.server.google_photos.import_web_session(Path(cookies_path), account_index))
 
     def _h_google_web_session_delete(self, params: dict, query: dict) -> None:
         self._discard_optional_body()
@@ -330,27 +339,13 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
 
     def _h_google_match_folder(self, params: dict, query: dict) -> None:
         body = self._read_json()
-        album_title = str(body.get("album_title", "")).strip()
-        if not album_title:
-            raise KiraError(HTTPStatus.BAD_REQUEST, "album_title is required")
-        if not isinstance(body.get("archive"), bool):
-            raise KiraError(HTTPStatus.BAD_REQUEST, "archive must be an explicit JSON boolean")
+        album_title, archive = _album_request(body)
         scan = scan_photo_directory(str(body.get("source_directory", "")))
-        paths = [
-            Path(item["path"])
-            for asset in scan["assets"]
-            for group in ("raw_files", "jpeg_files", "video_files", "other_files")
-            for item in asset[group]
-        ]
-        operation = self.server.google_photos.start_match_folder(
-            paths,
-            album_title,
-            body["archive"],
-        )
+        paths = [Path(item["path"]) for asset in scan["assets"] for item in asset_files(asset)]
+        operation = self.server.google_photos.start_match_folder(paths, album_title, archive)
         if operation.get("status") == "failed":
             raise KiraError(
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-                operation.get("error") or "Google Photos folder matching failed",
+                HTTPStatus.INTERNAL_SERVER_ERROR, operation.get("error") or "Google Photos folder matching failed"
             )
         self._send_json(operation)
 
@@ -359,25 +354,15 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         media_ids = body.get("media_ids", [])
         if not isinstance(media_ids, list):
             raise KiraError(HTTPStatus.BAD_REQUEST, "media_ids must be a list")
-        album_title = str(body.get("album_title", "")).strip()
-        if not album_title:
-            raise KiraError(HTTPStatus.BAD_REQUEST, "album_title is required")
-        if not isinstance(body.get("archive"), bool):
-            raise KiraError(HTTPStatus.BAD_REQUEST, "archive must be an explicit JSON boolean")
+        album_title, archive = _album_request(body)
         self._send_json(
-            self.server.google_photos.start_organize(
-                media_ids,
-                album_title,
-                body["archive"],
-            ),
-            status=HTTPStatus.ACCEPTED,
+            self.server.google_photos.start_organize(media_ids, album_title, archive), status=HTTPStatus.ACCEPTED
         )
 
     def _h_picker_session_create(self, params: dict, query: dict) -> None:
         body = self._read_json()
         self._send_json(
-            self.server.google_photos.create_picker_session(int(body.get("max_items", 2000))),
-            status=HTTPStatus.CREATED,
+            self.server.google_photos.create_picker_session(int(body.get("max_items", 2000))), status=HTTPStatus.CREATED
         )
 
     def _h_picker_session_get(self, params: dict, query: dict) -> None:
@@ -394,9 +379,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         destination_folder = str(body.get("destination_folder", "")).strip()
         operation = self.server.google_photos.start_import(
             session_id,
-            self.server.google_photos.resolve_import_destination(destination_folder)
-            if destination_folder
-            else None,
+            self.server.google_photos.resolve_import_destination(destination_folder) if destination_folder else None,
             body.get("download_mode", "automatic"),
             body.get("zip_threshold", 50),
             str(body.get("album_title", "")).strip() or None,
@@ -412,17 +395,10 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         chosen = [asset for asset in scan["assets"] if asset["id"] in selected]
         if not chosen or len(chosen) != len(selected):
             raise KiraError(HTTPStatus.CONFLICT, "The folder changed; scan it again before uploading")
-        paths = [
-            Path(item["path"])
-            for asset in chosen
-            for item in asset["jpeg_files"] + asset.get("video_files", [])
-        ]
+        paths = [Path(item["path"]) for asset in chosen for item in asset["jpeg_files"] + asset.get("video_files", [])]
         if not paths:
             raise KiraError(HTTPStatus.BAD_REQUEST, "Select at least one JPEG or video")
-        self._send_json(
-            self.server.google_photos.start_upload(paths),
-            status=HTTPStatus.ACCEPTED,
-        )
+        self._send_json(self.server.google_photos.start_upload(paths), status=HTTPStatus.ACCEPTED)
 
     def _h_google_operation(self, params: dict, query: dict) -> None:
         self._send_json(self.server.google_photos.operation(params["operation_id"]))
@@ -445,9 +421,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
     def _h_local_tags_update(self, params: dict, query: dict) -> None:
         body = self._read_json()
         result = self.server.store.update_asset_tags(
-            _string_list(body, "asset_ids"),
-            body.get("add_tags", []),
-            body.get("remove_tags", []),
+            _string_list(body, "asset_ids"), body.get("add_tags", []), body.get("remove_tags", [])
         )
         self._send_json(result)
 
@@ -483,10 +457,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
 
     def _h_local_compare_groups(self, params: dict, query: dict) -> None:
         body = self._read_json()
-        result = build_compare_groups(
-            str(body.get("source_directory", "")),
-            body.get("min_group_size"),
-        )
+        result = build_compare_groups(str(body.get("source_directory", "")), body.get("min_group_size"))
         self._send_json(self._annotated(result))
 
     def _h_local_preview(self, params: dict, query: dict) -> None:
@@ -500,7 +471,11 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
             requested_size = int(query.get("size", ["480"])[0])
         except ValueError:
             requested_size = 480
-        thumbnail = preview if query.get("original", [""])[0] == "1" else self.server.store.preview_thumbnail(preview, requested_size)
+        thumbnail = (
+            preview
+            if query.get("original", [""])[0] == "1"
+            else self.server.store.preview_thumbnail(preview, requested_size)
+        )
         self._serve_file(
             thumbnail,
             f"{preview.stem}-preview.jpg",
@@ -545,9 +520,13 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
     def _h_history(self, params: dict, query: dict) -> None:
         offset = max(0, int(query.get("offset", ["0"])[0]))
         rows = self.server.store.preservation.history(limit=101, offset=offset)
-        self._send_json({"revisions": rows[:100],
-                         "next_offset": offset + 100 if len(rows) > 100 else None,
-                         "protection": "local_checkpoint"})
+        self._send_json(
+            {
+                "revisions": rows[:100],
+                "next_offset": offset + 100 if len(rows) > 100 else None,
+                "protection": "local_checkpoint",
+            }
+        )
 
     def _h_restore(self, params: dict, query: dict) -> None:
         body = self._read_json()
@@ -586,9 +565,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
     def _h_upload_chunk(self, params: dict, query: dict) -> None:
         offset = int(query.get("offset", ["0"])[0])
         length = self._content_length()
-        result = self.server.store.append_upload(
-            params["job_id"], params["upload_id"], offset, length, self.rfile
-        )
+        result = self.server.store.append_upload(params["job_id"], params["upload_id"], offset, length, self.rfile)
         self._send_json(result)
 
     def _h_upload_complete(self, params: dict, query: dict) -> None:
@@ -620,9 +597,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         error = query.get("error", [""])[0]
         if error:
             raise GooglePhotosError(f"Google sign-in was cancelled: {error}")
-        self.server.google_photos.finish_oauth(
-            query.get("code", [""])[0], query.get("state", [""])[0]
-        )
+        self.server.google_photos.finish_oauth(query.get("code", [""])[0], query.get("state", [""])[0])
         self._send_html(
             "<!doctype html><meta charset='utf-8'><title>Kira</title>"
             "<body style='font:16px system-ui;padding:40px'>"
@@ -635,31 +610,31 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         if not self._is_loopback():
             raise KiraError(HTTPStatus.FORBIDDEN, "This action is only available on the desktop")
 
+    def _ipad_url(self) -> str:
+        return f"http://{discover_local_ip()}:{self.server.server_address[1]}"
+
+    def _pair_url(self, ipad_url: str) -> str:
+        return f"{ipad_url}/?pair={quote(self.server.store.pair_secret, safe='')}"
+
     def _bootstrap(self) -> None:
         if not self._is_loopback():
             raise KiraError(HTTPStatus.FORBIDDEN, "Bootstrap is only available on the desktop")
-        port = self.server.server_address[1]
-        local_ip = discover_local_ip()
-        ipad_url = f"http://{local_ip}:{port}"
-        pair_url = f"{ipad_url}/?pair={quote(self.server.store.pair_secret, safe='')}"
+        ipad_url = self._ipad_url()
         self._send_json(
             {
                 "token": self.server.store.token,
                 "pair_code": self.server.store.pair_code,
                 "ipad_url": ipad_url,
-                "pair_url": pair_url,
+                "pair_url": self._pair_url(ipad_url),
                 "pair_qr_url": "/api/pair-qr.svg",
                 "data_dir": str(self.server.store.root),
                 "version": APP_VERSION,
             }
         )
 
-    def _pair_qr(self, head_only: bool) -> None:
+    def _pair_qr(self) -> None:
         if not self._is_loopback():
             raise KiraError(HTTPStatus.FORBIDDEN, "Pairing QR is only displayed on the desktop")
-        port = self.server.server_address[1]
-        local_ip = discover_local_ip()
-        pair_url = f"http://{local_ip}:{port}/?pair={quote(self.server.store.pair_secret, safe='')}"
         qr = qrcode.QRCode(
             version=None,
             error_correction=qrcode.constants.ERROR_CORRECT_M,
@@ -667,17 +642,9 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
             border=4,
             image_factory=qrcode.image.svg.SvgPathFillImage,
         )
-        qr.add_data(pair_url)
+        qr.add_data(self._pair_url(self._ipad_url()))
         qr.make(fit=True)
-        encoded = qr.make_image().to_string(encoding="utf-8")
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
-        self.send_header("Content-Length", str(len(encoded)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        if not head_only:
-            self.wfile.write(encoded)
+        self._send_bytes(qr.make_image().to_string(encoding="utf-8"), "image/svg+xml; charset=utf-8")
 
     def _pair(self) -> None:
         body = self._read_json()
@@ -725,7 +692,7 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         if length:
             self.rfile.read(length)
 
-    def _serve_static(self, path: str, head_only: bool) -> None:
+    def _serve_static(self, path: str) -> None:
         if path in MEDIA_FILES:
             target = MEDIA_ROOT / path.rsplit("/", 1)[1]
         else:
@@ -734,30 +701,23 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         if not target.exists():
             raise KiraError(HTTPStatus.NOT_FOUND, "Not found")
         content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        data = target.read_bytes()
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", f"{content_type}; charset=utf-8" if content_type.startswith("text/") else content_type)
+        if content_type.startswith("text/"):
+            content_type += "; charset=utf-8"
+        self._send_bytes(target.read_bytes(), content_type)
+
+    def _send_bytes(self, data: bytes, content_type: str, status: int = HTTPStatus.OK) -> None:
+        """Send a small, uncached in-memory response."""
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
-        if not head_only:
+        if self.command != "HEAD":
             self.wfile.write(data)
 
-    @staticmethod
-    def _html_escape(value: str) -> str:
-        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-
-    def _send_html(self, html: str, status: int = HTTPStatus.OK) -> None:
-        encoded = html.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(encoded)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(encoded)
+    def _send_html(self, markup: str, status: int = HTTPStatus.OK) -> None:
+        self._send_bytes(markup.encode("utf-8"), "text/html; charset=utf-8", status)
 
     def _serve_file(
         self,
@@ -797,7 +757,9 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", guessed_type)
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Content-Disposition", f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded_name}")
+        self.send_header(
+            "Content-Disposition", f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded_name}"
+        )
         self.send_header("Cache-Control", cache_control)
         if status == HTTPStatus.PARTIAL_CONTENT:
             self.send_header("Content-Range", f"bytes {start}-{end}/{total_size}")
@@ -816,11 +778,4 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, payload: object, status: int = HTTPStatus.OK) -> None:
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(encoded)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(encoded)
+        self._send_bytes(encoded, "application/json; charset=utf-8", status)

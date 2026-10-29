@@ -1,4 +1,5 @@
 """Collect a Google Photos session from a browser opened expressly for sign-in."""
+
 from __future__ import annotations
 
 import json

@@ -8,6 +8,7 @@ histogram. Two tiers decide whether photos show the same content:
 Compare clustering uses stricter "edited" limits plus a capture-time gate so
 that bursts of one scene group tightly instead of chaining across themes.
 """
+
 from __future__ import annotations
 
 import concurrent.futures
@@ -48,10 +49,7 @@ _EXIF_IFD_POINTER = 34665
 @functools.lru_cache(maxsize=8)
 def _dct_table(size: int) -> tuple[tuple[float, ...], ...]:
     return tuple(
-        tuple(
-            math.cos((2 * column + 1) * coefficient * math.pi / (2 * size))
-            for column in range(size)
-        )
+        tuple(math.cos((2 * column + 1) * coefficient * math.pi / (2 * size)) for column in range(size))
         for coefficient in range(size)
     )
 
@@ -73,9 +71,7 @@ def image_signature(source: Path | bytes) -> dict:
             exif = opened.getexif()
             sub_ifd = exif.get_ifd(_EXIF_IFD_POINTER)
             capture_time = (
-                str(sub_ifd.get(_EXIF_DATETIME_ORIGINAL) or exif.get(_EXIF_DATETIME_ORIGINAL) or "")
-                .strip()
-                or None
+                str(sub_ifd.get(_EXIF_DATETIME_ORIGINAL) or exif.get(_EXIF_DATETIME_ORIGINAL) or "").strip() or None
             )
         except (AttributeError, TypeError, ValueError):
             pass
@@ -90,8 +86,7 @@ def image_signature(source: Path | bytes) -> dict:
             offset = row * 17
             for column in range(16):
                 difference_hash = (difference_hash << 1) | (
-                    grayscale_bytes[offset + column]
-                    > grayscale_bytes[offset + column + 1]
+                    grayscale_bytes[offset + column] > grayscale_bytes[offset + column + 1]
                 )
         perceptual_gray = ImageOps.autocontrast(
             rgb.convert("L").resize((VISUAL_SIZE, VISUAL_SIZE), Image.Resampling.LANCZOS)
@@ -114,10 +109,7 @@ def _perceptual_hash(grayscale) -> int:
     pixels = list(grayscale.getdata())
     table = _dct_table(size)
     coefficients = [
-        math.fsum(
-            pixels[row * size + column] * table[coefficient][column]
-            for column in range(size)
-        )
+        math.fsum(pixels[row * size + column] * table[coefficient][column] for column in range(size))
         for row in range(8)
         for coefficient in range(8)
         if not (row == 0 and coefficient == 0)
@@ -142,9 +134,9 @@ def _palette(rgb) -> list[float]:
 
 
 def signature_distance(left: dict, right: dict) -> tuple[float, int]:
-    color = sum(
-        abs(first - second) for first, second in zip(left["pixels"], right["pixels"])
-    ) / len(left["pixels"])
+    color = sum(abs(first - second) for first, second in zip(left["pixels"], right["pixels"], strict=False)) / len(
+        left["pixels"]
+    )
     perceptual = (left["difference_hash"] ^ right["difference_hash"]).bit_count()
     return color, perceptual
 
@@ -155,8 +147,7 @@ def perceptual_hash_distance(left: dict, right: dict) -> int:
 
 def palette_similarity(left: dict, right: dict) -> float:
     return math.fsum(
-        math.sqrt(first * second)
-        for first, second in zip(left["palette"], right["palette"])
+        math.sqrt(first * second) for first, second in zip(left["palette"], right["palette"], strict=False)
     )
 
 
@@ -173,10 +164,7 @@ def similarity_metrics(left: dict, right: dict) -> dict:
 def match_tier(metrics: dict) -> str | None:
     if metrics["color"] <= VISUAL_COLOR_THRESHOLD and metrics["difference_hash"] <= VISUAL_HASH_THRESHOLD:
         return "reencoded"
-    if (
-        metrics["palette"] >= VISUAL_PALETTE_THRESHOLD
-        and metrics["perceptual_hash"] <= VISUAL_PHASH_THRESHOLD
-    ):
+    if metrics["palette"] >= VISUAL_PALETTE_THRESHOLD and metrics["perceptual_hash"] <= VISUAL_PHASH_THRESHOLD:
         return "edited"
     return None
 
@@ -188,10 +176,8 @@ def dimensions_compatible(left: tuple[int, int], right: tuple[int, int]) -> bool
     right_landscape = (max(right), min(right))
     tolerance = VISUAL_DIMENSION_TOLERANCE
     return (
-        right_landscape[0] * tolerance
-        <= left_landscape[0] <= right_landscape[0] / tolerance
-        and right_landscape[1] * tolerance
-        <= left_landscape[1] <= right_landscape[1] / tolerance
+        right_landscape[0] * tolerance <= left_landscape[0] <= right_landscape[0] / tolerance
+        and right_landscape[1] * tolerance <= left_landscape[1] <= right_landscape[1] / tolerance
     )
 
 
@@ -261,23 +247,14 @@ def _capture_epoch(signature: dict) -> float | None:
     return time.mktime(parsed)
 
 
-def _try_cluster_pair(
-    first_signature: dict,
-    second_signature: dict,
-    epoch_gap: float | None,
-) -> bool:
+def _try_cluster_pair(first_signature: dict, second_signature: dict, epoch_gap: float | None) -> bool:
     """Union two signatures when a match tier accepts them."""
     if not dimensions_compatible(
-        (first_signature["width"], first_signature["height"]),
-        (second_signature["width"], second_signature["height"]),
+        (first_signature["width"], first_signature["height"]), (second_signature["width"], second_signature["height"])
     ):
         return False
-    difference_distance = (
-        first_signature["difference_hash"] ^ second_signature["difference_hash"]
-    ).bit_count()
-    perceptual_distance = (
-        first_signature["perceptual_hash"] ^ second_signature["perceptual_hash"]
-    ).bit_count()
+    difference_distance = (first_signature["difference_hash"] ^ second_signature["difference_hash"]).bit_count()
+    perceptual_distance = (first_signature["perceptual_hash"] ^ second_signature["perceptual_hash"]).bit_count()
     if (
         perceptual_distance <= CLUSTER_PHASH_THRESHOLD
         and (epoch_gap is None or epoch_gap <= CLUSTER_TIME_GATE_SECONDS)
@@ -310,8 +287,7 @@ def cluster_signatures(entries: list[tuple[str, dict]]) -> list[list[str]]:
 
     epochs = [_capture_epoch(signature) for _, signature in entries]
     timed = sorted(
-        (index for index in range(len(entries)) if epochs[index] is not None),
-        key=lambda index: epochs[index],
+        (index for index in range(len(entries)) if epochs[index] is not None), key=lambda index: epochs[index]
     )
     untimed = [index for index in range(len(entries)) if epochs[index] is None]
 
@@ -323,11 +299,7 @@ def cluster_signatures(entries: list[tuple[str, dict]]) -> list[list[str]]:
     def join_if_similar(first_index: int, second_index: int) -> bool:
         if union_find.find(first_index) == union_find.find(second_index):
             return False
-        if _try_cluster_pair(
-            entries[first_index][1],
-            entries[second_index][1],
-            gap(first_index, second_index),
-        ):
+        if _try_cluster_pair(entries[first_index][1], entries[second_index][1], gap(first_index, second_index)):
             union_find.union(first_index, second_index)
             return True
         return False

@@ -1,6 +1,7 @@
 """Kira package bootstrap: vendor path must exist before third-party imports."""
-from pathlib import Path
+
 import sys
+from pathlib import Path
 
 VENDOR_DIR = Path(__file__).resolve().parent.parent / "vendor"
 if VENDOR_DIR.exists():

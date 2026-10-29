@@ -1,3 +1,5 @@
+"""Album and Archive automation through the vendored ``gpwc`` Google Photos web client."""
+
 from __future__ import annotations
 
 import base64
@@ -8,10 +10,10 @@ import os
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Iterator
 
 from . import visual
 from .google_photos import GooglePhotosError, _windows_protect, _windows_unprotect
@@ -36,10 +38,7 @@ class GooglePhotosWebService:
     VISUAL_NARROW_FALLBACK_LIMIT = 6
 
     def __init__(
-        self,
-        data_root: Path,
-        client_factory: object | None = None,
-        payloads_module: object | None = None,
+        self, data_root: Path, client_factory: object | None = None, payloads_module: object | None = None
     ) -> None:
         self.root = data_root.resolve()
         self.session_path = self.root / "google-web-session.json"
@@ -126,7 +125,11 @@ class GooglePhotosWebService:
                 self._write_session(wrapper)
                 self._signin_state = {"status": "completed"}
         except Exception as exc:
-            message = str(exc) if isinstance(exc, GoogleSignInError) else "The Google sign-in window closed or could not be verified. Try again."
+            message = (
+                str(exc)
+                if isinstance(exc, GoogleSignInError)
+                else "The Google sign-in window closed or could not be verified. Try again."
+            )
             with self._signin_lock:
                 if not cancelled.is_set():
                     self._signin_state = {"status": "failed", "error": message}
@@ -134,9 +137,7 @@ class GooglePhotosWebService:
     def check(self) -> None:
         """Verify the stored cookie JSON can be decrypted and used."""
         if not self.session_path.exists():
-            raise GooglePhotosWebError(
-                "Sign in to Google Photos to connect album and Archive automation."
-            )
+            raise GooglePhotosWebError("Sign in to Google Photos to connect album and Archive automation.")
         with self._client():
             pass
 
@@ -185,9 +186,7 @@ class GooglePhotosWebService:
                 client = client_factory(temporary, account_index=account_index)
                 account = str(getattr(client, "global_data", {}).get("oPEP7c", "")).strip()
             except IndexError as exc:
-                raise GooglePhotosWebError(
-                    "Google Photos cookie export is expired or not signed in"
-                ) from exc
+                raise GooglePhotosWebError("Google Photos cookie export is expired or not signed in") from exc
             except Exception as exc:
                 raise GooglePhotosWebError(f"Google Photos web session could not be verified: {exc}") from exc
             finally:
@@ -242,11 +241,7 @@ class GooglePhotosWebService:
                 except (TypeError, ValueError, OverflowError) as exc:
                     raise GooglePhotosWebError("Cookie JSON export has an invalid expiration") from exc
             stored_domain = f"#HttpOnly_{domain}" if bool(entry.get("httpOnly")) else domain
-            lines.append(
-                "\t".join(
-                    (stored_domain, include_subdomains, path, secure, str(expiration), name, value)
-                )
-            )
+            lines.append("\t".join((stored_domain, include_subdomains, path, secure, str(expiration), name, value)))
             google_entries += 1
         if not google_entries:
             raise GooglePhotosWebError("Cookie JSON export contains no Google cookies")
@@ -283,10 +278,7 @@ class GooglePhotosWebService:
                     media_key = str(getattr(item, "media_key", "") or "")
                     dedup_key = str(getattr(item, "dedup_key", "") or "")
                     if content_hash in batch and media_key and dedup_key:
-                        matches[(content_hash, media_key)] = {
-                            "content_hash": content_hash,
-                            "media_key": media_key,
-                        }
+                        matches[(content_hash, media_key)] = {"content_hash": content_hash, "media_key": media_key}
         return list(matches.values())
 
     def find_visual_matches(self, paths: list[Path]) -> tuple[list[dict], list[dict]]:
@@ -297,14 +289,7 @@ class GooglePhotosWebService:
             try:
                 signature = visual.image_signature(path)
                 key = (signature["width"], signature["height"], signature["pixels"])
-                group = local_groups.setdefault(
-                    key,
-                    {
-                        "signature": signature,
-                        "paths": [],
-                        "name_keys": set(),
-                    },
-                )
+                group = local_groups.setdefault(key, {"signature": signature, "paths": [], "name_keys": set()})
                 group["paths"].append(str(path))
                 group["name_keys"].add(match_key(path.name))
             except Exception as exc:
@@ -331,24 +316,18 @@ class GooglePhotosWebService:
                     group
                     for group in local_groups_list
                     if visual.dimensions_compatible(
-                        (group["signature"]["width"], group["signature"]["height"]),
-                        (remote["width"], remote["height"]),
+                        (group["signature"]["width"], group["signature"]["height"]), (remote["width"], remote["height"])
                     )
                 ]
                 if not candidates:
                     continue
                 remote_candidates.append((remote, candidates))
 
-            remote_candidates = self._resolve_visual_downloads(
-                client, payloads, remote_candidates
-            )
+            remote_candidates = self._resolve_visual_downloads(client, payloads, remote_candidates)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
                 futures = {
-                    executor.submit(self._remote_image_signature, client, remote): (
-                        remote,
-                        candidates,
-                    )
+                    executor.submit(self._remote_image_signature, client, remote): (remote, candidates)
                     for remote, candidates in remote_candidates
                 }
                 for future in concurrent.futures.as_completed(futures):
@@ -376,15 +355,10 @@ class GooglePhotosWebService:
         except GooglePhotosWebError:
             raise
         except Exception as exc:
-            raise GooglePhotosWebError(
-                f"original download failed ({type(exc).__name__})"
-            ) from exc
+            raise GooglePhotosWebError(f"original download failed ({type(exc).__name__})") from exc
 
     def _resolve_visual_downloads(
-        self,
-        client: object,
-        payloads: object,
-        candidates: list[tuple[dict, list[dict]]],
+        self, client: object, payloads: object, candidates: list[tuple[dict, list[dict]]]
     ) -> list[tuple[dict, list[dict]]]:
         by_media = {remote["media_key"]: (remote, groups) for remote, groups in candidates}
         narrowed: dict[str, tuple[dict, list[dict]]] = {}
@@ -406,17 +380,13 @@ class GooglePhotosWebService:
                 remote, groups = pair
                 remote_name = match_key(str(getattr(metadata, "file_name", "") or ""))
                 remote_capture = self._remote_capture_time(
-                    getattr(metadata, "timestamp", None),
-                    getattr(metadata, "timezone_offset", None),
+                    getattr(metadata, "timestamp", None), getattr(metadata, "timezone_offset", None)
                 )
                 compatible = [
                     group
                     for group in groups
                     if remote_name in group["name_keys"]
-                    or (
-                        remote_capture
-                        and remote_capture == group["signature"].get("capture_time")
-                    )
+                    or (remote_capture and remote_capture == group["signature"].get("capture_time"))
                 ]
                 if not compatible and len(groups) <= self.VISUAL_NARROW_FALLBACK_LIMIT:
                     compatible = list(groups)
@@ -426,10 +396,7 @@ class GooglePhotosWebService:
         narrowed_keys = list(narrowed)
         resolved: list[tuple[dict, list[dict]]] = []
         for start in range(0, len(narrowed_keys), 100):
-            requests = [
-                (key, payloads.GetItemInfo(key))
-                for key in narrowed_keys[start : start + 100]
-            ]
+            requests = [(key, payloads.GetItemInfo(key)) for key in narrowed_keys[start : start + 100]]
             try:
                 responses = client.send_api_request([payload for _, payload in requests])
             except Exception as exc:
@@ -460,7 +427,7 @@ class GooglePhotosWebService:
             offset = int(timezone_offset or 0)
             if abs(offset) <= 24 * 60:
                 offset *= 60
-            captured = datetime.fromtimestamp(seconds, timezone.utc) + timedelta(seconds=offset)
+            captured = datetime.fromtimestamp(seconds, UTC) + timedelta(seconds=offset)
             return captured.strftime("%Y:%m:%d %H:%M:%S")
         except (OSError, OverflowError, TypeError, ValueError):
             return None
@@ -479,9 +446,7 @@ class GooglePhotosWebService:
                 variant_rows.append((metrics, candidate))
 
         if exact_rows:
-            ranked = sorted(
-                exact_rows, key=lambda value: (value[0]["color"], value[0]["difference_hash"])
-            )
+            ranked = sorted(exact_rows, key=lambda value: (value[0]["color"], value[0]["difference_hash"]))
             best_metrics, best = ranked[0]
             if len(ranked) > 1:
                 next_metrics = ranked[1][0]
@@ -501,9 +466,7 @@ class GooglePhotosWebService:
 
         if not variant_rows:
             return
-        ranked = sorted(
-            variant_rows, key=lambda value: (-value[0]["palette"], value[0]["perceptual_hash"])
-        )
+        ranked = sorted(variant_rows, key=lambda value: (-value[0]["palette"], value[0]["perceptual_hash"]))
         best_metrics, best = ranked[0]
         if len(ranked) > 1:
             next_metrics = ranked[1][0]
@@ -529,10 +492,7 @@ class GooglePhotosWebService:
             try:
                 response = client.send_api_request(
                     payloads.GetLibraryPageByTakenDate(
-                        timestamp=timestamp,
-                        page_id=page_id,
-                        source="both",
-                        page_size=500,
+                        timestamp=timestamp, page_id=page_id, source="both", page_size=500
                     )
                 )
                 page = response.data
@@ -570,11 +530,7 @@ class GooglePhotosWebService:
             return self._ensure_album(client, payloads, title)
 
     def organize(
-        self,
-        media_keys: list[str],
-        album_title: str,
-        archive: bool = False,
-        resolved_album: dict | None = None,
+        self, media_keys: list[str], album_title: str, archive: bool = False, resolved_album: dict | None = None
     ) -> dict:
         keys = list(dict.fromkeys(str(key).strip() for key in media_keys if str(key).strip()))
         title = self._validated_album_title(album_title)
@@ -588,13 +544,7 @@ class GooglePhotosWebService:
             return self._organize_with_client(client, payloads, keys, title, archive, album)
 
     def _organize_with_client(
-        self,
-        client: object,
-        payloads: object,
-        keys: list[str],
-        title: str,
-        archive: bool,
-        album: dict,
+        self, client: object, payloads: object, keys: list[str], title: str, archive: bool, album: dict
     ) -> dict:
         if not str(album.get("media_key", "")).strip():
             raise GooglePhotosWebError("Google Photos album ID is missing")
@@ -604,9 +554,7 @@ class GooglePhotosWebService:
 
         try:
             if album.get("shared"):
-                client.send_api_request(
-                    payloads.AddItemsToExistingSharedAlbum(keys, album["media_key"])
-                )
+                client.send_api_request(payloads.AddItemsToExistingSharedAlbum(keys, album["media_key"]))
             else:
                 client.send_api_request(payloads.AddItemsToExistingAlbum(keys, album["media_key"]))
         except Exception as exc:
@@ -617,16 +565,11 @@ class GooglePhotosWebService:
             try:
                 client.send_api_request(payloads.SetArchive([info[key]["dedup_key"] for key in keys]))
             except Exception as exc:
-                raise GooglePhotosWebError(
-                    f"Media was added to the album, but Archive failed: {exc}"
-                ) from exc
+                raise GooglePhotosWebError(f"Media was added to the album, but Archive failed: {exc}") from exc
             self._verify_archive(client, payloads, keys)
 
         return {
-            "album": {
-                "title": title,
-                "media_key": album["media_key"],
-            },
+            "album": {"title": title, "media_key": album["media_key"]},
             "archived": archive,
             "items": [
                 {
@@ -652,9 +595,7 @@ class GooglePhotosWebService:
 
     def _ensure_album(self, client: object, payloads: object, title: str) -> dict:
         exact = [
-            album
-            for album in self._list_albums(client, payloads)
-            if album["title"].casefold() == title.casefold()
+            album for album in self._list_albums(client, payloads) if album["title"].casefold() == title.casefold()
         ]
         if exact:
             return exact[0]
@@ -666,17 +607,13 @@ class GooglePhotosWebService:
 
         for attempt in range(5):
             exact = [
-                album
-                for album in self._list_albums(client, payloads)
-                if album["title"].casefold() == title.casefold()
+                album for album in self._list_albums(client, payloads) if album["title"].casefold() == title.casefold()
             ]
             if exact:
                 return exact[0]
             if attempt < 4:
                 time.sleep(0.25 * (2**attempt))
-        raise GooglePhotosWebError(
-            "Google created the album but did not return its ID yet; wait a moment and retry"
-        )
+        raise GooglePhotosWebError("Google created the album but did not return its ID yet; wait a moment and retry")
 
     def _dependency(self) -> tuple[object, object]:
         if self._client_factory is not None and self._payloads_module is not None:
@@ -692,10 +629,7 @@ class GooglePhotosWebService:
             return {}
         try:
             wrapper = json.loads(self.session_path.read_text(encoding="utf-8"))
-            return {
-                "account": wrapper.get("account"),
-                "account_index": int(wrapper.get("account_index", 0)),
-            }
+            return {"account": wrapper.get("account"), "account_index": int(wrapper.get("account_index", 0))}
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return {}
 
@@ -715,9 +649,7 @@ class GooglePhotosWebService:
             raise GooglePhotosWebError("Sign in to Google Photos first")
         try:
             wrapper = json.loads(self.session_path.read_text(encoding="utf-8"))
-            if isinstance(wrapper, dict) and "data" not in wrapper and (
-                "cookies" in wrapper or "url" in wrapper
-            ):
+            if isinstance(wrapper, dict) and "data" not in wrapper and ("cookies" in wrapper or "url" in wrapper):
                 raise GooglePhotosWebError(
                     "google-web-session.json is a cookie export, not an imported Kira session. "
                     "Paste that file's path into Cookie export path and click Import session."
@@ -735,12 +667,7 @@ class GooglePhotosWebService:
 
     @contextmanager
     def _temporary_cookie_file(self, raw: bytes) -> Iterator[Path]:
-        handle = tempfile.NamedTemporaryFile(
-            prefix=".kira-google-web-",
-            suffix=".txt",
-            dir=self.root,
-            delete=False,
-        )
+        handle = tempfile.NamedTemporaryFile(prefix=".kira-google-web-", suffix=".txt", dir=self.root, delete=False)
         path = Path(handle.name)
         try:
             with handle:
@@ -821,11 +748,7 @@ class GooglePhotosWebService:
         return result
 
     def _verify_album(
-        self,
-        client: object,
-        payloads: object,
-        media_keys: list[str],
-        album_media_key: str,
+        self, client: object, payloads: object, media_keys: list[str], album_media_key: str
     ) -> list[dict]:
         remaining = list(media_keys)
         for attempt in range(self.VERIFY_ATTEMPTS):
@@ -849,9 +772,7 @@ class GooglePhotosWebService:
                 time.sleep(self.VERIFY_INTERVAL_SECONDS)
         raise GooglePhotosWebError(f"Google did not confirm album membership: {remaining[0]}")
 
-    def _verify_archive(
-        self, client: object, payloads: object, media_keys: list[str]
-    ) -> None:
+    def _verify_archive(self, client: object, payloads: object, media_keys: list[str]) -> None:
         remaining = list(media_keys)
         for attempt in range(self.VERIFY_ATTEMPTS):
             unconfirmed: list[str] = []

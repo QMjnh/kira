@@ -1,4 +1,5 @@
 """Filesystem scanning, culling moves, and media identity for photo folders."""
+
 from __future__ import annotations
 
 import hashlib
@@ -6,7 +7,8 @@ import json
 import os
 import re
 import shutil
-from datetime import datetime, timezone
+import subprocess
+from datetime import UTC, datetime
 from functools import lru_cache
 from http import HTTPStatus
 from pathlib import Path
@@ -19,20 +21,55 @@ from .visual import cluster_signatures, compute_signatures
 CHUNK_COPY_SIZE = 4 * 1024 * 1024
 INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 EDIT_SUFFIX = re.compile(
-    r"(?:[\s_-]+(?:(?:edited?|edit|final|copy|lr|lightroom|google)(?:[\s_-]*v?\d+)?|v\d+)|\s*\(\d+\))$",
-    re.IGNORECASE,
+    r"(?:[\s_-]+(?:(?:edited?|edit|final|copy|lr|lightroom|google)(?:[\s_-]*v?\d+)?|v\d+)|\s*\(\d+\))$", re.IGNORECASE
 )
 RAW_EXTENSIONS = {
-    ".3fr", ".arw", ".cr2", ".cr3", ".dcr", ".dng", ".erf", ".fff",
-    ".iiq", ".kdc", ".mef", ".mos", ".mrw", ".nef", ".nrw", ".orf",
-    ".pef", ".raf", ".raw", ".rw2", ".rwl", ".sr2", ".srf", ".srw",
+    ".3fr",
+    ".arw",
+    ".cr2",
+    ".cr3",
+    ".dcr",
+    ".dng",
+    ".erf",
+    ".fff",
+    ".iiq",
+    ".kdc",
+    ".mef",
+    ".mos",
+    ".mrw",
+    ".nef",
+    ".nrw",
+    ".orf",
+    ".pef",
+    ".raf",
+    ".raw",
+    ".rw2",
+    ".rwl",
+    ".sr2",
+    ".srf",
+    ".srw",
 }
 JPEG_EXTENSIONS = {".jpg", ".jpeg"}
 PREVIEW_EXTENSIONS = JPEG_EXTENSIONS | {".png", ".webp", ".avif"}
 PHOTO_EXTENSIONS = RAW_EXTENSIONS | PREVIEW_EXTENSIONS | {".tif", ".tiff", ".jxl", ".heic", ".heif"}
 VIDEO_EXTENSIONS = {
-    ".3g2", ".3gp", ".asf", ".avi", ".divx", ".m2t", ".m2ts", ".m4v",
-    ".mkv", ".mmv", ".mod", ".mov", ".mp4", ".mpg", ".mts", ".tod", ".wmv",
+    ".3g2",
+    ".3gp",
+    ".asf",
+    ".avi",
+    ".divx",
+    ".m2t",
+    ".m2ts",
+    ".m4v",
+    ".mkv",
+    ".mmv",
+    ".mod",
+    ".mov",
+    ".mp4",
+    ".mpg",
+    ".mts",
+    ".tod",
+    ".wmv",
 }
 MEDIA_EXTENSIONS = PHOTO_EXTENSIONS | VIDEO_EXTENSIONS
 SIDECAR_EXTENSIONS = {".xmp", ".aae"}
@@ -48,7 +85,7 @@ MAX_COMPARE_PHOTOS = 1200
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def atomic_json_write(path: Path, payload: dict) -> None:
@@ -172,9 +209,33 @@ def media_identity(path: Path) -> tuple[str, str]:
     whose pixels were actually edited. RAW files and videos use exact file bytes.
     """
     stat = path.stat()
-    return _media_identity(
-        str(path.resolve()), stat.st_size, stat.st_mtime_ns, path.suffix.casefold()
-    )
+    return _media_identity(str(path.resolve()), stat.st_size, stat.st_mtime_ns, path.suffix.casefold())
+
+
+ASSET_FILE_KINDS = ("raw_files", "jpeg_files", "video_files", "other_files")
+
+
+def asset_files(asset: dict) -> list[dict]:
+    """Every file record of a scanned asset: RAW, JPEG, video, then other components."""
+    return [record for kind in ASSET_FILE_KINDS for record in asset.get(kind, [])]
+
+
+def _move_all(planned: list[tuple[Path, Path]], failure: str) -> int:
+    """Move every planned file, rolling back completed moves if one fails."""
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for source, target in planned:
+            shutil.move(str(source), str(target))
+            moved.append((source, target))
+    except OSError as exc:
+        for source, target in reversed(moved):
+            try:
+                if target.exists() and not source.exists():
+                    shutil.move(str(target), str(source))
+            except OSError:
+                pass
+        raise KiraError(HTTPStatus.INTERNAL_SERVER_ERROR, f"{failure}: {exc}") from exc
+    return len(moved)
 
 
 def natural_key(value: str) -> list[object]:
@@ -211,8 +272,7 @@ def browse_directories(value: str) -> dict:
     directories: list[dict[str, str]] = []
     try:
         children = sorted(
-            (child for child in current.iterdir() if child.is_dir()),
-            key=lambda child: natural_key(child.name),
+            (child for child in current.iterdir() if child.is_dir()), key=lambda child: natural_key(child.name)
         )
         for child in children:
             try:
@@ -228,12 +288,7 @@ def browse_directories(value: str) -> dict:
         target = Path(*parts[: index + 1])
         label = part.rstrip("\\/") or part
         breadcrumbs.append({"name": label, "path": str(target)})
-    return {
-        "current": str(current),
-        "parent": parent,
-        "breadcrumbs": breadcrumbs,
-        "directories": directories,
-    }
+    return {"current": str(current), "parent": parent, "breadcrumbs": breadcrumbs, "directories": directories}
 
 
 def culling_context(current: Path) -> dict:
@@ -263,26 +318,15 @@ def culling_context(current: Path) -> dict:
     if groups_root.is_dir():
         try:
             groups = sorted(
-                (child for child in groups_root.iterdir() if child.is_dir()),
-                key=lambda child: natural_key(child.name),
+                (child for child in groups_root.iterdir() if child.is_dir()), key=lambda child: natural_key(child.name)
             )
         except PermissionError:
             groups = []
         folders.extend(
-            {
-                "name": f"Compare: {group.name}",
-                "group_name": group.name,
-                "path": str(group),
-                "role": "group",
-            }
+            {"name": f"Compare: {group.name}", "group_name": group.name, "path": str(group), "role": "group"}
             for group in groups
         )
-    return {
-        "root": str(root),
-        "role": role,
-        "group_name": group_name,
-        "folders": folders,
-    }
+    return {"root": str(root), "role": role, "group_name": group_name, "folders": folders}
 
 
 def safe_group_name(value: str) -> str:
@@ -345,8 +389,6 @@ def delete_directory_to_recycle_bin(path_value: str) -> dict:
     if os.name != "nt":
         raise KiraError(HTTPStatus.BAD_REQUEST, "Recycle Bin deletion requires Windows")
     try:
-        import subprocess
-
         escaped = str(current).replace("'", "''")
         script = (
             "Add-Type -AssemblyName Microsoft.VisualBasic; "
@@ -388,19 +430,11 @@ def choose_assets(source_directory: str, asset_ids: list[str], context_message: 
     if not chosen:
         raise KiraError(HTTPStatus.BAD_REQUEST, "Select at least one photo")
     if len(chosen) != len(selected):
-        raise KiraError(
-            HTTPStatus.CONFLICT,
-            f"The folder changed; scan it again before {context_message}",
-        )
+        raise KiraError(HTTPStatus.CONFLICT, f"The folder changed; scan it again before {context_message}")
     return current, chosen
 
 
-def move_culling_assets(
-    source_directory: str,
-    asset_ids: list[str],
-    action: str,
-    group_name: str = "",
-) -> dict:
+def move_culling_assets(source_directory: str, asset_ids: list[str], action: str, group_name: str = "") -> dict:
     current, chosen = choose_assets(source_directory, asset_ids, "moving photos")
 
     context = culling_context(current)
@@ -424,9 +458,7 @@ def move_culling_assets(
     destination_identities: dict[tuple[str, str], Path] = {}
     try:
         existing_files = [
-            path
-            for path in destination.iterdir()
-            if path.is_file() and path.suffix.casefold() in MEDIA_EXTENSIONS
+            path for path in destination.iterdir() if path.is_file() and path.suffix.casefold() in MEDIA_EXTENSIONS
         ]
     except PermissionError as exc:
         raise KiraError(HTTPStatus.FORBIDDEN, "Windows denied access to the destination folder") from exc
@@ -436,9 +468,8 @@ def move_culling_assets(
     moved_assets = 0
     duplicate_assets = 0
     for asset in chosen:
-        records = asset["raw_files"] + asset["jpeg_files"] + asset.get("video_files", []) + asset["other_files"]
         unique_records: list[tuple[dict, Path, tuple[str, str]]] = []
-        for record in records:
+        for record in asset_files(asset):
             source = Path(record["path"])
             identity = media_identity(source)
             duplicate_of = destination_identities.get(identity)
@@ -455,7 +486,7 @@ def move_culling_assets(
         direct_targets = [destination / source.name for _, source, _ in unique_records]
         has_name_conflict = any(
             target.exists() and source.resolve() != target.resolve()
-            for (_, source, _), target in zip(unique_records, direct_targets)
+            for (_, source, _), target in zip(unique_records, direct_targets, strict=False)
         )
         variant_index = 2
         targets = direct_targets
@@ -470,7 +501,7 @@ def move_culling_assets(
                 variant_index += 1
 
         asset_planned = False
-        for (_, source, identity), target in zip(unique_records, targets):
+        for (_, source, identity), target in zip(unique_records, targets, strict=False):
             if source.resolve() == target.resolve():
                 continue
             planned.append((source, target))
@@ -482,19 +513,7 @@ def move_culling_assets(
         if asset_planned:
             moved_assets += 1
 
-    moved: list[tuple[Path, Path]] = []
-    try:
-        for source, target in planned:
-            shutil.move(str(source), str(target))
-            moved.append((source, target))
-    except OSError as exc:
-        for source, target in reversed(moved):
-            try:
-                if target.exists() and not source.exists():
-                    shutil.move(str(target), str(source))
-            except OSError:
-                pass
-        raise KiraError(HTTPStatus.INTERNAL_SERVER_ERROR, f"Could not organize photo group: {exc}") from exc
+    moved_files = _move_all(planned, "Could not organize photo group")
 
     refresh_directory = current
     group_deleted = False
@@ -511,7 +530,7 @@ def move_culling_assets(
     refreshed = scan_photo_directory(str(refresh_directory))
     refreshed["culling"] = culling_context(refresh_directory)
     refreshed["moved_assets"] = moved_assets
-    refreshed["moved_files"] = len(moved)
+    refreshed["moved_files"] = moved_files
     refreshed["duplicate_assets"] = duplicate_assets
     refreshed["duplicate_files"] = duplicate_files
     refreshed["deleted_duplicate_files"] = 0
@@ -522,11 +541,7 @@ def move_culling_assets(
     return refreshed
 
 
-def move_assets_between_directories(
-    source_directory: str,
-    destination_directory: str,
-    asset_ids: list[str],
-) -> dict:
+def move_assets_between_directories(source_directory: str, destination_directory: str, asset_ids: list[str]) -> dict:
     source, chosen = choose_assets(source_directory, asset_ids, "moving photos")
     destination = resolve_directory(destination_directory)
     if source == destination:
@@ -534,38 +549,23 @@ def move_assets_between_directories(
 
     planned: list[tuple[Path, Path]] = []
     for asset in chosen:
-        records = asset["raw_files"] + asset["jpeg_files"] + asset.get("video_files", []) + asset["other_files"]
-        for record in records:
+        for record in asset_files(asset):
             file_source = Path(record["path"])
             file_target = destination / file_source.name
             if file_source.resolve() == file_target.resolve():
                 continue
             if file_target.exists():
                 raise KiraError(
-                    HTTPStatus.CONFLICT,
-                    f"{file_target.name} already exists in {destination}. Nothing was moved.",
+                    HTTPStatus.CONFLICT, f"{file_target.name} already exists in {destination}. Nothing was moved."
                 )
             planned.append((file_source, file_target))
 
-    moved: list[tuple[Path, Path]] = []
-    try:
-        for file_source, file_target in planned:
-            shutil.move(str(file_source), str(file_target))
-            moved.append((file_source, file_target))
-    except OSError as exc:
-        for file_source, file_target in reversed(moved):
-            try:
-                if file_target.exists() and not file_source.exists():
-                    shutil.move(str(file_target), str(file_source))
-            except OSError:
-                pass
-        raise KiraError(HTTPStatus.INTERNAL_SERVER_ERROR, f"Could not move photo group: {exc}") from exc
-
+    moved_files = _move_all(planned, "Could not move photo group")
     return {
         "source": scan_photo_directory(str(source)),
         "destination": scan_photo_directory(str(destination)),
         "moved_assets": len(chosen),
-        "moved_files": len(moved),
+        "moved_files": moved_files,
     }
 
 
@@ -574,8 +574,11 @@ def scan_photo_directory(value: str) -> dict:
     groups: dict[str, dict] = {}
     try:
         files = sorted(
-            (item for item in current.iterdir() if item.is_file()
-             and item.suffix.casefold() in MEDIA_EXTENSIONS | COMPONENT_EXTENSIONS),
+            (
+                item
+                for item in current.iterdir()
+                if item.is_file() and item.suffix.casefold() in MEDIA_EXTENSIONS | COMPONENT_EXTENSIONS
+            ),
             key=lambda item: natural_key(item.name),
         )
     except PermissionError as exc:
@@ -611,7 +614,7 @@ def scan_photo_directory(value: str) -> dict:
     assets: list[dict] = []
     for group in groups.values():
         all_paths = group["raw_paths"] + group["jpeg_paths"] + group["video_paths"] + group["other_paths"]
-        asset_id = hashlib.sha256(f"{current}\0{group['stem'].casefold()}".encode("utf-8")).hexdigest()[:16]
+        asset_id = hashlib.sha256(f"{current}\0{group['stem'].casefold()}".encode()).hexdigest()[:16]
         preview = group["preview_paths"][0] if group["preview_paths"] else None
         file_stats = {path: path.stat() for path in all_paths}
         date_paths = group["jpeg_paths"] + group["other_paths"] + group["raw_paths"] + group["video_paths"]
@@ -619,10 +622,13 @@ def scan_photo_directory(value: str) -> dict:
             {
                 "id": asset_id,
                 "stem": group["stem"],
-                "raw_files": [{"filename": path.name, "path": str(path), "size": file_stats[path].st_size} for path in group["raw_paths"]],
-                "jpeg_files": [{"filename": path.name, "path": str(path), "size": file_stats[path].st_size} for path in group["jpeg_paths"]],
-                "video_files": [{"filename": path.name, "path": str(path), "size": file_stats[path].st_size} for path in group["video_paths"]],
-                "other_files": [{"filename": path.name, "path": str(path), "size": file_stats[path].st_size} for path in group["other_paths"]],
+                **{
+                    kind: [
+                        {"filename": path.name, "path": str(path), "size": file_stats[path].st_size}
+                        for path in group[kind.replace("_files", "_paths")]
+                    ]
+                    for kind in ASSET_FILE_KINDS
+                },
                 "preview_path": str(preview) if preview else None,
                 "preview_version": file_stats[preview].st_mtime_ns if preview else None,
                 "taken_at": asset_taken_at(date_paths, file_stats),
@@ -691,8 +697,7 @@ def build_compare_groups(source_directory: str, min_group_size: object = None) -
         candidates.append((asset, Path(preview_records[0]["path"])))
     if len(candidates) > MAX_COMPARE_PHOTOS:
         raise KiraError(
-            HTTPStatus.BAD_REQUEST,
-            f"Compare grouping handles up to {MAX_COMPARE_PHOTOS} photos per folder",
+            HTTPStatus.BAD_REQUEST, f"Compare grouping handles up to {MAX_COMPARE_PHOTOS} photos per folder"
         )
 
     signatures, signature_errors = compute_signatures([path for _, path in candidates])
@@ -702,18 +707,14 @@ def build_compare_groups(source_directory: str, min_group_size: object = None) -
 
     entries = [(str(index), signatures[candidates[index][1]]) for index in usable_indexes]
     clusters = [
-        [candidates[int(key)][0] for key in cluster]
-        for cluster in cluster_signatures(entries)
-        if len(cluster) >= size
+        [candidates[int(key)][0] for key in cluster] for cluster in cluster_signatures(entries) if len(cluster) >= size
     ]
     clusters.sort(key=lambda assets: natural_key(assets[0]["stem"]))
 
     taken_names: set[str] = set()
     if groups_root.exists():
         try:
-            taken_names = {
-                group.name.casefold() for group in groups_root.iterdir() if group.is_dir()
-            }
+            taken_names = {group.name.casefold() for group in groups_root.iterdir() if group.is_dir()}
         except PermissionError:
             taken_names = set()
     created_groups: list[dict] = []
@@ -721,12 +722,7 @@ def build_compare_groups(source_directory: str, min_group_size: object = None) -
         base = cluster_assets[0]["stem"]
         name = _compare_group_name(base[:60], groups_root, taken_names)
         taken_names.add(name.casefold())
-        result = move_culling_assets(
-            str(current),
-            [asset["id"] for asset in cluster_assets],
-            "group",
-            name,
-        )
+        result = move_culling_assets(str(current), [asset["id"] for asset in cluster_assets], "group", name)
         created_groups.append(
             {
                 "name": result["destination_group_name"],

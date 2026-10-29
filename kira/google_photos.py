@@ -1,3 +1,5 @@
+"""Google Photos Picker/Library OAuth client: imports, uploads, operations, and folder matching."""
+
 from __future__ import annotations
 
 import base64
@@ -20,6 +22,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .media import (
+    CHUNK_COPY_SIZE,
     VIDEO_EXTENSIONS,
     atomic_json_write,
     match_key,
@@ -36,9 +39,29 @@ REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 PICKER_ENDPOINT = "https://photospicker.googleapis.com/v1"
 LIBRARY_HOST = "photoslibrary.googleapis.com"
 PHOTO_SUFFIXES = {
-    ".avif", ".bmp", ".gif", ".heic", ".heif", ".ico", ".jpeg", ".jpg",
-    ".png", ".tif", ".tiff", ".webp", ".dng", ".cr2", ".cr3", ".nef",
-    ".arw", ".orf", ".raf", ".rw2", ".pef", ".srw", ".raw",
+    ".avif",
+    ".bmp",
+    ".gif",
+    ".heic",
+    ".heif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+    ".dng",
+    ".cr2",
+    ".cr3",
+    ".nef",
+    ".arw",
+    ".orf",
+    ".raf",
+    ".rw2",
+    ".pef",
+    ".srw",
+    ".raw",
 }
 MEDIA_SUFFIXES = PHOTO_SUFFIXES | VIDEO_EXTENSIONS
 IMPORT_DOWNLOAD_MODES = {"automatic", "zip", "files"}
@@ -56,39 +79,32 @@ class _DataBlob(ctypes.Structure):
     _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
 
 
-def _windows_protect(data: bytes) -> bytes:
+def _dpapi(function: object, data: bytes, description: str | None) -> bytes:
+    """Run a Windows DPAPI protect/unprotect call over ``data`` for the current user."""
     source = ctypes.create_string_buffer(data)
     incoming = _DataBlob(len(data), ctypes.cast(source, ctypes.POINTER(ctypes.c_ubyte)))
     outgoing = _DataBlob()
-    if not ctypes.windll.crypt32.CryptProtectData(
-        ctypes.byref(incoming), "Kira Google Photos", None, None, None, 0, ctypes.byref(outgoing)
-    ):
+    if not function(ctypes.byref(incoming), description, None, None, None, 0, ctypes.byref(outgoing)):
         raise ctypes.WinError()
     try:
         return ctypes.string_at(outgoing.pbData, outgoing.cbData)
     finally:
         ctypes.windll.kernel32.LocalFree(outgoing.pbData)
+
+
+def _windows_protect(data: bytes) -> bytes:
+    return _dpapi(ctypes.windll.crypt32.CryptProtectData, data, "Kira Google Photos")
 
 
 def _windows_unprotect(data: bytes) -> bytes:
-    source = ctypes.create_string_buffer(data)
-    incoming = _DataBlob(len(data), ctypes.cast(source, ctypes.POINTER(ctypes.c_ubyte)))
-    outgoing = _DataBlob()
-    if not ctypes.windll.crypt32.CryptUnprotectData(
-        ctypes.byref(incoming), None, None, None, None, 0, ctypes.byref(outgoing)
-    ):
-        raise ctypes.WinError()
-    try:
-        return ctypes.string_at(outgoing.pbData, outgoing.cbData)
-    finally:
-        ctypes.windll.kernel32.LocalFree(outgoing.pbData)
+    return _dpapi(ctypes.windll.crypt32.CryptUnprotectData, data, None)
 
 
 def _google_remote_hash(path: Path) -> str:
     """Return the content hash format used by Google Photos' remote-match endpoint."""
     digest = hashlib.sha1()
     with path.open("rb") as source:
-        while chunk := source.read(4 * 1024 * 1024):
+        while chunk := source.read(CHUNK_COPY_SIZE):
             digest.update(chunk)
     return base64.b64encode(digest.digest()).decode("ascii")
 
@@ -124,10 +140,7 @@ class GooglePhotosService:
             client = payload.get("installed") or payload.get("web") or payload
             if not isinstance(client.get("client_id"), str):
                 raise ValueError
-            return {
-                "client_id": client["client_id"],
-                "client_secret": str(client.get("client_secret", "")),
-            }
+            return {"client_id": client["client_id"], "client_secret": str(client.get("client_secret", ""))}
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             raise GooglePhotosError("Google OAuth credential file is invalid") from exc
 
@@ -160,12 +173,7 @@ class GooglePhotosService:
             picker_ok = True
         except GooglePhotosError as exc:
             issues.append(str(exc))
-        return {
-            "ok": json_ok and picker_ok,
-            "json_ok": json_ok,
-            "picker_ok": picker_ok,
-            "message": " ".join(issues),
-        }
+        return {"ok": json_ok and picker_ok, "json_ok": json_ok, "picker_ok": picker_ok, "message": " ".join(issues)}
 
     def _check_picker(self) -> None:
         headers = {"Accept": "application/json"}
@@ -203,10 +211,7 @@ class GooglePhotosService:
     def _save_tokens(self, payload: dict) -> None:
         raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         protected = _windows_protect(raw) if os.name == "nt" else raw
-        wrapper = {
-            "encrypted": os.name == "nt",
-            "data": base64.b64encode(protected).decode("ascii"),
-        }
+        wrapper = {"encrypted": os.name == "nt", "data": base64.b64encode(protected).decode("ascii")}
         atomic_json_write(self.token_path, wrapper)
         if os.name != "nt":
             try:
@@ -348,9 +353,7 @@ class GooglePhotosService:
         )
 
     def picker_session(self, session_id: str) -> dict:
-        return self._request_json(
-            f"{PICKER_ENDPOINT}/sessions/{session_id}", token=self._access_token()
-        )
+        return self._request_json(f"{PICKER_ENDPOINT}/sessions/{session_id}", token=self._access_token())
 
     def _list_picked_items(self, session_id: str) -> list[dict]:
         items: list[dict] = []
@@ -359,9 +362,7 @@ class GooglePhotosService:
             query = {"sessionId": session_id, "pageSize": "100"}
             if page_token:
                 query["pageToken"] = page_token
-            result = self._request_json(
-                f"{PICKER_ENDPOINT}/mediaItems?{urlencode(query)}", token=self._access_token()
-            )
+            result = self._request_json(f"{PICKER_ENDPOINT}/mediaItems?{urlencode(query)}", token=self._access_token())
             items.extend(result.get("mediaItems", []))
             page_token = str(result.get("nextPageToken", ""))
             if not page_token:
@@ -384,24 +385,17 @@ class GooglePhotosService:
         if mode not in IMPORT_DOWNLOAD_MODES:
             raise GooglePhotosError("Download method must be Automatic, Always ZIP, or Never ZIP")
         if threshold < MIN_ZIP_THRESHOLD or threshold > MAX_ZIP_THRESHOLD:
-            raise GooglePhotosError(
-                f"ZIP threshold must be between {MIN_ZIP_THRESHOLD} and {MAX_ZIP_THRESHOLD}"
-            )
+            raise GooglePhotosError(f"ZIP threshold must be between {MIN_ZIP_THRESHOLD} and {MAX_ZIP_THRESHOLD}")
         title = str(album_title or "").strip()
         if archive is None:
             archive = bool(title)
         if archive and not title:
             raise GooglePhotosError("An album name is required when automatic organization is enabled")
         if archive and not self.web.status().get("connected"):
-            raise GooglePhotosError(
-                "Connect the Google Photos web session before enabling automatic album and Archive"
-            )
+            raise GooglePhotosError("Connect the Google Photos web session before enabling automatic album and Archive")
         operation = self._new_operation("import", directory=target)
         self._update_operation(
-            operation["id"],
-            album_title=title or None,
-            archive=bool(archive),
-            organize_after_import=bool(archive),
+            operation["id"], album_title=title or None, archive=bool(archive), organize_after_import=bool(archive)
         )
         threading.Thread(
             target=self._run_import,
@@ -415,44 +409,22 @@ class GooglePhotosService:
         if not supported:
             raise GooglePhotosError("Select at least one supported photo or video")
         operation = self._new_operation("upload", total=len(supported))
-        threading.Thread(
-            target=self._run_upload, args=(operation["id"], supported), daemon=True
-        ).start()
+        threading.Thread(target=self._run_upload, args=(operation["id"], supported), daemon=True).start()
         return operation
 
-    def start_organize(
-        self,
-        media_keys: list[str],
-        album_title: str,
-        archive: bool = False,
-    ) -> dict:
+    def start_organize(self, media_keys: list[str], album_title: str, archive: bool = False) -> dict:
         keys = list(dict.fromkeys(str(key).strip() for key in media_keys if str(key).strip()))
         if not keys:
             raise GooglePhotosError("At least one Google media ID is required")
         operation = self._new_operation("organize", total=len(keys))
-        self._update_operation(
-            operation["id"],
-            album_title=str(album_title).strip(),
-            archive=bool(archive),
-        )
+        self._update_operation(operation["id"], album_title=str(album_title).strip(), archive=bool(archive))
         threading.Thread(
-            target=self._run_organize,
-            args=(operation["id"], keys, str(album_title), bool(archive)),
-            daemon=True,
+            target=self._run_organize, args=(operation["id"], keys, str(album_title), bool(archive)), daemon=True
         ).start()
         return self.operation(operation["id"])
 
-    def start_match_folder(
-        self,
-        paths: list[Path],
-        album_title: str,
-        archive: bool = True,
-    ) -> dict:
-        supported = list(
-            dict.fromkeys(
-                path.resolve() for path in paths if path.suffix.casefold() in MEDIA_SUFFIXES
-            )
-        )
+    def start_match_folder(self, paths: list[Path], album_title: str, archive: bool = True) -> dict:
+        supported = list(dict.fromkeys(path.resolve() for path in paths if path.suffix.casefold() in MEDIA_SUFFIXES))
         title = str(album_title).strip()
         if not supported:
             raise GooglePhotosError("The selected folder has no supported photos or videos")
@@ -531,12 +503,7 @@ class GooglePhotosService:
                 operation["completed" if succeeded else "failed"] += 1
             self._save_operation(operation)
 
-    def _log_operation_error(
-        self,
-        operation_id: str,
-        error: object,
-        item: str | None = None,
-    ) -> None:
+    def _log_operation_error(self, operation_id: str, error: object, item: str | None = None) -> None:
         with self.lock:
             kind = str(self.operations.get(operation_id, {}).get("kind", "operation"))
         detail = " ".join(str(error).splitlines()).strip() or type(error).__name__
@@ -604,14 +571,10 @@ class GooglePhotosService:
             "google_content_hash": remote_hash,
         }
 
-    def _integrate_download(
-        self, operation_id: str, download: dict, target: Path, existing: list[dict]
-    ) -> None:
+    def _integrate_download(self, operation_id: str, download: dict, target: Path, existing: list[dict]) -> None:
         incoming = Path(download["path"])
         filename = download["filename"]
-        classification, related_path = self._classify_download(
-            filename, download["size"], download["sha256"], existing
-        )
+        classification, related_path = self._classify_download(filename, download["size"], download["sha256"], existing)
         result = {
             "filename": filename,
             "media_type": download["media_type"].casefold(),
@@ -651,32 +614,24 @@ class GooglePhotosService:
         imported = [
             item
             for item in files
-            if item.get("status") in {"complete", "skipped"}
-            and str(item.get("google_content_hash", "")).strip()
+            if item.get("status") in {"complete", "skipped"} and str(item.get("google_content_hash", "")).strip()
         ]
-        hashes = list(
-            dict.fromkeys(str(item["google_content_hash"]).strip() for item in imported)
-        )
+        hashes = list(dict.fromkeys(str(item["google_content_hash"]).strip() for item in imported))
         if not hashes:
             return [], 0, 0
 
         matches = self.web.find_remote_matches(hashes)
         matched_hashes = {
-            str(match.get("content_hash", "")).strip()
-            for match in matches
-            if str(match.get("media_key", "")).strip()
+            str(match.get("content_hash", "")).strip() for match in matches if str(match.get("media_key", "")).strip()
         }
         media_keys = list(
             dict.fromkeys(
                 str(match.get("media_key", "")).strip()
                 for match in matches
-                if str(match.get("content_hash", "")).strip() in hashes
-                and str(match.get("media_key", "")).strip()
+                if str(match.get("content_hash", "")).strip() in hashes and str(match.get("media_key", "")).strip()
             )
         )
-        matched_items = sum(
-            str(item["google_content_hash"]).strip() in matched_hashes for item in imported
-        )
+        matched_items = sum(str(item["google_content_hash"]).strip() in matched_hashes for item in imported)
 
         unresolved_photos = [
             Path(str(item.get("local_path", "")))
@@ -717,9 +672,7 @@ class GooglePhotosService:
             target = (destination or self.inbox).resolve()
             existing = self._existing_media(target)
             items = self._list_picked_items(session_id)
-            zip_mode = requested_mode == "zip" or (
-                requested_mode == "automatic" and len(items) >= zip_threshold
-            )
+            zip_mode = requested_mode == "zip" or (requested_mode == "automatic" and len(items) >= zip_threshold)
             self._update_operation(
                 operation_id,
                 status="running",
@@ -737,13 +690,7 @@ class GooglePhotosService:
                         max_workers=min(MAX_CONCURRENT_DOWNLOADS, len(items))
                     ) as executor:
                         futures = {
-                            executor.submit(
-                                self._download_picked_item,
-                                index,
-                                item,
-                                token,
-                                temporary_root,
-                            ): item
+                            executor.submit(self._download_picked_item, index, item, token, temporary_root): item
                             for index, item in enumerate(items)
                         }
                         for future in concurrent.futures.as_completed(futures):
@@ -777,13 +724,10 @@ class GooglePhotosService:
                 self._update_operation(operation_id, phase="organizing_google_photos", organize_status="running")
                 matched_items = 0
                 try:
-                    media_keys, matched_items, importable_items = self._resolve_import_media_keys(
-                        current["files"]
-                    )
+                    media_keys, matched_items, importable_items = self._resolve_import_media_keys(current["files"])
                     if not media_keys:
                         raise GooglePhotosError(
-                            "Downloaded media could not be matched back to Google Photos for "
-                            "album and Archive"
+                            "Downloaded media could not be matched back to Google Photos for album and Archive"
                         )
                     organized = self.web.organize(media_keys, album_title, archive)
                     unmatched_items = importable_items - matched_items
@@ -828,7 +772,7 @@ class GooglePhotosService:
         size = 0
         try:
             with urlopen(request, timeout=120) as response, part.open("wb") as output:
-                while chunk := response.read(4 * 1024 * 1024):
+                while chunk := response.read(CHUNK_COPY_SIZE):
                     output.write(chunk)
                     digest.update(chunk)
                     remote_digest.update(chunk)
@@ -857,9 +801,7 @@ class GooglePhotosService:
                         method="POST",
                         token=token,
                         payload={
-                            "newMediaItems": [
-                                {"simpleMediaItem": {"fileName": path.name, "uploadToken": upload_token}}
-                            ]
+                            "newMediaItems": [{"simpleMediaItem": {"fileName": path.name, "uploadToken": upload_token}}]
                         },
                     )
                     result = (created.get("newMediaItemResults") or [{}])[0]
@@ -873,9 +815,7 @@ class GooglePhotosService:
                 except Exception as exc:
                     self._log_operation_error(operation_id, exc, path.name)
                     self._append_result(
-                        operation_id,
-                        {"filename": path.name, "status": "failed", "error": str(exc)},
-                        False,
+                        operation_id, {"filename": path.name, "status": "failed", "error": str(exc)}, False
                     )
             current = self.operation(operation_id)
             status = "complete" if not current["failed"] else "complete_with_errors"
@@ -884,35 +824,20 @@ class GooglePhotosService:
             self._log_operation_error(operation_id, exc)
             self._update_operation(operation_id, status="failed", error=str(exc))
 
-    def _run_organize(
-        self,
-        operation_id: str,
-        media_keys: list[str],
-        album_title: str,
-        archive: bool,
-    ) -> None:
+    def _run_organize(self, operation_id: str, media_keys: list[str], album_title: str, archive: bool) -> None:
         try:
             self._update_operation(operation_id, status="running")
             result = self.web.organize(media_keys, album_title, archive)
             for item in result["items"]:
                 self._append_result(operation_id, item, True)
             self._update_operation(
-                operation_id,
-                status="complete",
-                album=result["album"],
-                archived=bool(result["archived"]),
+                operation_id, status="complete", album=result["album"], archived=bool(result["archived"])
             )
         except Exception as exc:
             self._log_operation_error(operation_id, exc)
             self._update_operation(operation_id, status="failed", error=str(exc))
 
-    def _run_match_folder(
-        self,
-        operation_id: str,
-        paths: list[Path],
-        album_title: str,
-        archive: bool,
-    ) -> None:
+    def _run_match_folder(self, operation_id: str, paths: list[Path], album_title: str, archive: bool) -> None:
         try:
             self._update_operation(operation_id, status="running")
             paths_by_hash: dict[str, list[Path]] = {}
@@ -942,14 +867,10 @@ class GooglePhotosService:
             matches: list[dict] = []
             for match in self.web.find_remote_matches(list(paths_by_hash)):
                 match["match_method"] = "google_remote_sha1"
-                match["local_files"] = [
-                    str(path) for path in paths_by_hash.get(match["content_hash"], [])
-                ]
+                match["local_files"] = [str(path) for path in paths_by_hash.get(match["content_hash"], [])]
                 matches.append(match)
 
-            byte_matched_paths = {
-                local_file for match in matches for local_file in match.get("local_files", [])
-            }
+            byte_matched_paths = {local_file for match in matches for local_file in match.get("local_files", [])}
             visual_candidates = [
                 path
                 for values in paths_by_hash.values()
@@ -978,12 +899,7 @@ class GooglePhotosService:
                     local_path = Path(local_files[0]) if local_files else None
                     if local_path is not None:
                         match["content_hash"] = next(
-                            (
-                                content_hash
-                                for content_hash, values in paths_by_hash.items()
-                                if local_path in values
-                            ),
-                            "",
+                            (content_hash for content_hash, values in paths_by_hash.items() if local_path in values), ""
                         )
                     match["match_method"] = "visual_content"
                     matches.append(match)
@@ -1002,9 +918,7 @@ class GooglePhotosService:
                     existing["match_method"] += f"+{match['match_method']}"
 
             matches = list(matches_by_media.values())
-            matched_paths = {
-                local_file for match in matches for local_file in match.get("local_files", [])
-            }
+            matched_paths = {local_file for match in matches for local_file in match.get("local_files", [])}
             matched_local_files = len(matched_paths)
             hashed_local_files = sum(len(values) for values in paths_by_hash.values())
             media_keys = list(dict.fromkeys(item["media_key"] for item in matches))
@@ -1031,12 +945,7 @@ class GooglePhotosService:
                 unmatched=hashed_local_files - matched_local_files,
             )
             resolved_album = self.web.ensure_album(album_title)
-            organized = self.web.organize(
-                media_keys,
-                album_title,
-                archive,
-                resolved_album=resolved_album,
-            )
+            organized = self.web.organize(media_keys, album_title, archive, resolved_album=resolved_album)
             album = organized["album"]
             for item in organized["items"]:
                 media_key = item["google_media_key"]
@@ -1075,7 +984,7 @@ class GooglePhotosService:
             connection.putheader("Content-Length", str(path.stat().st_size))
             connection.endheaders()
             with path.open("rb") as source:
-                while chunk := source.read(4 * 1024 * 1024):
+                while chunk := source.read(CHUNK_COPY_SIZE):
                     connection.send(chunk)
             response = connection.getresponse()
             body = response.read()
@@ -1124,7 +1033,9 @@ class GooglePhotosService:
             payload = json.loads(body)
             error = payload.get("error", payload)
             if isinstance(error, dict):
-                return str(error.get("message") or error.get("error_description") or f"Google request failed ({status})")
+                return str(
+                    error.get("message") or error.get("error_description") or f"Google request failed ({status})"
+                )
             return str(error)
         except (json.JSONDecodeError, UnicodeDecodeError):
             return f"Google request failed ({status})"

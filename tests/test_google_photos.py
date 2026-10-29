@@ -14,17 +14,11 @@ from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 
-from kira.google_photos import GooglePhotosService, PICKER_SCOPE, UPLOAD_SCOPE, _google_remote_hash
+from kira.google_photos import PICKER_SCOPE, UPLOAD_SCOPE, GooglePhotosService, _google_remote_hash
 
 
 def _http_error(status: int, body: bytes = b"{}") -> HTTPError:
-    return HTTPError(
-        "https://photospicker.googleapis.com/v1/sessions",
-        status,
-        "error",
-        None,
-        io.BytesIO(body),
-    )
+    return HTTPError("https://photospicker.googleapis.com/v1/sessions", status, "error", None, io.BytesIO(body))
 
 
 def _download_result(content: bytes) -> tuple[int, str, str]:
@@ -45,8 +39,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
         self.data_root.mkdir()
         self.app_root.mkdir()
         (self.app_root / "google-oauth-client.json").write_text(
-            json.dumps({"installed": {"client_id": "client-id", "client_secret": "client-secret"}}),
-            encoding="utf-8",
+            json.dumps({"installed": {"client_id": "client-id", "client_secret": "client-secret"}}), encoding="utf-8"
         )
 
     def service(self) -> GooglePhotosService:
@@ -119,9 +112,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
     def test_health_reports_connected_picker_auth_failure(self) -> None:
         service = self.service()
         service.web.check = lambda: None
-        service._save_tokens(
-            {"access_token": "token", "refresh_token": "refresh", "expires_at": time.time() + 3600}
-        )
+        service._save_tokens({"access_token": "token", "refresh_token": "refresh", "expires_at": time.time() + 3600})
         with patch(
             "kira.google_photos.urlopen",
             side_effect=_http_error(403, b'{"error":{"message":"Photos Picker API has not been used"}}'),
@@ -153,7 +144,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
 
         def download(url, _token, destination):
             urls.append(url)
-            content = f"download-{len(urls)}".encode("utf-8")
+            content = f"download-{len(urls)}".encode()
             destination.write_bytes(content)
             return _download_result(content)
 
@@ -206,42 +197,29 @@ class GooglePhotosServiceTests(unittest.TestCase):
                 "id": f"google-{index}",
                 "createTime": f"2026-08-{index + 1:02d}T12:00:00Z",
                 "type": "PHOTO",
-                "mediaFile": {
-                    "filename": f"IMG_{index}.JPG",
-                    "baseUrl": f"https://photo-{index}",
-                },
+                "mediaFile": {"filename": f"IMG_{index}.JPG", "baseUrl": f"https://photo-{index}"},
             }
             for index in range(3)
         ]
         service._access_token = lambda: "access-token"
 
         def download(url, _token, destination):
-            content = f"bytes:{url}".encode("utf-8")
+            content = f"bytes:{url}".encode()
             destination.write_bytes(content)
             return _download_result(content)
 
         service._download_file = download
         service._request_json = lambda *_args, **_kwargs: {}
         operation = service._new_operation("import", directory=service.inbox)
-        service._run_import(
-            operation["id"],
-            "picker-session",
-            service.inbox,
-            "zip",
-            25,
-        )
+        service._run_import(operation["id"], "picker-session", service.inbox, "zip", 25)
         finished = service.operation(operation["id"])
 
         self.assertEqual(finished["status"], "complete")
         self.assertEqual(finished["download_mode"], "zip")
         self.assertEqual(finished["completed"], 3)
+        self.assertEqual({path.name for path in service.inbox.iterdir()}, {"IMG_0.JPG", "IMG_1.JPG", "IMG_2.JPG"})
         self.assertEqual(
-            {path.name for path in service.inbox.iterdir()},
-            {"IMG_0.JPG", "IMG_1.JPG", "IMG_2.JPG"},
-        )
-        self.assertEqual(
-            {record["google_media_id"] for record in finished["files"]},
-            {"google-0", "google-1", "google-2"},
+            {record["google_media_id"] for record in finished["files"]}, {"google-0", "google-1", "google-2"}
         )
 
     def test_automatic_import_uses_files_below_custom_threshold(self) -> None:
@@ -258,13 +236,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
         service._download_file = download
         service._request_json = lambda *_args, **_kwargs: {}
         operation = service._new_operation("import", directory=service.inbox)
-        service._run_import(
-            operation["id"],
-            "picker-session",
-            service.inbox,
-            "automatic",
-            10,
-        )
+        service._run_import(operation["id"], "picker-session", service.inbox, "automatic", 10)
 
         finished = service.operation(operation["id"])
         self.assertEqual(finished["download_mode"], "files")
@@ -291,13 +263,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
 
         def find_remote_matches(hashes):
             requested_hashes.extend(hashes)
-            return [
-                {
-                    "content_hash": expected_hash,
-                    "media_key": "web-media-key",
-                    "dedup_key": "web-dedup-key",
-                }
-            ]
+            return [{"content_hash": expected_hash, "media_key": "web-media-key", "dedup_key": "web-dedup-key"}]
 
         def organize(media_keys, album_title, archive):
             organized_keys.extend(media_keys)
@@ -309,18 +275,9 @@ class GooglePhotosServiceTests(unittest.TestCase):
 
         service._download_file = download
         service._request_json = lambda *_args, **_kwargs: {}
-        service.web = SimpleNamespace(
-            find_remote_matches=find_remote_matches,
-            organize=organize,
-        )
+        service.web = SimpleNamespace(find_remote_matches=find_remote_matches, organize=organize)
         operation = service._new_operation("import", directory=service.inbox)
-        service._run_import(
-            operation["id"],
-            "picker-session",
-            service.inbox,
-            album_title="Imported trip",
-            archive=True,
-        )
+        service._run_import(operation["id"], "picker-session", service.inbox, album_title="Imported trip", archive=True)
         finished = service.operation(operation["id"])
 
         self.assertEqual(requested_hashes, [expected_hash])
@@ -355,11 +312,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
         service._request_json = lambda *_args, **_kwargs: {}
         service.web = SimpleNamespace(
             find_remote_matches=lambda hashes: [
-                {
-                    "content_hash": hashes[0],
-                    "media_key": "web-duplicate-key",
-                    "dedup_key": "dedup-key",
-                }
+                {"content_hash": hashes[0], "media_key": "web-duplicate-key", "dedup_key": "dedup-key"}
             ],
             organize=lambda media_keys, album_title, archive: (
                 organized_keys.extend(media_keys)
@@ -371,13 +324,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
             ),
         )
         operation = service._new_operation("import", directory=service.inbox)
-        service._run_import(
-            operation["id"],
-            "picker-session",
-            service.inbox,
-            album_title="Duplicates",
-            archive=True,
-        )
+        service._run_import(operation["id"], "picker-session", service.inbox, album_title="Duplicates", archive=True)
         finished = service.operation(operation["id"])
 
         self.assertEqual(finished["duplicates"], 1)
@@ -389,11 +336,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
         service = self.service()
         contents = {"one.jpg": b"one", "two.jpg": b"two"}
         service._list_picked_items = lambda _session_id: [
-            {
-                "id": f"picker-{name}",
-                "type": "PHOTO",
-                "mediaFile": {"filename": name, "baseUrl": f"https://{name}"},
-            }
+            {"id": f"picker-{name}", "type": "PHOTO", "mediaFile": {"filename": name, "baseUrl": f"https://{name}"}}
             for name in contents
         ]
         service._access_token = lambda: "access-token"
@@ -425,13 +368,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
             organize=organize,
         )
         operation = service._new_operation("import", directory=service.inbox)
-        service._run_import(
-            operation["id"],
-            "picker-session",
-            service.inbox,
-            album_title="Incomplete",
-            archive=True,
-        )
+        service._run_import(operation["id"], "picker-session", service.inbox, album_title="Incomplete", archive=True)
         finished = service.operation(operation["id"])
 
         self.assertEqual(organize_calls, [["web-one"]])
@@ -510,13 +447,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
 
         def find_remote_matches(hashes):
             requested_hashes.extend(hashes)
-            return [
-                {
-                    "content_hash": expected_hash,
-                    "media_key": "google-media-1",
-                    "dedup_key": "google-dedup-1",
-                }
-            ]
+            return [{"content_hash": expected_hash, "media_key": "google-media-1", "dedup_key": "google-dedup-1"}]
 
         def organize(media_keys, album_title, archive, resolved_album=None):
             return {
@@ -536,11 +467,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
         service.web = SimpleNamespace(
             find_remote_matches=find_remote_matches,
             find_visual_matches=lambda _paths: ([], []),
-            ensure_album=lambda album_title: {
-                "title": album_title,
-                "media_key": "album-1",
-                "shared": False,
-            },
+            ensure_album=lambda album_title: {"title": album_title, "media_key": "album-1", "shared": False},
             organize=organize,
         )
         operation = service._new_operation("match_folder", total=3)
@@ -585,34 +512,17 @@ class GooglePhotosServiceTests(unittest.TestCase):
 
         service.web = SimpleNamespace(
             find_remote_matches=lambda _hashes: [
-                {
-                    "content_hash": rejected_hash,
-                    "media_key": "google-rejected",
-                    "dedup_key": "dedup-rejected",
-                },
-                {
-                    "content_hash": successful_hash,
-                    "media_key": "google-successful",
-                    "dedup_key": "dedup-successful",
-                },
+                {"content_hash": rejected_hash, "media_key": "google-rejected", "dedup_key": "dedup-rejected"},
+                {"content_hash": successful_hash, "media_key": "google-successful", "dedup_key": "dedup-successful"},
             ],
             find_visual_matches=lambda _paths: ([], []),
-            ensure_album=lambda album_title: {
-                "title": album_title,
-                "media_key": "album-1",
-                "shared": False,
-            },
+            ensure_album=lambda album_title: {"title": album_title, "media_key": "album-1", "shared": False},
             organize=organize,
         )
         operation = service._new_operation("match_folder", total=3)
         terminal = io.StringIO()
         with redirect_stdout(terminal):
-            service._run_match_folder(
-                operation["id"],
-                [unreadable, rejected, successful],
-                "Resilient album",
-                True,
-            )
+            service._run_match_folder(operation["id"], [unreadable, rejected, successful], "Resilient album", True)
         finished = service.operation(operation["id"])
 
         self.assertEqual(finished["status"], "complete_with_errors")
@@ -620,10 +530,7 @@ class GooglePhotosServiceTests(unittest.TestCase):
         self.assertEqual(finished["organized"], 2)
         self.assertEqual(organize_calls, [["google-rejected", "google-successful"]])
         self.assertIn("missing.jpg", terminal.getvalue())
-        self.assertEqual(
-            [item["stage"] for item in finished["files"] if item["status"] == "failed"],
-            ["local_hash"],
-        )
+        self.assertEqual([item["stage"] for item in finished["files"] if item["status"] == "failed"], ["local_hash"])
 
 
 if __name__ == "__main__":

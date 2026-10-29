@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import http.client
 import hashlib
+import http.client
 import json
 import os
 import struct
@@ -12,8 +12,8 @@ import zipfile
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import quote
 from unittest.mock import patch
+from urllib.parse import quote
 
 from PIL import Image
 
@@ -46,10 +46,7 @@ class KiraTransferTests(unittest.TestCase):
 
     def json_request(self, method: str, path: str, payload: dict):
         response, data = self.request(
-            method,
-            path,
-            json.dumps(payload).encode("utf-8"),
-            {"Content-Type": "application/json"},
+            method, path, json.dumps(payload).encode("utf-8"), {"Content-Type": "application/json"}
         )
         return response, json.loads(data)
 
@@ -160,7 +157,15 @@ class KiraTransferTests(unittest.TestCase):
             def resolve_import_destination(self, folder):
                 return Path(folder).resolve() if folder else None
 
-            def start_import(self, session_id, destination=None, download_mode=None, zip_threshold=None, album_title=None, archive=None):
+            def start_import(
+                self,
+                session_id,
+                destination=None,
+                download_mode=None,
+                zip_threshold=None,
+                album_title=None,
+                archive=None,
+            ):
                 self.import_destination = destination
                 return {
                     "id": "import-1",
@@ -273,9 +278,7 @@ class KiraTransferTests(unittest.TestCase):
         self.assertEqual(set(fake.uploaded), {source / "IMG_9000.JPG", source / "clip.mp4"})
 
         response, web_session = self.json_request(
-            "POST",
-            "/api/google/web-session",
-            {"cookies_path": str(source / "cookies.txt"), "account_index": 2},
+            "POST", "/api/google/web-session", {"cookies_path": str(source / "cookies.txt"), "account_index": 2}
         )
         self.assertEqual(response.status, 200)
         self.assertTrue(web_session["connected"])
@@ -290,9 +293,7 @@ class KiraTransferTests(unittest.TestCase):
             self.assertEqual(response.status, 403)
 
         response, invalid_account = self.json_request(
-            "POST",
-            "/api/google/web-session",
-            {"cookies_path": str(source / "cookies.txt"), "account_index": None},
+            "POST", "/api/google/web-session", {"cookies_path": str(source / "cookies.txt"), "account_index": None}
         )
         self.assertEqual(response.status, 400)
         self.assertIn("account_index", invalid_account["error"])
@@ -313,18 +314,14 @@ class KiraTransferTests(unittest.TestCase):
         self.assertEqual(set(fake.matched_folder[0]), {source / "IMG_9000.JPG", source / "clip.mp4"})
 
         response, organized = self.json_request(
-            "POST",
-            "/api/google/organize",
-            {"media_ids": ["media-1"], "album_title": "Trips", "archive": True},
+            "POST", "/api/google/organize", {"media_ids": ["media-1"], "album_title": "Trips", "archive": True}
         )
         self.assertEqual(response.status, 202)
         self.assertEqual(organized["id"], "organize-1")
         self.assertEqual(fake.organized, (["media-1"], "Trips", True))
 
         response, invalid = self.json_request(
-            "POST",
-            "/api/google/organize",
-            {"media_ids": ["media-1"], "album_title": "Trips", "archive": "false"},
+            "POST", "/api/google/organize", {"media_ids": ["media-1"], "album_title": "Trips", "archive": "false"}
         )
         self.assertEqual(response.status, 400)
         self.assertIn("boolean", invalid["error"])
@@ -350,10 +347,7 @@ class KiraTransferTests(unittest.TestCase):
         source = Path(self.temp.name) / "dated-photos"
         source.mkdir()
         Image.new("RGB", (24, 18), (10, 20, 30)).save(
-            source / "stamped.jpg",
-            format="JPEG",
-            quality=90,
-            exif=self._exif_blob("2024:06:15 09:30:00"),
+            source / "stamped.jpg", format="JPEG", quality=90, exif=self._exif_blob("2024:06:15 09:30:00")
         )
         fallback = source / "fallback.jpg"
         Image.new("RGB", (24, 18), (40, 50, 60)).save(fallback, format="JPEG", quality=90)
@@ -386,14 +380,19 @@ class KiraTransferTests(unittest.TestCase):
         response, started = self.json_request(
             "POST",
             f"/api/jobs/{job_id}/uploads/start",
-            {"kind": kind, "filename": filename, "size": len(content), "last_modified": last_modified,
-             "sha256": hashlib.sha256(content).hexdigest()},
+            {
+                "kind": kind,
+                "filename": filename,
+                "size": len(content),
+                "last_modified": last_modified,
+                "sha256": hashlib.sha256(content).hexdigest(),
+            },
         )
         self.assertEqual(response.status, 200)
         upload_id = started["upload_id"]
         split = max(1, len(content) // 2)
         offset = started["offset"]
-        for chunk in (content[offset:split], content[max(offset, split):]):
+        for chunk in (content[offset:split], content[max(offset, split) :]):
             if not chunk:
                 continue
             response, raw = self.request(
@@ -404,18 +403,13 @@ class KiraTransferTests(unittest.TestCase):
             )
             self.assertEqual(response.status, 200, raw)
             offset = json.loads(raw)["offset"]
-        response, completed = self.json_request(
-            "POST", f"/api/jobs/{job_id}/uploads/{upload_id}/complete", {}
-        )
+        response, completed = self.json_request("POST", f"/api/jobs/{job_id}/uploads/{upload_id}/complete", {})
         self.assertEqual(response.status, 200)
         return completed
 
     def test_pairing_rejects_wrong_code_and_accepts_current_code(self) -> None:
         self.connection.request(
-            "POST",
-            "/api/pair",
-            body=b'{"code":"000000"}',
-            headers={"Content-Type": "application/json"},
+            "POST", "/api/pair", body=b'{"code":"000000"}', headers={"Content-Type": "application/json"}
         )
         wrong = self.connection.getresponse()
         wrong.read()
@@ -467,9 +461,7 @@ class KiraTransferTests(unittest.TestCase):
         record = self.server.store.get_job(job_id)["files"][0]
 
         response, downloaded = self.request(
-            "GET",
-            f"/api/jobs/{job_id}/files/{record['id']}/download",
-            headers={"Range": "bytes=10-99"},
+            "GET", f"/api/jobs/{job_id}/files/{record['id']}/download", headers={"Range": "bytes=10-99"}
         )
         self.assertEqual(response.status, 206)
         self.assertEqual(downloaded, content[10:100])
@@ -517,8 +509,13 @@ class KiraTransferTests(unittest.TestCase):
         _, started = self.json_request(
             "POST",
             f"/api/jobs/{job_id}/uploads/start",
-            {"kind": "returns", "filename": "resume.nef", "size": len(content), "last_modified": 9,
-             "sha256": hashlib.sha256(content).hexdigest()},
+            {
+                "kind": "returns",
+                "filename": "resume.nef",
+                "size": len(content),
+                "last_modified": 9,
+                "sha256": hashlib.sha256(content).hexdigest(),
+            },
         )
         upload_id = started["upload_id"]
         response, _ = self.request(
@@ -531,8 +528,13 @@ class KiraTransferTests(unittest.TestCase):
         _, resumed = self.json_request(
             "POST",
             f"/api/jobs/{job_id}/uploads/start",
-            {"kind": "returns", "filename": "resume.nef", "size": len(content), "last_modified": 9,
-             "sha256": hashlib.sha256(content).hexdigest()},
+            {
+                "kind": "returns",
+                "filename": "resume.nef",
+                "size": len(content),
+                "last_modified": 9,
+                "sha256": hashlib.sha256(content).hexdigest(),
+            },
         )
         self.assertEqual(resumed["offset"], 4)
 
@@ -541,8 +543,13 @@ class KiraTransferTests(unittest.TestCase):
         _, started = self.json_request(
             "POST",
             f"/api/jobs/{job_id}/uploads/start",
-            {"kind": "returns", "filename": "conflict.cr3", "size": 8, "last_modified": 10,
-             "sha256": hashlib.sha256(b"12345678").hexdigest()},
+            {
+                "kind": "returns",
+                "filename": "conflict.cr3",
+                "size": 8,
+                "last_modified": 10,
+                "sha256": hashlib.sha256(b"12345678").hexdigest(),
+            },
         )
         upload_id = started["upload_id"]
         response, _ = self.request(
@@ -565,8 +572,13 @@ class KiraTransferTests(unittest.TestCase):
         response, resumed = self.json_request(
             "POST",
             f"/api/jobs/{job_id}/uploads/start",
-            {"kind": "returns", "filename": "conflict.cr3", "size": 8, "last_modified": 10,
-             "sha256": hashlib.sha256(b"12345678").hexdigest()},
+            {
+                "kind": "returns",
+                "filename": "conflict.cr3",
+                "size": 8,
+                "last_modified": 10,
+                "sha256": hashlib.sha256(b"12345678").hexdigest(),
+            },
         )
         self.assertEqual(response.status, 200)
         self.assertEqual(resumed["offset"], 4)
@@ -618,10 +630,7 @@ class KiraTransferTests(unittest.TestCase):
         self.assertEqual(result["status"], "complete")
         self.assertEqual((source / "selected" / "raw" / "IMG_0001.CR3").read_bytes(), b"selected-raw")
         self.assertEqual((source / "selected" / "raw" / "IMG_0002.CR3").read_bytes(), b"unselected-raw")
-        self.assertEqual(
-            (source / "selected" / "pre-edit" / "IMG_0001.JPG").read_bytes(),
-            b"selected-camera-jpeg",
-        )
+        self.assertEqual((source / "selected" / "pre-edit" / "IMG_0001.JPG").read_bytes(), b"selected-camera-jpeg")
         self.assertEqual((source / "unselected_jpeg" / "IMG_0002.JPG").read_bytes(), b"unselected-camera-jpeg")
         extracted = next((source / "selected").rglob("IMG_0001.jpg"))
         self.assertEqual(extracted.read_bytes(), b"lightroom-edit")
@@ -659,11 +668,7 @@ class KiraTransferTests(unittest.TestCase):
         response, moved = self.json_request(
             "POST",
             "/api/local/move",
-            {
-                "source_directory": str(source),
-                "destination_directory": str(destination),
-                "asset_ids": [asset["id"]],
-            },
+            {"source_directory": str(source), "destination_directory": str(destination), "asset_ids": [asset["id"]]},
         )
         self.assertEqual(response.status, 200)
         self.assertEqual(moved["moved_assets"], 1)
@@ -686,11 +691,7 @@ class KiraTransferTests(unittest.TestCase):
         response, body = self.json_request(
             "POST",
             "/api/local/move",
-            {
-                "source_directory": str(source),
-                "destination_directory": str(destination),
-                "asset_ids": [asset["id"]],
-            },
+            {"source_directory": str(source), "destination_directory": str(destination), "asset_ids": [asset["id"]]},
         )
         self.assertEqual(response.status, 409)
         self.assertIn("already exists", body["error"])
@@ -708,13 +709,9 @@ class KiraTransferTests(unittest.TestCase):
         )
         self.assertEqual(response.status, 201)
         self.assertTrue((parent / "new folder").is_dir())
-        response, _ = self.json_request(
-            "POST", "/api/local/mkdir", {"parent_path": str(parent), "name": "new folder"}
-        )
+        response, _ = self.json_request("POST", "/api/local/mkdir", {"parent_path": str(parent), "name": "new folder"})
         self.assertEqual(response.status, 409)
-        response, _ = self.json_request(
-            "POST", "/api/local/mkdir", {"parent_path": str(parent), "name": "con"}
-        )
+        response, _ = self.json_request("POST", "/api/local/mkdir", {"parent_path": str(parent), "name": "con"})
         self.assertEqual(response.status, 400)
 
         response, renamed = self.json_request(
@@ -728,9 +725,7 @@ class KiraTransferTests(unittest.TestCase):
             "POST", "/api/local/rename", {"path": str(parent / "vacation"), "name": "clash"}
         )
         self.assertEqual(response.status, 409)
-        response, body = self.json_request(
-            "POST", "/api/local/rename", {"path": drive_root, "name": "nope"}
-        )
+        response, body = self.json_request("POST", "/api/local/rename", {"path": drive_root, "name": "nope"})
         self.assertEqual(response.status, 400)
 
         doomed = parent / "doomed"
@@ -774,10 +769,7 @@ class KiraTransferTests(unittest.TestCase):
             self.assertEqual(archive.namelist(), ["DSC_0100.JPG"])
             self.assertEqual(archive.read("DSC_0100.JPG"), b"camera-jpeg")
         verified = self.server.store.get_job(job["id"])
-        self.assertEqual(
-            verified["files"][0]["sha256"],
-            __import__("hashlib").sha256(b"camera-jpeg").hexdigest(),
-        )
+        self.assertEqual(verified["files"][0]["sha256"], __import__("hashlib").sha256(b"camera-jpeg").hexdigest())
 
     def test_video_only_selection_is_bundled_for_ipad(self) -> None:
         source = Path(self.temp.name) / "video-source"
@@ -850,10 +842,7 @@ class KiraTransferTests(unittest.TestCase):
         image = Image.new("RGB", (3000, 2000), color=(43, 91, 137))
         image.save(source, format="JPEG", quality=96)
 
-        response, thumbnail = self.request(
-            "GET",
-            f"/api/local/preview?path={quote(str(source))}&size=480",
-        )
+        response, thumbnail = self.request("GET", f"/api/local/preview?path={quote(str(source))}&size=480")
         self.assertEqual(response.status, 200)
         self.assertEqual(response.getheader("Content-Type"), "image/jpeg")
         self.assertIn("max-age=3600", response.getheader("Cache-Control"))
@@ -884,12 +873,7 @@ class KiraTransferTests(unittest.TestCase):
         response, grouped = self.json_request(
             "POST",
             "/api/local/cull",
-            {
-                "source_directory": str(source),
-                "asset_ids": ids,
-                "action": "group",
-                "group_name": "Bridge burst",
-            },
+            {"source_directory": str(source), "asset_ids": ids, "action": "group", "group_name": "Bridge burst"},
         )
         self.assertEqual(response.status, 200)
         group = source / "compare_groups" / "Bridge burst"
@@ -904,13 +888,7 @@ class KiraTransferTests(unittest.TestCase):
         group_scan = json.loads(raw)
         first, second = group_scan["assets"]
         response, selected = self.json_request(
-            "POST",
-            "/api/local/cull",
-            {
-                "source_directory": str(group),
-                "asset_ids": [first["id"]],
-                "action": "select",
-            },
+            "POST", "/api/local/cull", {"source_directory": str(group), "asset_ids": [first["id"]], "action": "select"}
         )
         self.assertEqual(response.status, 200)
         selected_stem = first["stem"]
@@ -920,11 +898,7 @@ class KiraTransferTests(unittest.TestCase):
         response, eliminated = self.json_request(
             "POST",
             "/api/local/cull",
-            {
-                "source_directory": str(group),
-                "asset_ids": [second["id"]],
-                "action": "unselect",
-            },
+            {"source_directory": str(group), "asset_ids": [second["id"]], "action": "unselect"},
         )
         self.assertEqual(response.status, 200)
         eliminated_stem = second["stem"]
@@ -940,11 +914,7 @@ class KiraTransferTests(unittest.TestCase):
         response, restored = self.json_request(
             "POST",
             "/api/local/cull",
-            {
-                "source_directory": str(unselect),
-                "asset_ids": [eliminated_asset["id"]],
-                "action": "restore",
-            },
+            {"source_directory": str(unselect), "asset_ids": [eliminated_asset["id"]], "action": "restore"},
         )
         self.assertEqual(response.status, 200)
         self.assertEqual(restored["destination"], str(source))
@@ -971,12 +941,7 @@ class KiraTransferTests(unittest.TestCase):
         response, result = self.json_request(
             "POST",
             "/api/local/cull",
-            {
-                "source_directory": str(source),
-                "asset_ids": [asset["id"]],
-                "action": "group",
-                "group_name": "baker",
-            },
+            {"source_directory": str(source), "asset_ids": [asset["id"]], "action": "group", "group_name": "baker"},
         )
 
         self.assertEqual(response.status, 200)
@@ -1003,12 +968,7 @@ class KiraTransferTests(unittest.TestCase):
         response, result = self.json_request(
             "POST",
             "/api/local/cull",
-            {
-                "source_directory": str(source),
-                "asset_ids": [asset["id"]],
-                "action": "group",
-                "group_name": "baker",
-            },
+            {"source_directory": str(source), "asset_ids": [asset["id"]], "action": "group", "group_name": "baker"},
         )
 
         self.assertEqual(response.status, 200)
@@ -1023,20 +983,10 @@ class KiraTransferTests(unittest.TestCase):
     def _gradient_scene(size: tuple[int, int], warm: bool) -> Image.Image:
         image = Image.new("RGB", size)
         if warm:
-            image.putdata(
-                [
-                    (240 - (x + y) % 50, x % 140, y % 80)
-                    for y in range(size[1])
-                    for x in range(size[0])
-                ]
-            )
+            image.putdata([(240 - (x + y) % 50, x % 140, y % 80) for y in range(size[1]) for x in range(size[0])])
         else:
             image.putdata(
-                [
-                    (x % 80, (y * 2) % 120 + 60, 255 - (x + y) % 60)
-                    for y in range(size[1])
-                    for x in range(size[0])
-                ]
+                [(x % 80, (y * 2) % 120 + 60, 255 - (x + y) % 60) for y in range(size[1]) for x in range(size[0])]
             )
         return image
 
@@ -1059,9 +1009,7 @@ class KiraTransferTests(unittest.TestCase):
             image.save(source / f"{name}.JPG", format="JPEG", quality=92)
 
         response, result = self.json_request(
-            "POST",
-            "/api/local/compare-groups",
-            {"source_directory": str(source), "min_group_size": 3},
+            "POST", "/api/local/compare-groups", {"source_directory": str(source), "min_group_size": 3}
         )
 
         self.assertEqual(response.status, 200)
@@ -1070,19 +1018,13 @@ class KiraTransferTests(unittest.TestCase):
         cool_group = source / "compare_groups" / created[0]
         warm_group = source / "compare_groups" / created[1]
         self.assertEqual(
-            sorted(path.name for path in cool_group.iterdir()),
-            ["DSC0100.JPG", "DSC0101.JPG", "DSC0102.JPG"],
+            sorted(path.name for path in cool_group.iterdir()), ["DSC0100.JPG", "DSC0101.JPG", "DSC0102.JPG"]
         )
         self.assertEqual(
-            sorted(path.name for path in warm_group.iterdir()),
-            ["DSC0200.JPG", "DSC0201.JPG", "DSC0202.JPG"],
+            sorted(path.name for path in warm_group.iterdir()), ["DSC0200.JPG", "DSC0201.JPG", "DSC0202.JPG"]
         )
         self.assertTrue((source / "DSC0300.JPG").exists())
-        group_roles = [
-            folder
-            for folder in result["culling"]["folders"]
-            if folder["role"] == "group"
-        ]
+        group_roles = [folder for folder in result["culling"]["folders"] if folder["role"] == "group"]
         self.assertEqual(len(group_roles), 2)
         self.assertEqual(result["compared_photos"], 7)
 
@@ -1092,15 +1034,12 @@ class KiraTransferTests(unittest.TestCase):
         Image.new("RGB", (40, 40), (5, 5, 200)).save(source / "ONLY.JPG")
 
         response, result = self.json_request(
-            "POST",
-            "/api/local/compare-groups",
-            {"source_directory": str(source), "min_group_size": 1},
+            "POST", "/api/local/compare-groups", {"source_directory": str(source), "min_group_size": 1}
         )
 
         self.assertEqual(response.status, 400)
         self.assertIn("Minimum group size", result["error"])
         self.assertTrue((source / "ONLY.JPG").exists())
-
 
     def test_permanent_history_and_restore_survive_job_cleanup(self) -> None:
         job_id = self.create_job()
@@ -1116,19 +1055,20 @@ class KiraTransferTests(unittest.TestCase):
         restored_folder.mkdir()
         # Restore adds a copy without overwriting an existing name.
         (restored_folder / "saved.jpg").write_bytes(b"other image")
-        response, restored = self.json_request("POST", "/api/local/restore", {
-            "revision_id": revision["id"], "directory": str(restored_folder),
-        })
+        response, restored = self.json_request(
+            "POST", "/api/local/restore", {"revision_id": revision["id"], "directory": str(restored_folder)}
+        )
         self.assertEqual(response.status, 201)
         self.assertEqual(Path(restored["path"]).read_bytes(), b"saved export")
         self.assertEqual((restored_folder / "saved.jpg").read_bytes(), b"other image")
         from kira.api import KiraRequestHandler
+
         with patch.object(KiraRequestHandler, "_is_loopback", return_value=False):
             response, _ = self.request("GET", "/api/local/history")
             self.assertEqual(response.status, 403)
-            response, _ = self.json_request("POST", "/api/local/restore", {
-                "revision_id": revision["id"], "directory": str(restored_folder),
-            })
+            response, _ = self.json_request(
+                "POST", "/api/local/restore", {"revision_id": revision["id"], "directory": str(restored_folder)}
+            )
             self.assertEqual(response.status, 403)
 
 

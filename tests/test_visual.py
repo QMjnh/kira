@@ -1,4 +1,5 @@
 """Tests for the shared visual similarity core and compare-group clustering."""
+
 from __future__ import annotations
 
 import struct
@@ -22,20 +23,10 @@ from kira.visual import (
 def scene(size: tuple[int, int], warm: bool) -> Image.Image:
     image = Image.new("RGB", size)
     if warm:
-        image.putdata(
-            [
-                (240 - (x + y) % 50, x % 140, y % 80)
-                for y in range(size[1])
-                for x in range(size[0])
-            ]
-        )
+        image.putdata([(240 - (x + y) % 50, x % 140, y % 80) for y in range(size[1]) for x in range(size[0])])
     else:
         image.putdata(
-            [
-                (x % 80, (y * 2) % 120 + 60, 255 - (x + y) % 60)
-                for y in range(size[1])
-                for x in range(size[0])
-            ]
+            [(x % 80, (y * 2) % 120 + 60, 255 - (x + y) % 60) for y in range(size[1]) for x in range(size[0])]
         )
     return image
 
@@ -86,10 +77,7 @@ class VisualClusterTests(unittest.TestCase):
 
     def test_exact_pixel_copies_share_one_cluster(self) -> None:
         cool = scene((96, 96), warm=False)
-        entries = [
-            self._signed_scene("copy-one", cool),
-            self._signed_scene("copy-two", cool.copy()),
-        ]
+        entries = [self._signed_scene("copy-one", cool), self._signed_scene("copy-two", cool.copy())]
 
         clusters = cluster_signatures(entries)
 
@@ -140,34 +128,23 @@ class VisualClusterTests(unittest.TestCase):
         copy = ("copy", self._timed("2026:04:03 11:00:00", b"f", difference_hash=0xF0F0F0F0))
         self.assertEqual(len(cluster_signatures([original, copy])), 1)
 
-        variant = ("variant", self._timed(
-            "2026:04:03 11:00:00", b"g", perceptual_hash=10, difference_hash=0x0F0F0F0F
-        ))
+        variant = ("variant", self._timed("2026:04:03 11:00:00", b"g", perceptual_hash=10, difference_hash=0x0F0F0F0F))
         self.assertEqual(len(cluster_signatures([original, variant])), 2)
 
     def test_untimed_entries_are_never_time_gated(self) -> None:
-        entries = [
-            ("untimed", self._timed(None, b"h")),
-            ("timed-late", self._timed("2026:04:05 20:00:00", b"i")),
-        ]
+        entries = [("untimed", self._timed(None, b"h")), ("timed-late", self._timed("2026:04:05 20:00:00", b"i"))]
         self.assertEqual(len(cluster_signatures(entries)), 1)
 
     def test_image_signature_reads_capture_time_from_exif_sub_ifd(self) -> None:
         path = self.root / "stamped.jpg"
-        Image.new("RGB", (48, 32), (90, 110, 130)).save(
-            path, quality=90, exif=self._exif_blob("2026:04:03 12:25:49")
-        )
+        Image.new("RGB", (48, 32), (90, 110, 130)).save(path, quality=90, exif=self._exif_blob("2026:04:03 12:25:49"))
 
         signature = image_signature(path)
 
         self.assertEqual(signature["capture_time"], "2026:04:03 12:25:49")
 
     def _timed(
-        self,
-        capture_time: str | None,
-        token: bytes,
-        perceptual_hash: int = 0,
-        difference_hash: int = 0xF0F0F0F0,
+        self, capture_time: str | None, token: bytes, perceptual_hash: int = 0, difference_hash: int = 0xF0F0F0F0
     ) -> dict:
         return {
             "width": 100,

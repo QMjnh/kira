@@ -1,4 +1,5 @@
 """Kira entry point: argument parsing and server startup."""
+
 from __future__ import annotations
 
 import argparse
@@ -8,9 +9,9 @@ from pathlib import Path
 
 from . import APP_VERSION
 from .api import KiraHTTPServer, discover_local_ip
+from .errors import KiraError
 from .store import KiraStore
 from .writer import WriterLease
-from .errors import KiraError
 
 STATIC_ROOT = Path(__file__).resolve().parent.parent / "web"
 

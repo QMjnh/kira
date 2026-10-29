@@ -19,13 +19,17 @@ class GoogleSignInBrowserTests(unittest.TestCase):
             connection.recv.return_value = json.dumps({"id": 1, "result": {}})
 
             def launch(arguments, **_kwargs):
-                profile = Path(next(value.split("=", 1)[1] for value in arguments if value.startswith("--user-data-dir=")))
+                profile = Path(
+                    next(value.split("=", 1)[1] for value in arguments if value.startswith("--user-data-dir="))
+                )
                 (profile / "DevToolsActivePort").write_text("12345\n/devtools/browser/test\n", encoding="utf-8")
                 return process
 
-            with patch("kira.google_signin.find_browser", return_value="chrome.exe"), \
-                 patch("kira.google_signin.subprocess.Popen", side_effect=launch) as launcher, \
-                 patch("kira.google_signin.websocket.create_connection", return_value=connection) as connect:
+            with (
+                patch("kira.google_signin.find_browser", return_value="chrome.exe"),
+                patch("kira.google_signin.subprocess.Popen", side_effect=launch) as launcher,
+                patch("kira.google_signin.websocket.create_connection", return_value=connection) as connect,
+            ):
                 with GoogleSignInBrowser(Path(directory), Event()) as browser:
                     profile = Path(browser.profile.name)
                     self.assertTrue(profile.is_dir())
@@ -40,14 +44,18 @@ class GoogleSignInBrowserTests(unittest.TestCase):
 
     def test_collects_only_google_cookies_and_detects_selected_account(self) -> None:
         browser = GoogleSignInBrowser(Path("."), Event())
-        browser.command = Mock(side_effect=[
-            {"targetInfos": [{"type": "page", "url": "https://photos.google.com/u/2/"}]},
-            {"cookies": [
-                {"domain": ".google.com", "name": "SID", "value": "test-session", "expires": 2_000_000_000},
-                {"domain": ".example.com", "name": "unrelated", "value": "private"},
-                {"domain": "notgoogle.com", "name": "unrelated", "value": "private"},
-            ]},
-        ])
+        browser.command = Mock(
+            side_effect=[
+                {"targetInfos": [{"type": "page", "url": "https://photos.google.com/u/2/"}]},
+                {
+                    "cookies": [
+                        {"domain": ".google.com", "name": "SID", "value": "test-session", "expires": 2_000_000_000},
+                        {"domain": ".example.com", "name": "unrelated", "value": "private"},
+                        {"domain": "notgoogle.com", "name": "unrelated", "value": "private"},
+                    ]
+                },
+            ]
+        )
         cookies, account = browser.session()
         self.assertEqual(account, 2)
         self.assertEqual(len(cookies), 1)
@@ -55,16 +63,22 @@ class GoogleSignInBrowserTests(unittest.TestCase):
 
     def test_does_not_accept_a_similar_hostname_or_signed_out_page(self) -> None:
         browser = GoogleSignInBrowser(Path("."), Event())
-        browser.command = Mock(return_value={"targetInfos": [
-            {"type": "page", "url": "https://photos.google.com.example.com/"},
-            {"type": "page", "url": "https://accounts.google.com/"},
-        ]})
+        browser.command = Mock(
+            return_value={
+                "targetInfos": [
+                    {"type": "page", "url": "https://photos.google.com.example.com/"},
+                    {"type": "page", "url": "https://accounts.google.com/"},
+                ]
+            }
+        )
         self.assertIsNone(browser.session())
         browser.command.assert_called_once_with("Target.getTargets")
-        browser.command = Mock(side_effect=[
-            {"targetInfos": [{"type": "page", "url": "https://photos.google.com/"}]},
-            {"cookies": [{"domain": ".google.com", "name": "CONSENT", "value": "test"}]},
-        ])
+        browser.command = Mock(
+            side_effect=[
+                {"targetInfos": [{"type": "page", "url": "https://photos.google.com/"}]},
+                {"cookies": [{"domain": ".google.com", "name": "CONSENT", "value": "test"}]},
+            ]
+        )
         self.assertIsNone(browser.session())
 
     def test_protocol_ignores_events_and_does_not_expose_error_details(self) -> None:
