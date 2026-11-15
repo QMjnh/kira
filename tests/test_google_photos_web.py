@@ -4,13 +4,11 @@ import json
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from PIL import Image
-
-from kira import visual
 from kira.google_photos_web import GooglePhotosWebError, GooglePhotosWebService
 from kira.google_signin import GoogleSignInError
 
@@ -114,10 +112,7 @@ class FakeClient:
                         + (
                             [
                                 SimpleNamespace(
-                                    media_key="album-2",
-                                    title=self.album_title,
-                                    item_count=2,
-                                    is_shared=False,
+                                    media_key="album-2", title=self.album_title, item_count=2, is_shared=False
                                 )
                             ]
                             if type(self).duplicate_existing_album
@@ -133,19 +128,14 @@ class FakeClient:
                 if archived and type(self).archive_visibility_delay:
                     type(self).archive_visibility_delay -= 1
                     archived = False
-                data = SimpleNamespace(
-                    dedup_key=f"dedup:{payload.media_key}",
-                    is_archived=archived,
-                )
+                data = SimpleNamespace(dedup_key=f"dedup:{payload.media_key}", is_archived=archived)
             elif payload.kind == "info_ext":
                 album_visible = self.added_album
                 if album_visible and type(self).membership_visibility_delay:
                     type(self).membership_visibility_delay -= 1
                     album_visible = False
                 data = SimpleNamespace(
-                    albums=[SimpleNamespace(media_key="album-1", title=self.album_title)]
-                    if album_visible
-                    else []
+                    albums=[SimpleNamespace(media_key="album-1", title=self.album_title)] if album_visible else []
                 )
             elif payload.kind == "create_album":
                 self.album_exists = True
@@ -161,11 +151,7 @@ class FakeClient:
                 data = []
             elif payload.kind == "remote_matches":
                 data = [
-                    SimpleNamespace(
-                        hash=value,
-                        media_key=f"media:{value}",
-                        dedup_key=f"dedup:{value}",
-                    )
+                    SimpleNamespace(hash=value, media_key=f"media:{value}", dedup_key=f"dedup:{value}")
                     for value in payload.hashes
                     if not value.startswith("missing")
                 ]
@@ -182,8 +168,7 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         self.service = GooglePhotosWebService(self.root, FakeClient, FakePayloads)
         self.cookies = self.root / "cookies.txt"
         self.cookies.write_text(
-            "# Netscape HTTP Cookie File\n.google.com\tTRUE\t/\tTRUE\t0\tSID\tsecret-session\n",
-            encoding="utf-8",
+            "# Netscape HTTP Cookie File\n.google.com\tTRUE\t/\tTRUE\t0\tSID\tsecret-session\n", encoding="utf-8"
         )
         FakeClient.instances.clear()
         FakeClient.include_existing_album = True
@@ -197,11 +182,17 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_browser_sign_in_verifies_and_encrypts_the_session(self) -> None:
-        browser = SimpleNamespace(session=lambda: ([{
-            "domain": ".google.com", "name": "SID", "value": "automatic-session", "session": True,
-        }], 2))
-        with patch("kira.google_photos_web.find_browser", return_value="chrome.exe"), \
-             patch("kira.google_photos_web.GoogleSignInBrowser") as factory:
+        browser = SimpleNamespace(
+            wait_until_closed=lambda _deadline: True,
+            session=lambda: (
+                [{"domain": ".google.com", "name": "SID", "value": "automatic-session", "session": True}],
+                2,
+            ),
+        )
+        with (
+            patch("kira.google_photos_web.find_browser", return_value="chrome.exe"),
+            patch("kira.google_photos_web.GoogleSignInBrowser") as factory,
+        ):
             factory.return_value.__enter__.return_value = browser
             self.service.start_sign_in()
             self.service._signin_thread.join(timeout=3)
@@ -211,11 +202,35 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         self.assertNotIn("automatic-session", self.service.session_path.read_text(encoding="utf-8"))
         self.assertEqual(list(self.root.glob(".kira-google-web-*.txt")), [])
 
+    def test_cookies_google_rotates_are_saved_back_into_the_session(self) -> None:
+        from http.cookiejar import Cookie
+
+        def cookie(domain: str, name: str, value: str) -> Cookie:
+            return Cookie(0, name, value, None, False, domain, True, True, "/", True, True, None, False, None, None, {})
+
+        self.service.import_session(self.cookies)
+        before = self.service.session_path.read_text(encoding="utf-8")
+        self.assertFalse(self.service._save_cookies([cookie(".google.com", "SID", "secret-session")]))
+        self.assertEqual(self.service.session_path.read_text(encoding="utf-8"), before)
+        rotated = [cookie(".google.com", "__Secure-1PSIDTS", "fresh"), cookie(".example.com", "SID", "foreign")]
+        self.assertTrue(self.service._save_cookies(rotated))
+        self.assertNotIn("fresh", self.service.session_path.read_text(encoding="utf-8"))
+        raw, _ = self.service._load_session()
+        self.assertIn(b"__Secure-1PSIDTS	fresh", raw)
+        self.assertIn(b"SID	secret-session", raw)
+        self.assertNotIn(b"foreign", raw)
+        self.assertEqual(self.service.status()["account_index"], 0)
+        self.assertFalse(self.service.refresh_session(force=True))  # an injected client never calls Google
+
     def test_disconnect_during_verification_cannot_restore_the_connection(self) -> None:
         verifying, release = threading.Event(), threading.Event()
-        browser = SimpleNamespace(session=lambda: ([{
-            "domain": ".google.com", "name": "SID", "value": "cancelled-session", "session": True,
-        }], 0))
+        browser = SimpleNamespace(
+            wait_until_closed=lambda _deadline: True,
+            session=lambda: (
+                [{"domain": ".google.com", "name": "SID", "value": "cancelled-session", "session": True}],
+                0,
+            ),
+        )
         verify = self.service._verified_session
 
         def delayed_verification(*args):
@@ -224,9 +239,11 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
             release.wait(3)
             return wrapper
 
-        with patch("kira.google_photos_web.find_browser", return_value="chrome.exe"), \
-             patch("kira.google_photos_web.GoogleSignInBrowser") as factory, \
-             patch.object(self.service, "_verified_session", side_effect=delayed_verification):
+        with (
+            patch("kira.google_photos_web.find_browser", return_value="chrome.exe"),
+            patch("kira.google_photos_web.GoogleSignInBrowser") as factory,
+            patch.object(self.service, "_verified_session", side_effect=delayed_verification),
+        ):
             factory.return_value.__enter__.return_value = browser
             self.service.start_sign_in()
             try:
@@ -244,8 +261,10 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
     def test_browser_failure_leaves_existing_connection_intact(self) -> None:
         self.service.import_session(self.cookies)
         stored = self.service.session_path.read_bytes()
-        with patch("kira.google_photos_web.find_browser", return_value="chrome.exe"), \
-             patch("kira.google_photos_web.GoogleSignInBrowser") as factory:
+        with (
+            patch("kira.google_photos_web.find_browser", return_value="chrome.exe"),
+            patch("kira.google_photos_web.GoogleSignInBrowser") as factory,
+        ):
             factory.return_value.__enter__.side_effect = GoogleSignInError("Browser could not open.")
             self.service.start_sign_in()
             self.service._signin_thread.join(timeout=3)
@@ -286,12 +305,7 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
                             "session": False,
                             "value": "json-secret-session",
                         },
-                        {
-                            "domain": ".example.com",
-                            "name": "unrelated",
-                            "path": "/",
-                            "value": "excluded-secret",
-                        },
+                        {"domain": ".example.com", "name": "unrelated", "path": "/", "value": "excluded-secret"},
                     ]
                 }
             ),
@@ -324,116 +338,6 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         self.assertEqual([item["content_hash"] for item in matches], ["hash-a", "hash-c"])
         calls = [call for call in FakeClient.instances[-1].calls if call.kind == "remote_matches"]
         self.assertEqual([call.hashes for call in calls], [["hash-a", "missing-b"], ["hash-c"]])
-
-    def test_visual_signature_matches_reencoded_image_content(self) -> None:
-        first = self.root / "first.jpg"
-        second = self.root / "renamed.jpg"
-        image = Image.new("RGB", (128, 96))
-        image.putdata(
-            [
-                ((x * 2) % 256, (y * 3) % 256, (x + y) % 256)
-                for y in range(96)
-                for x in range(128)
-            ]
-        )
-        image.save(first, quality=96)
-        image.save(second, quality=78)
-
-        left = visual.image_signature(first)
-        right = visual.image_signature(second)
-        color, perceptual = visual.signature_distance(left, right)
-
-        self.assertEqual((left["width"], left["height"]), (128, 96))
-        self.assertLessEqual(color, visual.VISUAL_COLOR_THRESHOLD)
-        self.assertLessEqual(perceptual, visual.VISUAL_HASH_THRESHOLD)
-
-    @staticmethod
-    def _scene(size: tuple[int, int], warm: bool) -> Image.Image:
-        image = Image.new("RGB", size)
-        if warm:
-            image.putdata(
-                [
-                    (240 - (x + y) % 50, x % 140, y % 80)
-                    for y in range(size[1])
-                    for x in range(size[0])
-                ]
-            )
-        else:
-            image.putdata(
-                [
-                    (x % 80, (y * 2) % 120 + 60, 255 - (x + y) % 60)
-                    for y in range(size[1])
-                    for x in range(size[0])
-                ]
-            )
-        return image
-
-    def _match_pair(self, left: Path, right: Path) -> dict | None:
-        matches: dict[str, dict] = {}
-        self.service._record_visual_match(
-            matches,
-            {"media_key": "remote-1"},
-            [
-                {
-                    "signature": visual.image_signature(left),
-                    "paths": [str(left)],
-                    "name_keys": set(),
-                }
-            ],
-            visual.image_signature(right),
-        )
-        return matches.get("remote-1")
-
-    def test_visual_signature_matches_exposed_edited_variant(self) -> None:
-        from PIL import ImageEnhance
-
-        original_path = self.root / "original.jpg"
-        edited_path = self.root / "edited.jpg"
-        scene = self._scene((160, 120), warm=False)
-        scene.save(original_path, quality=95)
-        edited = ImageEnhance.Brightness(scene).enhance(0.42)
-        width, height = edited.size
-        edited = edited.crop((width // 8, height // 8, width - width // 8, height - height // 8))
-        edited = edited.resize((96, 128))
-        edited.save(edited_path, quality=90)
-
-        original = visual.image_signature(original_path)
-        variant = visual.image_signature(edited_path)
-        color, perceptual = visual.signature_distance(original, variant)
-        palette = visual.palette_similarity(original, variant)
-        phash = visual.perceptual_hash_distance(original, variant)
-
-        strict_match = (
-            color <= visual.VISUAL_COLOR_THRESHOLD
-            and perceptual <= visual.VISUAL_HASH_THRESHOLD
-        )
-        self.assertFalse(strict_match)
-        self.assertGreaterEqual(palette, visual.VISUAL_PALETTE_THRESHOLD)
-        self.assertLessEqual(phash, visual.VISUAL_PHASH_THRESHOLD)
-
-        record = self._match_pair(original_path, edited_path)
-        self.assertIsNotNone(record)
-        self.assertEqual(record["visual_match_tier"], "edited")
-        self.assertEqual(record["local_files"], [str(original_path)])
-        self.assertIn("visual_palette_similarity", record)
-
-    def test_visual_signature_rejects_unrelated_scenes(self) -> None:
-        cool_path = self.root / "cool.jpg"
-        warm_path = self.root / "warm.jpg"
-        self._scene((160, 120), warm=False).save(cool_path, quality=92)
-        self._scene((160, 120), warm=True).save(warm_path, quality=92)
-
-        record = self._match_pair(cool_path, warm_path)
-
-        self.assertIsNone(record)
-
-    def test_dimension_compatibility_allows_orientation_and_crop_variants(self) -> None:
-        compatible = visual.dimensions_compatible
-        self.assertTrue(compatible((3072, 4096), (5472, 3648)))
-        self.assertTrue(compatible((3648, 5472), (3072, 4096)))
-        self.assertTrue(compatible((4000, 3000), (3000, 2250)))
-        self.assertFalse(compatible((800, 600), (4000, 3000)))
-        self.assertFalse(compatible((0, 0), (100, 100)))
 
     def test_organize_adds_to_album_then_archives_and_verifies(self) -> None:
         self.service.import_session(self.cookies)
@@ -529,6 +433,11 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         self.service._client_factory = ExpiredClient
         with self.assertRaisesRegex(GooglePhotosWebError, "session expired"):
             self.service.list_albums()
+        # A saved but rejected session no longer counts as connected until the next sign-in.
+        self.assertEqual((self.service.status()["connected"], self.service.status()["expired"]), (False, True))
+        self.service._client_factory = FakeClient
+        self.service.import_session(self.cookies)
+        self.assertEqual((self.service.status()["connected"], self.service.status()["expired"]), (True, False))
 
     def test_check_verifies_imported_cookie_json(self) -> None:
         self.service.import_session(self.cookies)
@@ -544,12 +453,88 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
 
     def test_check_rejects_raw_cookie_export_saved_as_session(self) -> None:
         self.service.session_path.write_text(
-            json.dumps({"url": "https://photos.google.com", "cookies": [{"domain": ".google.com", "name": "SID", "value": "x"}]}),
+            json.dumps(
+                {
+                    "url": "https://photos.google.com",
+                    "cookies": [{"domain": ".google.com", "name": "SID", "value": "x"}],
+                }
+            ),
             encoding="utf-8",
         )
         self.assertFalse(self.service.status()["connected"])
         with self.assertRaisesRegex(GooglePhotosWebError, "cookie export"):
             self.service.check()
+
+
+class PhotosPageParsingTests(unittest.TestCase):
+    def test_page_data_is_read_without_lxml_and_signed_out_pages_raise(self) -> None:
+        from gpwc import Client
+
+        page = '<html><script nonce="x">var a;</script><script data-id="_gd" nonce="n">window.WIZ_global_data = {"oPEP7c":"me@example.com"};</script></html>'
+        self.assertEqual(Client.parse_main_page(None, page), {"oPEP7c": "me@example.com"})
+        with self.assertRaises(IndexError):  # Kira reports this as an expired session
+            Client.parse_main_page(None, "<html><body>About Google Photos</body></html>")
+
+
+class NameAndTimeMatchTests(unittest.TestCase):
+    def test_matches_by_filename_near_capture_time_and_skips_ambiguous_or_missing(self) -> None:
+        base = 1_783_159_260_000
+        library = [
+            ("k-exact", "IMG_0101.JPG", base + 300),
+            ("k-dupe-far", "IMG_0101.JPG", base + 3 * 60 * 60 * 1000),
+            ("k-other", "IMG_0200.JPG", base),
+            ("k-twin-a", "IMG_0300.JPG", base + 5 * 60 * 1000),
+            ("k-twin-b", "IMG_0300.JPG", base + 6 * 60 * 1000),
+            ("k-shifted", "IMG_0400.HEIC", base - 7 * 60 * 60 * 1000),
+        ]
+        pages = [library[:3], library[3:]]
+
+        class Client:
+            def send_api_request(self, payload):
+                if payload.kind == "page":
+                    index = 0 if payload.page_id is None else 1
+                    items = [
+                        SimpleNamespace(media_key=key, dedup_key=f"d-{key}", timestamp=ms)
+                        for key, _, ms in pages[index]
+                    ]
+                    return SimpleNamespace(
+                        data=SimpleNamespace(
+                            items=items,
+                            next_page_id="p2" if index == 0 else None,
+                            last_item_timestamp=items[-1].timestamp,
+                        )
+                    )
+                names = {key: name for key, name, _ in library}
+                return SimpleNamespace(
+                    data=[SimpleNamespace(media_key=key, file_name=names[key]) for key in payload.media_keys]
+                )
+
+        payloads = SimpleNamespace(
+            GetLibraryPageByTakenDate=lambda **values: SimpleNamespace(kind="page", **values),
+            GetBatchMediaInfo=lambda keys: SimpleNamespace(kind="info", media_keys=keys),
+        )
+
+        @contextmanager
+        def client():
+            yield Client(), payloads
+
+        service = GooglePhotosWebService(Path(tempfile.gettempdir()))
+        with patch.object(service, "_client", client):
+            found = service.find_by_name_and_time(
+                [
+                    {"name": "img_0101.jpg", "time_ms": base},
+                    {"name": "IMG_0300.JPG", "time_ms": base},
+                    {"name": "IMG_0400.HEIC", "time_ms": base},
+                    {"name": "IMG_0999.JPG", "time_ms": base},
+                ]
+            )
+        self.assertEqual(
+            found,
+            {
+                0: {"media_key": "k-exact", "dedup_key": "d-k-exact"},
+                2: {"media_key": "k-shifted", "dedup_key": "d-k-shifted"},
+            },
+        )
 
 
 if __name__ == "__main__":

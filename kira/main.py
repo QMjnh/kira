@@ -1,4 +1,5 @@
 """Kira entry point: argument parsing and server startup."""
+
 from __future__ import annotations
 
 import argparse
@@ -7,10 +8,10 @@ import webbrowser
 from pathlib import Path
 
 from . import APP_VERSION
-from .api import KiraHTTPServer, discover_local_ip
-from .store import KiraStore
-from .writer import WriterLease
+from .api import APP_ROOT, KiraHTTPServer, discover_local_ip
+from .app import KiraApp
 from .errors import KiraError
+from .writer import WriterLease
 
 STATIC_ROOT = Path(__file__).resolve().parent.parent / "web"
 
@@ -18,7 +19,7 @@ STATIC_ROOT = Path(__file__).resolve().parent.parent / "web"
 def build_server(host: str, port: int, data_dir: Path) -> KiraHTTPServer:
     lease = WriterLease(data_dir.resolve())
     try:
-        server = KiraHTTPServer((host, port), KiraStore(data_dir), STATIC_ROOT)
+        server = KiraHTTPServer((host, port), KiraApp(data_dir, APP_ROOT), STATIC_ROOT)
         server.writer_lease = lease
         return server
     except BaseException:
@@ -27,14 +28,14 @@ def build_server(host: str, port: int, data_dir: Path) -> KiraHTTPServer:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Kira local photo transfer MVP")
+    parser = argparse.ArgumentParser(description="Kira photo library")
     parser.add_argument("--host", default="0.0.0.0", help="Interface to listen on")
     parser.add_argument("--port", type=int, default=8787, help="TCP port")
     parser.add_argument(
         "--data-dir",
         type=Path,
         default=Path(__file__).resolve().parent.parent / "kira-data",
-        help="Folder where Kira stores jobs and returned edits",
+        help="Folder for Kira's catalog cache, thumbnails and settings (not the photos)",
     )
     parser.add_argument("--no-open", action="store_true", help="Do not open the desktop dashboard")
     return parser.parse_args()
@@ -53,8 +54,9 @@ def main() -> None:
     print(f"Kira {APP_VERSION} is running")
     print(f"Desktop dashboard: {local_url}")
     print(f"iPad address:   {ipad_url}")
-    print(f"Pairing code:   {server.store.pair_code}")
-    print(f"Data folder:    {server.store.root}")
+    print(f"Pairing code:   {server.app.pair_code}")
+    print(f"Data folder:    {server.app.root}")
+    print(f"Library:        {server.app.library.root or 'not chosen yet'}")
     print("Press Ctrl+C to stop Kira.")
     print()
     if not args.no_open:

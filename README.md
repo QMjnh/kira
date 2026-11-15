@@ -11,23 +11,48 @@ SD card → desktop → external drive → Google Drive → iPad → Lightroom
 
 Every arrow makes another copy. Soon there are originals, selects, exports, "final" exports, and `final-final-2` exports spread across several devices, and nobody is quite sure which version is the real one — or whether it is safe to delete anything.
 
-Kira cuts out the middle:
+Kira replaces that with **one library** and lets files arrive by any route:
 
 ```text
-Camera folder on your desktop → Kira → iPad (Lightroom) → Kira → organized camera folder
+camera card ──┐                                        ┌─ Google Drive: exact backup of camera files and edits
+phone (sync) ─┼─> Kira library (one folder per shoot) ─┤
+iPad edits ───┘     originals + edits side by side     └─ Google Photos: phone photos + your Finals
 ```
 
-You plug the camera card or photo drive into your Windows desktop. In Kira, you pick the photos worth editing. Kira sends only those photos directly to your iPad over your home Wi-Fi. You edit in Lightroom, send the finished images back, and Kira puts everything in its proper place in the original folder.
+You never tell Kira what a file is. It works out whether each file is new, already known, another original (RAW + JPEG), an edit, or a lower-quality copy, and files it next to the photo it belongs to. Anything it isn't sure about waits in **Review**; nothing is thrown away.
 
-Kira now keeps verified local checkpoints of files it sends, receives, and organizes. Lightroom is still where you edit. Keep a separate backup of Kira's working folder to protect those checkpoints against losing the drive. The wider image version-control hub is being built in stages; see the [implementation status](docs/preservation-implementation.md).
+## What a shoot folder looks like
 
-## What Kira does
+```text
+G:\Kira Library\2026\2026-07 NYC\
+  DSC01234.ARW            original (read-only)
+  DSC01234.JPG            original (read-only)
+  DSC01234_edit1.jpg      first edit that came back
+  DSC01234_edit2.jpg      second edit
+  DSC01234.ARW.xmp        sidecar, exact name kept
+  _rejects\               culled photos, never deleted
+  _copies\                recompressed duplicates (WhatsApp, Instagram, ...)
+  _kira.json              which version is the Final, readable without Kira
+```
 
-- **Choose before you transfer.** Browse a fast grid of JPEG previews from the camera folder, mark keepers, move misses to Unselected, and put close alternatives into named groups for side-by-side comparison. If a photo has a matching RAW file, Kira keeps the pair together while you decide.
-- **Send only the selection.** Pick JPEG (smaller, faster) or RAW (full editing range) for each job. Kira retains a verified local copy before sending it, including accompanying settings and project files.
-- **Bring the edits home.** Upload finished exports back to Kira. The browser and desktop compare checksums, and Kira suggests originals by filename. On *Finish*, it reorganizes the source folder into `selected/` (with `raw/` and `pre-edit/` inside) plus `unselected_jpeg/`. ZIP returns keep their folder structure and every component, including projects, settings and videos.
-- **Recover a saved file.** Open **Saved files** on the desktop to restore a copy, even after its transfer job has been removed. Checkpoints use extra space in Kira's working folder; identical contents share storage.
-- **Optional: combine phone photos.** Connect Google Photos to pull chosen pictures and videos straight into a local collection folder, skipping exact duplicates, or upload local JPEGs/videos to Google Photos.
+Versions are never overwritten or renamed. One version per photo is the **Final**: the newest edit unless you pin another.
+
+## A shoot, end to end
+
+1. **Import.** Plug in the card, open **Import**, pick the card folder and name the shoot. Kira copies only new files and verifies every byte. Phone photos that synced to Google Photos can be added with **Pick from Google Photos**; once they're safely in Kira, they go into the shoot's album in Google Photos and are archived, so the picker doesn't offer them again (this step needs **Sign in to Photos web**).
+2. **Cull.** Select misses and click **Reject**.
+3. **Send to iPad.** Select keepers and click **Send to iPad**. The "Get from Kira" Shortcut pulls them into Lightroom (setup steps are on the iPad page).
+4. **Edit and send back.** In Lightroom: select the edits, then **Share → Share to… → Send to Kira**. Each edit lands next to its original as the next version. Edits that Photoshop or other desktop apps save into the shoot folder are picked up with **Rescan folder**; files dropped onto a shoot are sorted the same way.
+5. **Back up and share.** On **Cloud**, **Back up now** copies everything to Google Drive and **Upload Finals** puts each Final in a per-shoot Google Photos album.
+6. **Wipe the card** once **Is it safe to wipe?** says every file is in the library and backed up.
+
+## Google Drive and Google Photos
+
+- **Drive** gets exact copies of camera originals, edits, sidecars and project files. Kira never deletes or overwrites anything there: a changed file is added beside the old one, and a file deleted on the library drive stays on Drive and can be put back with **Restore missing files**.
+- **Phone photos** keep Google Photos as their cloud home. They skip Drive only after **Check phone photos** confirms Google Photos holds the exact file.
+- **Clean up** hides copies that duplicate a Final (other edits, phone originals you edited) by moving them to Google Photos' Archive. It runs only when you click **Hide**, shows the list first, and never deletes anything.
+
+Setup: create a Desktop-app OAuth client in the [Google Cloud Console](https://console.cloud.google.com/) with the Drive, Photos Library and Photos Picker APIs enabled, and save its JSON as `google-oauth-client.json` beside `server.py`. Checking, clean-up and filing picked photos also need **Sign in to Photos web**, which uses Google Photos' unofficial web interface; if that ever breaks, uploads and backup keep working.
 
 ## Start Kira
 
@@ -39,37 +64,19 @@ Kira now keeps verified local checkpoints of files it sends, receives, and organ
 .\start-kira.ps1
 ```
 
-To store Kira's working data on an attached hard drive instead:
+To keep Kira's working data (catalog cache, thumbnails, settings) somewhere else:
 
 ```powershell
 .\start-kira.ps1 -DataDir "E:\Kira"
 ```
 
-Kira opens on the desktop and shows a QR code, the address for the iPad, and a six-digit pairing code as a manual fallback. Scan the QR code with the iPad's Camera app and Safari opens already paired.
+On first start Kira asks where the photo library should live, for example `G:\Kira Library`. The iPad page shows a QR code and a six-digit code for pairing the iPad.
 
 If PowerShell says scripts are disabled, run this once in the same window, then start Kira again:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
-
-## A session, end to end
-
-1. Copy a shoot from the SD card to a folder on the desktop or an external drive.
-2. Open Kira, browse to that folder, cull and compare until only keepers are checked.
-3. Create the edit job and download it on the iPad; unpack the ZIP once in Files and import into Lightroom.
-4. Edit. Export with original filenames via **Share → Export As**.
-5. Upload the exports back to Kira, then click **Finish & organize source folder**.
-6. Check the result and delete the job. The organized folders stay; only Kira's temporary files go.
-7. Use **Saved files → Restore a copy** whenever you need a retained original or returned file. This is file-level recovery; complete editor project history and automatic version-family discovery are still being developed.
-
-## Using Google Photos
-
-Click **Connect Google Photos** on the dashboard once. This needs a free one-time setup in the [Google Cloud Console](https://console.cloud.google.com/) (enable the Photos Picker and Library APIs, create a Desktop-app OAuth client, save its JSON as `google-oauth-client.json` beside `server.py`). Details are in the technical guide.
-
-After connecting you can import picked media into any local folder, upload selected photos and videos to Google Photos, and optionally have imports added to a matching album and archived automatically. Disconnecting never deletes anything already downloaded.
-
-For album and Archive automation, open **Google Photos organizer** and click **Sign in to Google Photos**. Kira opens a separate Chrome or Edge window on the desktop. Sign in there (including any Google verification); Kira connects automatically and closes the window. No cookie export or browser extension is needed. The saved session is reused until Google requires another sign-in; use **Sign in again** if it expires. Cookie-file import remains available under **Import a session manually**.
 
 ## Keeping your photos private
 
