@@ -13,6 +13,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 
 from . import visual
@@ -36,6 +37,11 @@ class GooglePhotosWebService:
     VERIFY_ATTEMPTS = 10
     VERIFY_INTERVAL_SECONDS = 0.5
     VISUAL_NARROW_FALLBACK_LIMIT = 6
+    # Google retires the __Secure-*PSIDTS cookies every few hours; a browser swaps in fresh ones
+    # through RotateCookies. Kira does the same while it runs and saves whatever Google sends back.
+    ROTATE_URL = "https://accounts.google.com/RotateCookies"
+    ROTATE_EVERY_SECONDS = 10 * 60
+    BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
     def __init__(
         self, data_root: Path, client_factory: object | None = None, payloads_module: object | None = None
@@ -48,6 +54,14 @@ class GooglePhotosWebService:
         self._signin_cancelled = threading.Event()
         self._signin_thread = None
         self._signin_state = {"status": "idle"}
+        self._thumbnail_lock = threading.Lock()
+        self._thumbnail_session: tuple[int, object] | None = None
+        self._cookie_lock = threading.Lock()
+        self._rotated_at: float | None = None
+        self._keepalive_stop = threading.Event()
+        self._keepalive_thread: threading.Thread | None = None
+        # Set once Google turns the saved session away, so status stops calling it connected.
+        self._session_expired = False
 
     def status(self) -> dict:
         metadata = self._session_metadata()
@@ -56,9 +70,11 @@ class GooglePhotosWebService:
             available = True
         except GooglePhotosWebError:
             available = False
+        readable = self._session_readable()
         return {
             "available": available,
-            "connected": self._session_readable(),
+            "connected": readable and not self._session_expired,
+            "expired": readable and self._session_expired,
             "account": metadata.get("account"),
             "account_index": metadata.get("account_index", 0),
             "session_path": str(self.session_path),
@@ -93,8 +109,125 @@ class GooglePhotosWebService:
 
     def close(self) -> None:
         self.cancel_sign_in()
+        self._keepalive_stop.set()
         if self._signin_thread:
             self._signin_thread.join(timeout=10)
+
+    def start_keepalive(self) -> None:
+        """Refresh the saved sign-in in the background so it outlasts Google's short cookie life."""
+
+        def run() -> None:
+            while True:
+                try:
+                    self.refresh_session()
+                    self.verify_session()
+                except Exception:
+                    pass
+                if self._keepalive_stop.wait(self.ROTATE_EVERY_SECONDS):
+                    return
+
+        if self._keepalive_thread is None:
+            self._keepalive_thread = threading.Thread(target=run, name="kira-google-keepalive", daemon=True)
+            self._keepalive_thread.start()
+
+    def refresh_session(self, force: bool = False) -> bool:
+        """Ask Google for fresh session cookies and save them; True when the saved sign-in changed.
+
+        Runs at most once per ROTATE_EVERY_SECONDS unless forced. Any failure leaves the saved
+        session as it was, so a later sign-in check reports the real state.
+        """
+        if self._client_factory is not None or not self.session_path.exists():
+            return False  # an injected client (tests) never talks to Google
+        with self._cookie_lock:
+            now = time.monotonic()
+            if not force and self._rotated_at is not None and now - self._rotated_at < self.ROTATE_EVERY_SECONDS:
+                return False
+            self._rotated_at = now
+        try:
+            raw, _ = self._load_session()
+            session = self._cookie_session(raw)
+            response = session.post(
+                self.ROTATE_URL,
+                headers={
+                    "Content-Type": "application/json",
+                    # Google answers 403 unless the call looks like it came from its own sign-in page.
+                    "Origin": "https://accounts.google.com",
+                    "User-Agent": self.BROWSER_USER_AGENT,
+                },
+                data='[000,"-0000000000000000000"]',
+                timeout=15,
+            )
+        except Exception:
+            return False
+        if response.status_code == 401:
+            self._session_expired = True
+        if response.status_code != 200:
+            return False
+        return self._save_cookies(session.cookies)
+
+    def verify_session(self) -> bool | None:
+        """Load the Photos home page with the saved cookies; False when Google wants a new sign-in.
+
+        None when there is nothing to check or Google could not be reached, leaving the last answer.
+        """
+        if self._client_factory is not None or not self.session_path.exists():
+            return None
+        try:
+            raw, account_index = self._load_session()
+            session = self._cookie_session(raw)
+            base = f"/u/{account_index}/" if account_index else "/"
+            response = session.get(f"https://photos.google.com{base}", timeout=30)
+        except GooglePhotosWebError:
+            self._session_expired = True
+            return False
+        except Exception:
+            return None
+        self._session_expired = 'data-id="_gd"' not in response.text
+        return not self._session_expired
+
+    def _cookie_session(self, raw: bytes) -> object:
+        """A plain requests session carrying the saved cookies, with no page load."""
+        self._dependency()
+        requests = importlib.import_module("requests")
+        with self._temporary_cookie_file(raw) as path:
+            jar = MozillaCookieJar(str(path))
+            jar.load(ignore_discard=True, ignore_expires=True)
+        session = requests.Session()
+        session.cookies.update(jar)
+        return session
+
+    def _save_cookies(self, cookies: object) -> bool:
+        """Fold cookies Google set during a session back into the saved sign-in.
+
+        Only Google cookies whose value changed are written, so ordinary requests leave the file
+        alone. Returns True when something was saved.
+        """
+        with self._cookie_lock:
+            try:
+                raw, _ = self._load_session()
+                wrapper = json.loads(self.session_path.read_text(encoding="utf-8"))
+            except (GooglePhotosWebError, OSError, ValueError):
+                return False
+            with self._temporary_cookie_file(raw) as path:
+                jar = MozillaCookieJar(str(path))
+                jar.load(ignore_discard=True, ignore_expires=True)
+                saved = {(c.domain, c.path, c.name): c.value for c in jar}
+                changed = False
+                for cookie in cookies:
+                    domain = cookie.domain.casefold().lstrip(".")
+                    if domain != "google.com" and not domain.endswith(".google.com"):
+                        continue
+                    if saved.get((cookie.domain, cookie.path, cookie.name)) != cookie.value:
+                        jar.set_cookie(cookie)
+                        changed = True
+                if not changed:
+                    return False
+                jar.save(ignore_discard=True, ignore_expires=True)
+                updated = path.read_bytes()
+            protected = _windows_protect(updated) if wrapper.get("encrypted") else updated
+            wrapper["data"] = base64.b64encode(protected).decode("ascii")
+            self._write_session(wrapper)
+            return True
 
     def _run_sign_in(self, cancelled: threading.Event) -> None:
         try:
@@ -633,6 +766,102 @@ class GooglePhotosWebService:
             page_id = next_page
             timestamp = page.last_item_timestamp
 
+    def library_items(self, progress=None, cancelled: threading.Event | None = None) -> list[dict]:
+        """Every item in the Google Photos library, newest first. Metadata only; nothing is downloaded."""
+        items: dict[str, dict] = {}
+        page_id, timestamp, seen_pages = None, None, set()
+        with self._client() as (client, payloads):
+            while not (cancelled and cancelled.is_set()):
+                try:
+                    page = client.send_api_request(
+                        payloads.GetLibraryPageByTakenDate(
+                            timestamp=timestamp, page_id=page_id, source="both", page_size=500
+                        )
+                    ).data
+                except Exception as exc:
+                    raise GooglePhotosWebError(f"Could not scan the Google Photos library: {exc}") from exc
+                for item in page.items:
+                    media_key = str(item.media_key or "")
+                    if not media_key:
+                        continue
+                    items[media_key] = {
+                        "media_key": media_key,
+                        "dedup_key": str(item.dedup_key or ""),
+                        "taken_ms": self._epoch_ms(item.timestamp),
+                        "local_time": self._remote_capture_time(item.timestamp, item.timezone_offset),
+                        "thumbnail_url": str(item.thumbnail_url or ""),
+                        "width": int(item.res_width or 0),
+                        "height": int(item.res_height or 0),
+                        "video": item.video_duration is not None,
+                        "archived": bool(item.is_archived),
+                        "owned": bool(item.is_owned),
+                    }
+                if progress:
+                    progress(len(items))
+                token = (str(page.next_page_id or ""), str(page.last_item_timestamp or ""))
+                if not token[0] or token in seen_pages:
+                    break
+                seen_pages.add(token)
+                page_id, timestamp = page.next_page_id, page.last_item_timestamp
+        return list(items.values())
+
+    def media_details(
+        self, media_keys: list[str], progress=None, cancelled: threading.Event | None = None
+    ) -> dict[str, dict]:
+        """Original file name, byte size and storage quality of each item, a batch per request."""
+        details: dict[str, dict] = {}
+        with self._client() as (client, payloads):
+            for start in range(0, len(media_keys), self.INFO_BATCH_SIZE):
+                if cancelled and cancelled.is_set():
+                    break
+                batch = media_keys[start : start + self.INFO_BATCH_SIZE]
+                try:
+                    response = client.send_api_request(payloads.GetBatchMediaInfo(batch))
+                except Exception as exc:
+                    raise GooglePhotosWebError(f"Could not read Google Photos file details: {exc}") from exc
+                for metadata in getattr(response, "data", None) or []:
+                    key = str(getattr(metadata, "media_key", "") or "")
+                    if key:
+                        details[key] = {
+                            "file_name": str(getattr(metadata, "file_name", "") or ""),
+                            "size": int(getattr(metadata, "size", 0) or 0),
+                            "original_quality": bool(getattr(metadata, "is_original_quality", False)),
+                        }
+                if progress:
+                    progress(min(start + len(batch), len(media_keys)), len(media_keys))
+        return details
+
+    def thumbnail(self, url: str, size: int) -> bytes:
+        """One of Google's own thumbnails. Google refuses them without the signed-in session."""
+        crop = "-c" if size <= 480 else ""
+        self.refresh_session()
+        try:
+            response = self._thumbnails().get(f"{url}=w{size}-h{size}{crop}", timeout=30)
+        except Exception as exc:
+            raise GooglePhotosWebError(f"Could not load the Google Photos thumbnail: {exc}") from exc
+        if response.status_code in {401, 403}:
+            self._session_expired = True
+            raise GooglePhotosWebError("Google Photos web session expired; click Sign in to Photos web")
+        if response.status_code != 200 or not response.headers.get("Content-Type", "").startswith("image/"):
+            raise GooglePhotosWebError(f"Google Photos thumbnail returned HTTP {response.status_code}")
+        return response.content
+
+    def _thumbnails(self) -> object:
+        """A plain cookie session for thumbnails, rebuilt whenever the saved sign-in changes.
+
+        The full web client loads the Photos home page on every start, far too slow for a grid
+        of thumbnails; image links need only the cookies.
+        """
+        with self._thumbnail_lock:
+            try:
+                stamp = self.session_path.stat().st_mtime_ns
+            except OSError as exc:
+                raise GooglePhotosWebError("Sign in to Photos web to see Google Photos thumbnails") from exc
+            if self._thumbnail_session is None or self._thumbnail_session[0] != stamp:
+                raw, _ = self._load_session()
+                self._thumbnail_session = (stamp, self._cookie_session(raw))
+            return self._thumbnail_session[1]
+
     def ensure_album(self, album_title: str) -> dict:
         """Resolve one exact album once, creating it when it does not exist."""
         title = self._validated_album_title(album_title)
@@ -746,6 +975,7 @@ class GooglePhotosWebService:
     def _write_session(self, wrapper: dict) -> None:
         try:
             atomic_json_write(self.session_path, wrapper)
+            self._session_expired = False
             if os.name != "nt":
                 try:
                     os.chmod(self.session_path, 0o600)
@@ -790,19 +1020,21 @@ class GooglePhotosWebService:
 
     @contextmanager
     def _client(self) -> Iterator[tuple[object, object]]:
+        self.refresh_session()
         raw, account_index = self._load_session()
         client_factory, payloads = self._dependency()
         with self._temporary_cookie_file(raw) as cookies_path:
             client = None
             try:
                 client = client_factory(cookies_path, account_index=account_index)
+                self._session_expired = False
                 yield client, payloads
+                self._save_cookies(getattr(getattr(client, "session", None), "cookies", []))
             except GooglePhotosWebError:
                 raise
             except IndexError as exc:
-                raise GooglePhotosWebError(
-                    "Google Photos web session expired; click Sign in to Google Photos again"
-                ) from exc
+                self._session_expired = True
+                raise GooglePhotosWebError("Google Photos web session expired; click Sign in to Photos web") from exc
             except Exception as exc:
                 raise GooglePhotosWebError(f"Google Photos web session failed: {exc}") from exc
             finally:

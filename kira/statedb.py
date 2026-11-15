@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS source_hashes (
     sha256 TEXT NOT NULL, hashed_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS trash_reasons (trash_id TEXT PRIMARY KEY, reason TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS gp_items (
+    media_key TEXT PRIMARY KEY, dedup_key TEXT NOT NULL, taken_ms INTEGER, local_time TEXT,
+    thumbnail_url TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, video INTEGER NOT NULL,
+    archived INTEGER NOT NULL, owned INTEGER NOT NULL, file_name TEXT, size INTEGER, original_quality INTEGER,
+    status TEXT NOT NULL DEFAULT 'unmatched', match TEXT, seen_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS drive_files_sha ON drive_files(sha256);
 CREATE INDEX IF NOT EXISTS source_hashes_folder ON source_hashes(folder);
 """

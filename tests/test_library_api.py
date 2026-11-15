@@ -20,6 +20,7 @@ from PIL import Image, ImageDraw
 from kira.api import APP_ROOT, KiraHTTPServer
 from kira.app import KiraApp
 from kira.gphotos import google_hash_of
+from kira.gpindex import dedup_key_of
 from kira.main import STATIC_ROOT
 
 
@@ -266,6 +267,86 @@ class LibraryWorkflowTest(unittest.TestCase):
         photo_id = shoot["photos"][0]["id"]
         self.request("POST", f"/api/shoots/{shoot_id}/final", {"photo_id": photo_id, "name": "IMG_0001.JPG"})
         self.assertEqual(self.app.photos.pending_finals()[0], [])
+
+    def test_google_photos_items_are_matched_to_the_library_without_downloads(self) -> None:
+        self.request("POST", "/api/library/root", {"path": str(self.library_root)})
+        for number in (1, 2, 4):
+            make_photo(
+                self.card / f"IMG_000{number}.JPG", taken=f"2026:07:02 09:0{number}:00", make="Apple", seed=number
+            )
+        shoot_id = self.import_card("Phone")["shoot_id"]
+        shoot_dir = self.library_root / "2026" / "Phone"
+
+        def item(key, name, taken, size, dedup):
+            return {
+                "media_key": key,
+                "dedup_key": dedup,
+                "taken_ms": 0,
+                "local_time": taken,
+                "thumbnail_url": f"https://lh3.example/{key}",
+                "width": 640,
+                "height": 480,
+                "video": False,
+                "archived": False,
+                "owned": True,
+                "details": {"file_name": name, "size": size, "original_quality": True},
+            }
+
+        exact = shoot_dir / "IMG_0001.JPG"
+        confirmed = shoot_dir / "IMG_0004.JPG"
+        items = [
+            # Same bytes; the dedup key is the file's SHA-1.
+            item(
+                "g1", "IMG_0001.JPG", "2026:07:02 09:01:00", exact.stat().st_size, dedup_key_of(google_hash_of(exact))
+            ),
+            # Same capture as IMG_0002 but other bytes (e.g. HEIC on the phone, JPEG in the library).
+            item("g2", "IMG_0002.HEIC", "2026:07:02 09:02:01", 999, "other"),
+            # Not in the library at all.
+            item("g3", "IMG_0003.HEIC", "2026:07:02 09:03:00", 1234, "new"),
+            # Same bytes, but the dedup key isn't a plain SHA-1; Google confirms the hash instead.
+            item("g4", "IMG_0004.JPG", "2026:07:02 09:04:00", confirmed.stat().st_size, "opaque"),
+        ]
+        fake = FakeWeb()
+        fake.held[google_hash_of(confirmed)] = {"media_key": "g4", "dedup_key": "opaque"}
+        fake.library_items = lambda progress=None, cancelled=None: [
+            {k: v for k, v in entry.items() if k != "details"} for entry in items
+        ]
+        fake.media_details = lambda keys, progress=None, cancelled=None: {
+            entry["media_key"]: entry["details"] for entry in items if entry["media_key"] in keys
+        }
+        self.app.photos.web = fake
+        self.app.gphotos_index.web = fake
+
+        result = self.wait(self.request("POST", "/api/gphotos/scan"))
+        self.assertEqual(result["state"], "done", result.get("error"))
+        self.assertEqual(
+            (result["result"]["library"], result["result"]["similar"], result["result"]["missing"]), (2, 1, 1)
+        )
+
+        index = self.request("GET", "/api/gphotos/index?month=2026-07")
+        self.assertEqual(index["months"][0]["month"], "2026-07")
+        status = {entry["media_key"]: entry for entry in index["items"]}
+        self.assertEqual(status["g1"]["match"]["shoot_id"], shoot_id)
+        self.assertEqual((status["g2"]["status"], status["g2"]["match"]["file"]), ("similar", "IMG_0002.JPG"))
+        self.assertEqual(status["g3"]["status"], "missing")
+        self.assertEqual(status["g4"]["status"], "library")
+        missing = self.request("GET", "/api/gphotos/index?month=all&status=missing")["items"]
+        self.assertEqual([entry["media_key"] for entry in missing], ["g3"])
+
+        # Thumbnails come through Kira's session, once, and only for scanned items.
+        fetched = []
+        fake.thumbnail = lambda url, size: fetched.append((url, size)) or b"thumb-jpeg"
+        for _ in range(2):
+            self.assertEqual(self.request("GET", "/api/gphotos/thumbnail?key=g1&size=400"), b"thumb-jpeg")
+        self.assertEqual(fetched, [("https://lh3.example/g1", 400)])
+        with self.assertRaises(urllib.error.HTTPError) as unknown:
+            self.request("GET", "/api/gphotos/thumbnail?key=..%5C..%5Cconfig&size=400")
+        self.assertEqual(unknown.exception.code, 404)
+
+        # A later scan forgets items deleted from Google Photos.
+        del items[2]
+        self.wait(self.request("POST", "/api/gphotos/scan"))
+        self.assertEqual(self.request("GET", "/api/gphotos/index")["totals"]["items"], 3)
 
     def test_drive_backup_moves_instead_of_reuploading_and_never_overwrites(self) -> None:
         self.request("POST", "/api/library/root", {"path": str(self.library_root)})

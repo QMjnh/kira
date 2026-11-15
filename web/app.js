@@ -21,10 +21,14 @@
     driveFilter: 'all',
     driveDeep: localStorage.getItem('kira-drive-deep') === '1',
     driveLimit: 0,
+    gp: null,
+    gpMonth: '',
+    gpFilter: '',
+    gpLimit: 0,
   };
 
   const el = (id) => document.getElementById(id);
-  const views = ['pair', 'setup', 'library', 'shoot', 'import', 'drives', 'review', 'ipad', 'cloud'];
+  const views = ['pair', 'setup', 'library', 'shoot', 'import', 'drives', 'gphotos', 'review', 'ipad', 'cloud'];
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const plural = (count, word, many = `${word}s`) => `${count} ${count === 1 ? word : many}`;
   const bytes = (value) => {
@@ -95,6 +99,7 @@
     if (view === 'library') renderLibrary();
     if (view === 'import') renderImport();
     if (view === 'drives') loadDrive();
+    if (view === 'gphotos') loadGPhotos();
     if (view === 'review') loadReview();
     if (view === 'ipad') loadIpad();
     if (view === 'cloud') loadCloud();
@@ -812,17 +817,24 @@
       await api('/api/google/web-session', {method: 'DELETE'});
       return loadCloud();
     }
+    if (await webSignIn('photos-result')) loadCloud();
+  }));
+
+  // Opens the Google Photos web sign-in window and reports progress in `output`; true once signed in.
+  async function webSignIn(output) {
     await post('/api/google/web-signin');
-    el('photos-result').innerHTML = '<p class="muted">Sign in to Google Photos in the window that opened. When your photos appear, close that window.</p>';
+    el(output).innerHTML = '<p class="muted">Sign in to Google Photos in the window that opened. When your photos appear, close that window.</p>';
     for (let attempt = 0; attempt < 400; attempt++) {
       await new Promise((resolve) => setTimeout(resolve, 2500));
       const web = await api('/api/google/web-signin');
       const signin = web.sign_in || {};
-      if (signin.status === 'verifying') el('photos-result').innerHTML = '<p class="muted">Checking the sign-in…</p>';
-      if (web.connected) { el('photos-result').innerHTML = '<p class="notice ok">Signed in.</p>'; return loadCloud(); }
-      if (['failed', 'cancelled'].includes(signin.status)) { el('photos-result').innerHTML = `<p class="error-text">${escapeHtml(signin.error || 'Sign-in was cancelled')}</p>`; return; }
+      if (signin.status === 'verifying') el(output).innerHTML = '<p class="muted">Checking the sign-in…</p>';
+      // Only a finished, verified sign-in counts; an older saved session may still be on file.
+      if (signin.status === 'completed' && web.connected) { el(output).innerHTML = `<p class="notice ok">Signed in${web.account ? ` as ${escapeHtml(web.account)}` : ''}.</p>`; return true; }
+      if (['failed', 'cancelled'].includes(signin.status)) { el(output).innerHTML = `<p class="error-text">${escapeHtml(signin.error || 'Sign-in was cancelled')}</p>`; return false; }
     }
-  }));
+    return false;
+  }
 
   function cloudTask(button, path, output, describe) {
     button.addEventListener('click', () => guarded(button, async () => {
@@ -1088,6 +1100,150 @@
     el('import-source').value = state.drivePath;
     location.hash = 'import';
   });
+
+  // -- Google Photos ----------------------------------------------------------------------------
+
+  // Google refuses its thumbnail links without the signed-in session, so Kira fetches and caches them.
+  const gpThumb = (mediaKey, size = 400) => withToken(`/api/gphotos/thumbnail?size=${size}&key=${encodeURIComponent(mediaKey)}`);
+  const gpStatus = {
+    missing: '<span class="pill warn">Not in library</span>',
+    similar: '<span class="pill" title="The library has this shot under the same name, as a different file">Same shot</span>',
+    library: '<span class="pill ok">In library</span>',
+  };
+  const monthName = (month) => {
+    const [year, number] = month.split('-').map(Number);
+    return number ? new Date(year, number - 1, 1).toLocaleDateString(undefined, {month: 'long', year: 'numeric'}) : 'No date';
+  };
+  const gpCounts = (counts) => [
+    counts.missing ? `${counts.missing} not in library` : '',
+    counts.similar ? `${counts.similar} same shot, other file` : '',
+    counts.library ? `${counts.library} in library` : '',
+  ].filter(Boolean).join(' · ');
+
+  async function loadGPhotos() {
+    const params = new URLSearchParams({month: state.gpMonth, status: state.gpFilter});
+    try {
+      state.gp = await api(`/api/gphotos/index?${params}`);
+    } catch (error) {
+      return toast(error.message, true);
+    }
+    renderGPhotos();
+  }
+
+  function openGPMonth(month) {
+    state.gpMonth = month;
+    state.gpLimit = DRIVE_PAGE;
+    document.querySelectorAll('[data-gp-scope]').forEach((item) => item.classList.toggle('active', (item.dataset.gpScope === 'all') === (month === 'all')));
+    return loadGPhotos();
+  }
+
+  function renderGPhotos() {
+    const gp = state.gp;
+    const scanned = Boolean(gp.scanned_at);
+    el('gp-signin').classList.toggle('hidden', gp.web.connected);
+    el('gp-scan').disabled = !gp.web.connected;
+    el('gp-scan').textContent = scanned ? 'Scan again' : 'Scan Google Photos';
+    setBadge('gphotos-badge', gp.totals.missing);
+    const inMonth = state.gpMonth && state.gpMonth !== 'all';
+    el('gp-crumbs').innerHTML = inMonth ? '<button type="button" data-gp-month="">← Google Photos</button>' : '';
+    el('gp-title').textContent = inMonth ? monthName(state.gpMonth) : 'Google Photos';
+    const month = gp.months.find((item) => item.month === state.gpMonth);
+    const totals = inMonth ? month || {items: 0} : gp.totals;
+    el('gp-summary').textContent = !gp.web.connected && !scanned
+      ? 'Sign in to Photos web, then scan to see which Google Photos items the library doesn\'t have yet.'
+      : !scanned
+        ? 'Scan to see which Google Photos items the library doesn\'t have yet.'
+        : `${plural(totals.items, 'item')}${gpCounts(totals) ? ` · ${gpCounts(totals)}` : ''} · scanned ${when(gp.scanned_at)}`;
+    el('gp-toolbar').classList.toggle('hidden', !gp.totals.items);
+
+    // Month cards when nothing narrower is open; a filter hides months without such items.
+    const months = state.gpMonth ? [] : gp.months.filter((item) => !state.gpFilter || item[state.gpFilter]);
+    el('gp-months').innerHTML = months.map((item) => {
+      const cover = item.cover ? `<img loading="lazy" src="${escapeHtml(gpThumb(item.cover))}" alt="" onerror="${noCover()}">` : '<div class="no-cover"></div>';
+      return `<a class="shoot-card" href="#gphotos" data-gp-month="${escapeHtml(item.month)}">${cover}<div class="shoot-card-body"><b>${escapeHtml(monthName(item.month))}</b><span class="muted">${escapeHtml(plural(item.items, 'item'))}</span><span class="muted">${escapeHtml(gpCounts(item))}</span></div></a>`;
+    }).join('');
+
+    const items = state.gpMonth ? gp.items : [];
+    const limit = state.gpLimit || DRIVE_PAGE;
+    state.gpShown = items;
+    el('gp-count').textContent = state.gpMonth ? plural(items.length, 'item') : plural(months.length, 'month');
+    el('gp-more-row').classList.toggle('hidden', items.length <= limit);
+    el('gp-more').textContent = `Show more (${items.length - limit} left)`;
+    el('gp-grid').innerHTML = items.slice(0, limit).map((item, index) => {
+      const label = item.file_name.includes('.') ? item.file_name.split('.').pop().toUpperCase() : '';
+      const image = item.thumbnail ? `<img loading="lazy" src="${escapeHtml(gpThumb(item.media_key))}" alt="" onerror="${noCover(label)}">` : `<div class="no-cover">${escapeHtml(label)}</div>`;
+      const badges = [gpStatus[item.status] || '', item.video ? '<span class="pill">Video</span>' : '', item.archived ? '<span class="pill" title="Archived in Google Photos">Archived</span>' : ''].join('');
+      return `<div class="photo-card">
+        <button type="button" class="photo-open" data-gp-item="${index}">${image}</button>
+        <div class="photo-caption"><span title="${escapeHtml(item.file_name)}">${escapeHtml(item.file_name || 'Unnamed')}</span><span class="muted">${escapeHtml(day(item.local_time))}</span></div>
+        <div class="photo-badges">${badges}</div>
+      </div>`;
+    }).join('');
+    const nothing = state.gpMonth ? !items.length : !months.length;
+    el('gp-empty').classList.toggle('hidden', !scanned || !nothing);
+    el('gp-empty').textContent = state.gpFilter === 'missing' ? 'Everything here is in the library.' : 'Nothing here.';
+  }
+
+  function openGPItem(item) {
+    el('gp-item-title').textContent = item.file_name || 'Unnamed';
+    const where = item.match;
+    const status = {
+      library: `In the library: ${where?.shoot_name} / ${where?.file}`,
+      similar: `Same shot as ${where?.shoot_name} / ${where?.file}, but a different file (for example a converted or edited copy).`,
+      missing: 'Not in the library.',
+    }[item.status] || 'Not compared yet.';
+    el('gp-item-facts').innerHTML = `
+      <dt>Status</dt><dd>${escapeHtml(status)}</dd>
+      <dt>Taken</dt><dd>${escapeHtml(captureDate(item.local_time)?.toLocaleString() ?? 'unknown')}</dd>
+      <dt>File</dt><dd>${item.size ? bytes(item.size) : 'size unknown'} · ${item.width}×${item.height}${item.video ? ' · video' : ''}</dd>
+      <dt>Stored as</dt><dd>${item.original_quality ? 'Original quality' : 'Storage saver (compressed by Google)'}${item.archived ? ' · archived' : ''}${item.owned ? '' : ' · shared with you'}</dd>`;
+    el('gp-image').src = item.thumbnail ? gpThumb(item.media_key, 1600) : '';
+    el('gp-open').href = `https://photos.google.com/photo/${encodeURIComponent(item.media_key)}`;
+    el('gp-shoot').classList.toggle('hidden', !where);
+    if (where) el('gp-shoot').href = `#shoot/${where.shoot_id}`;
+    el('gp-dialog').showModal();
+  }
+
+  el('gp-shoot').addEventListener('click', () => el('gp-dialog').close());
+
+  el('view-gphotos').addEventListener('click', (event) => {
+    const month = event.target.closest('[data-gp-month]');
+    if (month) {
+      event.preventDefault();
+      return openGPMonth(month.dataset.gpMonth);
+    }
+    const item = event.target.closest('[data-gp-item]');
+    if (item) openGPItem(state.gpShown[Number(item.dataset.gpItem)]);
+  });
+  document.querySelectorAll('[data-gp-scope]').forEach((button) => button.addEventListener('click', () => openGPMonth(button.dataset.gpScope === 'all' ? 'all' : '')));
+  document.querySelectorAll('[data-gp-filter]').forEach((button) => button.addEventListener('click', () => {
+    state.gpFilter = button.dataset.gpFilter;
+    state.gpLimit = DRIVE_PAGE;
+    document.querySelectorAll('[data-gp-filter]').forEach((item) => item.classList.toggle('active', item === button));
+    loadGPhotos();
+  }));
+  el('gp-more').addEventListener('click', () => {
+    state.gpLimit = (state.gpLimit || DRIVE_PAGE) + DRIVE_PAGE;
+    renderGPhotos();
+  });
+  el('gp-signin').addEventListener('click', () => guarded(el('gp-signin'), async () => {
+    if (await webSignIn('gp-result')) loadGPhotos();
+  }));
+  el('gp-scan').addEventListener('click', () => guarded(el('gp-scan'), async () => {
+    const task = await post('/api/gphotos/scan');
+    el('gp-result').innerHTML = '<p class="muted">Reading Google Photos… you can keep using Kira.</p>';
+    watchTask(task, async (done) => {
+      if (done.state === 'done' && !done.result.cancelled) {
+        const r = done.result;
+        el('gp-result').innerHTML = `<p class="notice ok">Compared ${plural(r.items, 'item')}: ${r.missing} not in the library, ${r.similar} the same shot as a different file, ${r.library} in the library.</p>`;
+      } else {
+        el('gp-result').innerHTML = `<p class="error-text">${escapeHtml(done.error || done.state)}</p>`;
+      }
+      await loadGPhotos();
+      // The saved session can expire while still on file; offer a fresh sign-in after any failure.
+      if (done.state !== 'done') el('gp-signin').classList.remove('hidden');
+    });
+  }));
 
   // -- Background tasks -----------------------------------------------------------------------
 

@@ -33,6 +33,11 @@ def find_browser() -> str | None:
     return None
 
 
+# Straight to Google's account sign-in, landing in Photos afterwards, instead of the Photos
+# landing page with its own "Go to Google Photos" button.
+SIGN_IN_URL = "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fphotos.google.com%2F"
+
+
 class GoogleSignInBrowser:
     """Own a temporary browser profile; never attach to a personal browser.
 
@@ -58,7 +63,7 @@ class GoogleSignInBrowser:
         self.profile = tempfile.TemporaryDirectory(prefix=".kira-google-signin-", dir=self.root)
         try:
             self.process = subprocess.Popen(
-                [*self._base_arguments(), "--new-window", "https://photos.google.com/"],
+                [*self._base_arguments(), "--new-window", SIGN_IN_URL],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -74,6 +79,9 @@ class GoogleSignInBrowser:
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-background-mode",
+            # Bound sessions tie Google's short-lived cookies to a key inside this throwaway
+            # profile, so Kira could never renew them and the sign-in would die within hours.
+            "--disable-features=EnableBoundSessionCredentials,DeviceBoundSessionCredentials",
         ]
 
     def wait_until_closed(self, deadline: float) -> bool:

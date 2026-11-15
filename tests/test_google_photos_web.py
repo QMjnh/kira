@@ -205,6 +205,26 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         self.assertNotIn("automatic-session", self.service.session_path.read_text(encoding="utf-8"))
         self.assertEqual(list(self.root.glob(".kira-google-web-*.txt")), [])
 
+    def test_cookies_google_rotates_are_saved_back_into_the_session(self) -> None:
+        from http.cookiejar import Cookie
+
+        def cookie(domain: str, name: str, value: str) -> Cookie:
+            return Cookie(0, name, value, None, False, domain, True, True, "/", True, True, None, False, None, None, {})
+
+        self.service.import_session(self.cookies)
+        before = self.service.session_path.read_text(encoding="utf-8")
+        self.assertFalse(self.service._save_cookies([cookie(".google.com", "SID", "secret-session")]))
+        self.assertEqual(self.service.session_path.read_text(encoding="utf-8"), before)
+        rotated = [cookie(".google.com", "__Secure-1PSIDTS", "fresh"), cookie(".example.com", "SID", "foreign")]
+        self.assertTrue(self.service._save_cookies(rotated))
+        self.assertNotIn("fresh", self.service.session_path.read_text(encoding="utf-8"))
+        raw, _ = self.service._load_session()
+        self.assertIn(b"__Secure-1PSIDTS	fresh", raw)
+        self.assertIn(b"SID	secret-session", raw)
+        self.assertNotIn(b"foreign", raw)
+        self.assertEqual(self.service.status()["account_index"], 0)
+        self.assertFalse(self.service.refresh_session(force=True))  # an injected client never calls Google
+
     def test_disconnect_during_verification_cannot_restore_the_connection(self) -> None:
         verifying, release = threading.Event(), threading.Event()
         browser = SimpleNamespace(
@@ -501,6 +521,11 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         self.service._client_factory = ExpiredClient
         with self.assertRaisesRegex(GooglePhotosWebError, "session expired"):
             self.service.list_albums()
+        # A saved but rejected session no longer counts as connected until the next sign-in.
+        self.assertEqual((self.service.status()["connected"], self.service.status()["expired"]), (False, True))
+        self.service._client_factory = FakeClient
+        self.service.import_session(self.cookies)
+        self.assertEqual((self.service.status()["connected"], self.service.status()["expired"]), (True, False))
 
     def test_check_verifies_imported_cookie_json(self) -> None:
         self.service.import_session(self.cookies)

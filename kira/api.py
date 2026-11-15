@@ -88,6 +88,9 @@ AUTHED_ROUTES: list[tuple[tuple[str, ...], tuple[str, ...], str, bool]] = [
     (("api", "google", "web-session"), ("DELETE",), "_h_web_session_delete", True),
     (("api", "backup", "run"), ("POST",), "_h_backup_run", True),
     (("api", "backup", "restore"), ("POST",), "_h_backup_restore", True),
+    (("api", "gphotos", "index"), ("GET",), "_h_gphotos_index", True),
+    (("api", "gphotos", "scan"), ("POST",), "_h_gphotos_scan", True),
+    (("api", "gphotos", "thumbnail"), ("GET", "HEAD"), "_h_gphotos_thumbnail", True),
     (("api", "photos", "check"), ("POST",), "_h_photos_check", True),
     (("api", "photos", "upload-finals"), ("POST",), "_h_photos_upload", True),
     (("api", "photos", "cleanup", "plan"), ("POST",), "_h_cleanup_plan", True),
@@ -651,6 +654,17 @@ class KiraRequestHandler(BaseHTTPRequestHandler):
 
     def _h_backup_restore(self, params: dict, query: dict) -> None:
         self._start("drive-restore", "Restore missing files from Drive", self.app.drive.restore)
+
+    def _h_gphotos_index(self, params: dict, query: dict) -> None:
+        self._send_json(self.app.gphotos_index.listing(_query(query, "month"), _query(query, "status")))
+
+    def _h_gphotos_thumbnail(self, params: dict, query: dict) -> None:
+        size = int(_query(query, "size", "400") or 400)
+        path = self.app.gphotos_index.thumbnail(_query(query, "key"), size)
+        self._serve_file(path, path.name, self.command == "HEAD", "image/jpeg", "inline", "private, max-age=86400")
+
+    def _h_gphotos_scan(self, params: dict, query: dict) -> None:
+        self._start("gphotos-scan", "Compare Google Photos with the library", self.app.gphotos_index.scan)
 
     def _h_photos_check(self, params: dict, query: dict) -> None:
         self._start("photos-check", "Check what Google Photos holds", self.app.photos.check)

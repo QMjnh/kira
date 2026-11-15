@@ -35,8 +35,10 @@ Style is enforced with [Ruff](https://docs.astral.sh/ruff/) (configured in `pypr
 | `kira/ipad.py` | iPad outbox and receiving edits. |
 | `kira/drive.py` | Never-overwriting Drive mirror, move detection, restore. |
 | `kira/gphotos.py` | Google Photos: presence check, Final uploads, clean-up plan and apply, picker import (then album + Archive, matched by hash or filename and capture time). |
+| `kira/gpindex.py` | What Google Photos holds that the library doesn't: scans metadata only (no downloads), matches by Kira's own links, then exact bytes (hashing only same-size library files, with Google confirming hashes), then same name and capture time. |
+| `kira/sources.py` | Browsing a card or folder outside the library: hashes, duplicates across the drive, shortcuts to duplicates, moving library copies to trash. |
 | `kira/google_auth.py` | One OAuth consent (Drive `drive.file`, Photos append-only, app-created read, picker), DPAPI-encrypted tokens. |
-| `kira/google_photos_web.py`, `kira/google_signin.py` | Unofficial web client (hash lookup, Archive) and its browser sign-in. |
+| `kira/google_photos_web.py`, `kira/google_signin.py` | Unofficial web client (library listing, file details, hash lookup, Archive) and its browser sign-in. |
 | `kira/tasks.py` | Background tasks with progress. |
 | `kira/media.py` | Shared file helpers (hashing, atomic writes, folder browsing, extension tables). |
 | `web/` | Static browser UI. |

@@ -20,6 +20,7 @@
           <a href="#library" data-view="library">Library</a>
           <a href="#import" data-view="import" class="desktop-only">Import</a>
           <a href="#drives" data-view="drives" class="desktop-only">Drives</a>
+          <a href="#gphotos" data-view="gphotos" class="desktop-only">Google Photos <span id="gphotos-badge" class="badge warn hidden"></span></a>
           <a href="#review" data-view="review">Review <span id="review-badge" class="badge hidden"></span></a>
           <a href="#ipad" data-view="ipad">iPad <span id="ipad-badge" class="badge hidden"></span></a>
           <a href="#cloud" data-view="cloud" class="desktop-only">Cloud <span id="cloud-badge" class="badge warn hidden"></span></a>
@@ -189,6 +190,42 @@
         <p id="drive-empty" class="empty hidden">No photos or videos here.</p>
       </section>
 
+      <!-- Google Photos: what it holds that the library doesn't -->
+      <section id="view-gphotos" class="view hidden">
+        <div class="view-head">
+          <div>
+            <div id="gp-crumbs" class="crumbs back-crumbs"></div>
+            <h1 id="gp-title">Google Photos</h1>
+            <p id="gp-summary" class="muted"></p>
+          </div>
+          <div class="row wrap desktop-only">
+            <button id="gp-signin" class="quiet-button hidden" type="button">Sign in to Photos web</button>
+            <button id="gp-scan" class="primary-button" type="button" title="Reads names, sizes and dates from Google Photos and compares them with the library">Scan Google Photos</button>
+          </div>
+        </div>
+        <p class="muted small-text">A scan reads only names, sizes and dates. Originals are never downloaded; Google's small previews are fetched as you view them and kept in Kira's working folder.</p>
+        <div id="gp-result" class="result"></div>
+        <div id="gp-toolbar" class="toolbar hidden">
+          <div class="row wrap">
+            <div class="segmented" role="tablist" aria-label="Group">
+              <button type="button" data-gp-scope="months" class="active">By month</button>
+              <button type="button" data-gp-scope="all">Every item</button>
+            </div>
+            <div class="segmented" role="tablist" aria-label="Show">
+              <button type="button" data-gp-filter="" class="active">All</button>
+              <button type="button" data-gp-filter="missing">Not in library</button>
+              <button type="button" data-gp-filter="similar">Same shot, other file</button>
+              <button type="button" data-gp-filter="library">In library</button>
+            </div>
+          </div>
+          <span id="gp-count" class="muted"></span>
+        </div>
+        <div id="gp-months" class="shoot-grid"></div>
+        <div id="gp-grid" class="photo-grid"></div>
+        <div class="row hidden" id="gp-more-row"><button id="gp-more" class="quiet-button" type="button">Show more</button></div>
+        <p id="gp-empty" class="empty hidden"></p>
+      </section>
+
       <!-- Review -->
       <section id="view-review" class="view hidden">
         <div class="view-head"><div><h1>Review</h1><p class="muted">Files Kira couldn't place with confidence. Nothing is thrown away while it waits here.</p></div></div>
@@ -321,6 +358,22 @@
           <p id="source-meta" class="muted"></p>
           <ol id="source-list" class="version-list"></ol>
           <p class="muted small-text">Nothing on the drive is changed by looking at it.</p>
+        </aside>
+      </div>
+    </dialog>
+
+    <!-- A Google Photos item -->
+    <dialog id="gp-dialog" class="photo-dialog">
+      <div class="dialog-body">
+        <div class="viewer"><img id="gp-image" alt=""></div>
+        <aside class="versions">
+          <div class="row spread"><h2 id="gp-item-title"></h2><button class="quiet-button small" type="button" data-close>Close</button></div>
+          <dl id="gp-item-facts" class="facts"></dl>
+          <div class="row wrap">
+            <a id="gp-open" class="quiet-button small link-button" target="_blank" rel="noopener">Open in Google Photos</a>
+            <a id="gp-shoot" class="quiet-button small link-button hidden">Open in library</a>
+          </div>
+          <p class="muted small-text">Kira hasn't downloaded this item. The picture is Google's own preview.</p>
         </aside>
       </div>
     </dialog>

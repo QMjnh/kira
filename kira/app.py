@@ -12,6 +12,7 @@ from .errors import KiraError
 from .google_auth import GoogleAuth
 from .google_photos_web import GooglePhotosWebService
 from .gphotos import PhotosSync
+from .gpindex import GooglePhotosIndex
 from .ipad import Outbox
 from .library import Library
 from .media import atomic_json_write, utc_now
@@ -31,8 +32,10 @@ class KiraApp:
         self.library = Library(self.root, Path(library_root) if library_root else None)
         self.auth = GoogleAuth(self.root, app_root)
         self.web = GooglePhotosWebService(self.root)
+        self.web.start_keepalive()
         self.drive = DriveBackup(self.library, self.auth)
         self.photos = PhotosSync(self.library, self.auth, self.web)
+        self.gphotos_index = GooglePhotosIndex(self.library, self.photos)
         self.outbox = Outbox(self.library)
         self.sources = SourceBrowser(self.library)
         self.tasks = TaskRunner()
