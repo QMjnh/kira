@@ -1,1355 +1,145 @@
 (() => {
-  const CHUNK_SIZE = 16 * 1024 * 1024;
+  'use strict';
+
   const state = {
     token: localStorage.getItem('kira-token') || '',
     desktop: false,
     bootstrap: null,
-    jobs: [],
-    currentJob: null,
-    tagFilter: new Set(),
-    dateFrom: '',
-    dateTo: '',
-    rightPaneOpen: false,
-    tileAnchor: {left: null, right: null},
-    libraryPanes: {
-      left: emptyPane(),
-      right: emptyPane(),
-    },
-    activePaneId: 'left',
-    compareZoom: 1,
-    comparePan: {x: 0, y: 0},
-    googleDownloadSettingsOpen: false,
-    showRawOnly: localStorage.getItem('kira-show-raw-only') === 'true',
-    google: {configured: false, connected: false, organizer: {}},
+    library: null,
+    shoot: null,
+    filter: 'kept',
+    selected: new Set(),
+    photo: null,
+    version: null,
+    cleanup: [],
+    cleanupChosen: new Set(),
+    watched: new Map(),
+    browseTarget: null,
+    browsePath: '',
+    drive: null,
+    drivePath: localStorage.getItem('kira-drive') || '',
+    driveFilter: 'all',
+    driveDeep: localStorage.getItem('kira-drive-deep') === '1',
+    driveLimit: 0,
   };
 
   const el = (id) => document.getElementById(id);
-  const pairView = el('pair-view');
-  const dashboardView = el('dashboard-view');
-  const jobView = el('job-view');
-  const connectionState = el('connection-state');
-  let googleSignInPolling = false;
+  const views = ['pair', 'setup', 'library', 'shoot', 'import', 'drives', 'review', 'ipad', 'cloud'];
+  const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+  const plural = (count, word, many = `${word}s`) => `${count} ${count === 1 ? word : many}`;
+  const bytes = (value) => {
+    if (!value) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
+    return `${(value / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`;
+  };
+  const when = (iso) => (iso ? new Date(iso).toLocaleString() : 'never');
+  // Capture times come in camera format ("2026:07:04 10:00:00", local time); timestamps come as ISO 8601.
+  const captureDate = (value) => {
+    const match = /^(\d{4})[:-](\d\d)[:-](\d\d)[ T](\d\d):(\d\d):(\d\d)/.exec(value || '');
+    if (!match) return null;
+    const [, y, mo, d, h, mi, sec] = match.map(Number);
+    return new Date(y, mo - 1, d, h, mi, sec);
+  };
+  const day = (value) => captureDate(value)?.toLocaleDateString() ?? '';
 
-  function showOnly(view) {
-    [pairView, dashboardView, jobView].forEach((item) => item.classList.toggle('hidden', item !== view));
-  }
-
-  function setConnected(label = 'Connected directly') {
-    connectionState.classList.add('connected');
-    connectionState.innerHTML = '<span></span>' + label;
-  }
-
-  function setDisconnected(label = 'Not connected') {
-    connectionState.classList.remove('connected');
-    connectionState.innerHTML = '<span></span>' + label;
+  function toast(message, isError = false) {
+    const node = el('toast');
+    node.textContent = message;
+    node.classList.toggle('error', isError);
+    node.classList.remove('hidden');
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(() => node.classList.add('hidden'), isError ? 7000 : 3500);
   }
 
   async function api(path, options = {}) {
     const headers = new Headers(options.headers || {});
     if (state.token) headers.set('X-Kira-Token', state.token);
-    if (options.body && typeof options.body === 'string') headers.set('Content-Type', 'application/json');
+    if (options.body && typeof options.body === 'string' && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
     const response = await fetch(path, {...options, headers});
-    const body = await response.json().catch(() => ({}));
+    const text = await response.text();
+    let payload = {};
+    try { payload = text ? JSON.parse(text) : {}; } catch { payload = {error: text}; }
     if (!response.ok) {
-      const error = new Error(body.error || `Request failed (${response.status})`);
+      const error = new Error(payload.error || `Request failed (${response.status})`);
       error.status = response.status;
-      error.body = body;
       throw error;
     }
-    return body;
+    return payload;
+  }
+  const post = (path, body = {}) => api(path, {method: 'POST', body: JSON.stringify(body)});
+  const withToken = (path) => `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(state.token)}`;
+  const fileUrl = (shootId, photoId, name, suffix = '') => withToken(`/api/shoots/${shootId}/photos/${photoId}/${encodeURIComponent(name)}${suffix}`);
+  const previewUrl = (shootId, photoId, name, size = 480) => fileUrl(shootId, photoId, name, `/preview?size=${size}`);
+
+  async function guarded(button, work) {
+    if (button) button.disabled = true;
+    try { return await work(); } catch (error) { toast(error.message, true); return null; } finally { if (button) button.disabled = false; }
   }
 
-  async function initialize() {
-    const pairingSecret = new URLSearchParams(window.location.search).get('pair');
+  // -- Navigation -------------------------------------------------------------------
+
+  function show(view) {
+    views.forEach((name) => el(`view-${name}`).classList.toggle('hidden', name !== view));
+    document.querySelectorAll('#nav a').forEach((link) => link.classList.toggle('active', link.dataset.view === view || (view === 'shoot' && link.dataset.view === 'library')));
+  }
+
+  async function route() {
+    if (!state.token) return show('pair');
+    if (!state.library) await loadLibrary();
+    if (!state.library.configured) return show('setup');
+    const [view, arg] = (location.hash.slice(1) || 'library').split('/');
+    if (view === 'shoot' && arg) { show('shoot'); return openShoot(arg); }
+    if (!views.includes(view) || view === 'pair' || view === 'setup') return show('library');
+    show(view);
+    if (view === 'library') renderLibrary();
+    if (view === 'import') renderImport();
+    if (view === 'drives') loadDrive();
+    if (view === 'review') loadReview();
+    if (view === 'ipad') loadIpad();
+    if (view === 'cloud') loadCloud();
+  }
+
+  // -- Start-up and pairing --------------------------------------------------------------
+
+  async function start() {
+    const pairingSecret = new URLSearchParams(location.search).get('pair');
     try {
-      const bootstrapResponse = await fetch('/api/bootstrap');
-      if (bootstrapResponse.ok) {
-        state.bootstrap = await bootstrapResponse.json();
+      const response = await fetch('/api/bootstrap');
+      if (response.ok) {
+        state.bootstrap = await response.json();
         state.desktop = true;
         state.token = state.bootstrap.token;
         localStorage.setItem('kira-token', state.token);
       }
-    } catch (_) {
-      // A remote device cannot access the local bootstrap endpoint.
-    }
-
+    } catch { /* remote devices cannot reach bootstrap */ }
+    document.body.classList.toggle('is-desktop', state.desktop);
+    document.body.classList.toggle('is-remote', !state.desktop);
     if (pairingSecret && !state.desktop) {
-      setDisconnected('Pairing with desktop…');
       try {
-        const response = await api('/api/pair', {
-          method: 'POST',
-          body: JSON.stringify({secret: pairingSecret}),
-        });
+        const response = await api('/api/pair', {method: 'POST', body: JSON.stringify({secret: pairingSecret})});
         state.token = response.token;
         localStorage.setItem('kira-token', state.token);
-        history.replaceState({}, document.title, window.location.pathname);
-      } catch (error) {
-        localStorage.removeItem('kira-token');
-        state.token = '';
-        history.replaceState({}, document.title, window.location.pathname);
+        history.replaceState(null, '', '/#ipad');
+      } catch {
         el('pair-error').textContent = 'That QR link has expired. Scan the current code shown on the desktop.';
       }
     }
-
-    if (!state.token) {
-      setDisconnected('Pairing required');
-      showOnly(pairView);
-      return;
-    }
-
-    try {
-      await loadDashboard();
-    } catch (error) {
-      if (error.status === 401) {
-        localStorage.removeItem('kira-token');
-        state.token = '';
-        setDisconnected('Pairing required');
-        showOnly(pairView);
-        return;
-      }
-      setDisconnected('Connection error');
-      toast(error.message);
-    }
-  }
-
-  async function loadDashboard() {
-    const response = await api('/api/jobs');
-    state.jobs = response.jobs;
-    setConnected(state.desktop ? 'Running on this desktop' : 'Connected to desktop');
-    showOnly(dashboardView);
-    el('desktop-services').classList.toggle('hidden', !state.desktop);
-    el('desktop-setup').classList.toggle('hidden', !state.desktop);
-    el('open-history').classList.toggle('hidden', !state.desktop);
-    el('create-job-card').classList.toggle('hidden', !state.desktop);
-    el('google-photos-card').classList.toggle('hidden', !state.desktop);
-    el('photo-workspace').classList.toggle('hidden', !state.desktop);
-    if (state.desktop && state.bootstrap) {
-      el('ipad-url').textContent = state.bootstrap.ipad_url;
-      el('pair-code-display').textContent = state.bootstrap.pair_code;
-      el('data-dir').textContent = state.bootstrap.data_dir;
-      el('pair-qr').src = `${state.bootstrap.pair_qr_url}?v=${Date.now()}`;
-    }
-    if (state.desktop) {
-      renderPhotoGrid();
-      await refreshGoogleStatus();
-      await checkGoogleHealth();
-      await navigatePane('left', '').catch(showError);
-    }
-    renderJobs();
-  }
-
-  async function refreshGoogleStatus() {
-    try {
-      state.google = await api('/api/google/status');
-      renderGoogleStatus();
-      return state.google;
-    } catch (error) {
-      el('google-status').textContent = 'Unavailable';
-      el('google-copy').textContent = error.message;
-      return state.google;
-    }
-  }
-
-  async function checkGoogleHealth() {
-    const notice = el('google-health-notice');
-    try {
-      const health = await api('/api/google/health');
-      if (health.ok) {
-        notice.classList.add('hidden');
-        notice.textContent = '';
-        return health;
-      }
-      notice.textContent = health.message || 'Google Photos needs to reconnect.';
-      notice.classList.remove('hidden');
-      return health;
-    } catch (error) {
-      notice.textContent = error.message || 'Could not check the Google Photos connection.';
-      notice.classList.remove('hidden');
-      return null;
-    }
-  }
-
-  function renderGoogleStatus() {
-    const google = state.google;
-    el('google-status').textContent = google.connected ? 'Connected' : google.configured ? 'Not connected' : 'Setup required';
-    el('google-connect').classList.toggle('hidden', google.connected);
-    el('google-pick').classList.toggle('hidden', !google.connected);
-    el('google-disconnect').classList.toggle('hidden', !google.connected);
-    el('google-connect').disabled = !google.configured;
-    el('google-copy').textContent = google.configured
-      ? google.connected
-        ? 'Choose media in Google Photos, then save it into the folder below. Exact duplicates are skipped.'
-        : 'Connect once, then choose Google photos and videos to save into a Kira folder.'
-      : `Download a Desktop OAuth credential from Google Cloud and save it as ${google.credentials_path}`;
-    renderGoogleImportPreferences();
-    renderGoogleOrganizer();
-    renderGoogleDestination();
-    updateSelectionUi();
-  }
-
-  function renderGoogleOrganizer() {
-    const organizer = state.google.organizer || {};
-    const connected = Boolean(organizer.connected);
-    const directory = paneFor().directory;
-    const organizerStatus = el('google-organizer-status');
-    organizerStatus.textContent = connected
-      ? 'Connected'
-      : organizer.available === false ? 'Client unavailable' : 'Not connected';
-    organizerStatus.title = connected && organizer.account
-      ? `Google account: ${organizer.account}`
-      : '';
-    el('google-organizer-connect').classList.toggle('hidden', connected);
-    el('google-organizer-controls').classList.toggle('hidden', !connected);
-    renderGoogleSignIn(organizer.sign_in);
-    if (['starting', 'waiting'].includes(organizer.sign_in?.status)) pollGoogleSignIn().catch(showError);
-    if (!el('google-album-title').value) {
-      el('google-album-title').value = localStorage.getItem('kira-google-album-title') || '';
-    }
-    const matchSource = el('google-match-source');
-    matchSource.querySelector('strong').textContent = directory || 'Open a local folder below first.';
-    const matchButton = el('google-match-folder');
-    matchButton.disabled = !connected
-      || !directory
-      || !el('google-album-title').value.trim();
-    matchButton.textContent = el('google-archive-after-upload').checked
-      ? 'Match folder → album + archive'
-      : 'Match folder → album';
-  }
-
-  function renderGoogleSignIn(signIn = {status: 'idle'}) {
-    const pending = ['starting', 'waiting'].includes(signIn.status);
-    const unavailable = state.google.organizer?.available === false || state.google.organizer?.browser_available === false;
-    el('google-organizer-signin').disabled = pending || unavailable;
-    el('google-organizer-reconnect').disabled = pending || unavailable;
-    el('google-organizer-connect-button').disabled = pending || state.google.organizer?.available === false;
-    el('google-signin-cancel').classList.toggle('hidden', !pending);
-    el('google-signin-message').textContent = signIn.status === 'starting'
-      ? 'Opening Google Photos on this desktop…'
-      : signIn.status === 'waiting' ? 'Complete sign-in in the Google Photos window. Kira will connect automatically.'
-      : signIn.status === 'failed' ? signIn.error || 'Google Photos sign-in failed. Try again.'
-      : signIn.status === 'cancelled' ? 'Sign-in cancelled.'
-      : unavailable && state.google.organizer?.available !== false ? 'Install Chrome or Edge to sign in, or import a session manually.' : '';
-  }
-
-  async function pollGoogleSignIn() {
-    if (googleSignInPolling) return;
-    googleSignInPolling = true;
-    try {
-      while (true) {
-        const signIn = await api('/api/google/web-signin');
-        state.google.organizer.sign_in = signIn;
-        renderGoogleSignIn(signIn);
-        if (signIn.status === 'completed') {
-          await refreshGoogleStatus();
-          await checkGoogleHealth();
-          toast('Google Photos organizer connected.');
-          return;
-        }
-        if (signIn.status === 'failed') throw new Error(signIn.error || 'Google Photos sign-in failed. Try again.');
-        if (!['starting', 'waiting'].includes(signIn.status)) return;
-        await wait(1000);
-      }
-    } finally {
-      googleSignInPolling = false;
-    }
-  }
-
-  function googleImportPreferences() {
-    const threshold = Number.parseInt(el('google-zip-threshold').value, 10);
-    return {
-      download_mode: el('google-download-mode').value,
-      zip_threshold: Number.isFinite(threshold) ? threshold : 50,
-    };
-  }
-
-  function renderGoogleImportPreferences() {
-    el('google-download-mode').value = localStorage.getItem('kira-google-download-mode') || 'automatic';
-    el('google-zip-threshold').value = localStorage.getItem('kira-google-zip-threshold') || '50';
-    const storedDestination = localStorage.getItem('kira-google-destination-folder');
-    el('google-destination-folder').value = storedDestination && storedDestination !== '/inbox'
-      ? storedDestination
-      : (state.google.inbox || '');
-    updateGooglePreferenceUi();
-  }
-
-  function updateGooglePreferenceUi() {
-    const mode = el('google-download-mode').value;
-    el('google-zip-threshold-field').classList.toggle('hidden', mode !== 'automatic');
-    el('google-import-settings').classList.toggle('hidden', !state.googleDownloadSettingsOpen);
-    const toggle = el('google-download-settings-toggle');
-    toggle.setAttribute('aria-expanded', String(state.googleDownloadSettingsOpen));
-    toggle.classList.toggle('is-open', state.googleDownloadSettingsOpen);
-  }
-
-  function saveGoogleImportPreferences() {
-    const preferences = googleImportPreferences();
-    if (preferences.zip_threshold < 2 || preferences.zip_threshold > 2000) {
-      throw new Error('Automatic ZIP threshold must be between 2 and 2000 items.');
-    }
-    localStorage.setItem('kira-google-download-mode', preferences.download_mode);
-    localStorage.setItem('kira-google-zip-threshold', String(preferences.zip_threshold));
-  }
-
-  function renderGoogleDestination() {
-    const destinationFolder = el('google-destination-folder').value.trim() || state.google.inbox || '—';
-    el('google-destination').textContent = destinationFolder;
-    el('google-pick').textContent = 'Add Google media';
-    localStorage.setItem('kira-google-destination-folder', destinationFolder);
-  }
-
-  function googleImportAlbumTitle(destinationFolder) {
-    const value = destinationFolder.trim();
-    const normalized = value.replace(/[\\/]+$/, '').toLowerCase();
-    if (!value || normalized === '/inbox' || normalized === 'inbox' || value === state.google.inbox) {
-      return 'inbox';
-    }
-    return value.split(/[\\/]/).filter(Boolean).pop() || 'inbox';
-  }
-
-  function wait(milliseconds) {
-    return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-  }
-
-  async function waitForGoogleConnection() {
-    for (let attempt = 0; attempt < 120; attempt += 1) {
-      await wait(1000);
-      const status = await refreshGoogleStatus();
-      if (status.connected) {
-        toast('Google Photos connected.');
-        await checkGoogleHealth();
-        return;
+    if (state.token) {
+      try { await loadLibrary(); } catch (error) {
+        if (error.status === 401) { localStorage.removeItem('kira-token'); state.token = ''; }
       }
     }
-    toast('Google sign-in is still waiting. You can try Connect again.');
+    setConnected(Boolean(state.token));
+    el('nav').classList.toggle('hidden', !state.token);
+    await route();
+    setInterval(refreshBadges, 15000);
   }
 
-  async function pollPickerSession(sessionId) {
-    el('google-progress').classList.remove('hidden');
-    el('google-progress-label').textContent = 'Waiting for your Google Photos selection…';
-    el('google-progress-value').textContent = '';
-    el('google-progress-bar').removeAttribute('value');
-    for (let attempt = 0; attempt < 400; attempt += 1) {
-      const session = await api(`/api/google/picker/sessions/${encodeURIComponent(sessionId)}`);
-      if (session.mediaItemsSet) return session;
-      const duration = Number.parseFloat(session.pollingConfig?.pollInterval || '2');
-      await wait(Math.max(1000, duration * 1000));
-    }
-    throw new Error('Google Photos selection timed out. Try choosing photos again.');
-  }
-
-  async function pollGoogleOperation(operationId) {
-    const progress = el('google-progress');
-    progress.classList.remove('hidden');
-    while (true) {
-      const operation = await api(`/api/google/operations/${encodeURIComponent(operationId)}`);
-      const processed = operation.kind === 'match_folder'
-        ? Number(operation.scanned || 0)
-        : operation.completed + operation.duplicates + operation.failed;
-      const percent = operation.total ? Math.round((processed / operation.total) * 100) : 0;
-      el('google-progress-label').textContent = operation.kind === 'match_folder' && operation.phase === 'matching_google_photos'
-        ? 'Scanning Google Photos for matching image content…'
-        : operation.kind === 'match_folder' && operation.phase === 'organizing_google_photos'
-          ? `${operation.archive ? 'Adding matched items to the album and archiving' : 'Adding matched items to the album'}…`
-        : operation.kind === 'import' && operation.phase === 'organizing_google_photos'
-          ? `${operation.archive ? 'Creating the album and archiving' : 'Creating the album'}…`
-        : operation.kind === 'import'
-        ? `Checking and importing ${processed} of ${operation.total}…`
-        : operation.kind === 'match_folder'
-          ? `Matching folder content ${processed} of ${operation.total}…`
-          : operation.kind === 'organize'
-          ? `${operation.archive ? 'Adding to album and archiving' : 'Adding to album'} ${processed} of ${operation.total}…`
-          : `Uploading ${processed} of ${operation.total}…`;
-      el('google-progress-value').textContent = `${percent}%`;
-      el('google-progress-bar').value = percent;
-      if (['complete', 'complete_with_errors', 'failed'].includes(operation.status)) return operation;
-      await wait(750);
-    }
-  }
-
-  async function importGoogleSelection(sessionId) {
-    const preferences = googleImportPreferences();
-    const destinationFolder = el('google-destination-folder').value.trim() || state.google.inbox || '';
-    const albumTitle = googleImportAlbumTitle(destinationFolder);
-    const archive = el('google-import-archive').checked;
-    const operation = await api('/api/google/imports', {
-      method: 'POST',
-      body: JSON.stringify({
-        session_id: sessionId,
-        destination_folder: destinationFolder,
-        download_mode: preferences.download_mode,
-        zip_threshold: preferences.zip_threshold,
-        album_title: archive ? albumTitle : '',
-        archive,
-      }),
-    });
-    const finished = await pollGoogleOperation(operation.id);
-    if (finished.status === 'failed') throw new Error(finished.error || 'Google Photos import failed.');
-    const result = await api(`/api/local/scan?path=${encodeURIComponent(finished.directory)}`);
-    applyLibraryScan(result, state.activePaneId);
-    await renderPaneBrowserForDirectory(state.activePaneId, finished.directory);
-    const details = [
-      `${finished.completed} added`,
-      `${finished.duplicates} exact duplicate${finished.duplicates === 1 ? '' : 's'} skipped`,
-      `${finished.possible_edits} possible edit${finished.possible_edits === 1 ? '' : 's'}`,
-      `${finished.related_variants} related variant${finished.related_variants === 1 ? '' : 's'}`,
-    ];
-    if (finished.failed) details.push(`${finished.failed} failed`);
-    details.push(finished.download_mode === 'zip' ? 'temporary ZIP extracted and removed' : 'saved as individual files');
-    if (finished.organize_status === 'complete') {
-      details.push(`${finished.organized} added to ${finished.album?.title || 'album'}${finished.archived ? ' and archived' : ''}`);
-    } else if (finished.organize_status === 'partial') {
-      details.push(
-        `${finished.organized} added to ${finished.album?.title || 'album'}${finished.archived ? ' and archived' : ''}; ` +
-        `${finished.organize_unmatched} downloaded item${finished.organize_unmatched === 1 ? '' : 's'} could not be matched in Google Photos`,
-      );
-    } else if (finished.organize_error) {
-      details.push(`album and Archive failed: ${finished.organize_error}`);
-    }
-    el('google-result').textContent = `Import complete: ${details.join(' · ')}`;
-    el('google-result').classList.remove('hidden');
-    toast(`Google import complete: ${details.join(', ')}.`);
-  }
-
-  function renderJobs() {
-    const list = el('jobs-list');
-    list.replaceChildren();
-    el('empty-jobs').classList.toggle('hidden', state.jobs.length !== 0);
-    state.jobs.forEach((job) => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'job-card';
-      button.innerHTML = `
-        <div class="job-card-top">
-          <div><div class="eyebrow">${escapeHtml(formatDate(job.created_at))}</div><h3>${escapeHtml(job.name)}</h3></div>
-          <span class="job-count">${job.file_count} media files</span>
-        </div>
-        <p>${job.return_count ? `${job.return_count} edits returned` : 'Waiting for Lightroom exports'}</p>
-        <div class="job-stats"><span><strong>${job.file_count}</strong> sent</span><span><strong>${job.matched_count}</strong> matched</span></div>`;
-      button.addEventListener('click', () => openJob(job.id));
-      list.appendChild(button);
-    });
-  }
-
-  async function renderPaneBrowserForDirectory(paneId, path, pane = paneFor(paneId), request = pane.navigationRequest) {
-    const browse = await api(`/api/local/browse?path=${encodeURIComponent(path || '')}`);
-    if (paneFor(paneId) !== pane || pane.navigationRequest !== request) return false;
-    pane.parent = browse.parent;
-    pane.breadcrumbs = browse.breadcrumbs || [];
-    pane.directories = browse.directories || [];
-    renderPaneBrowser(paneId);
-    return true;
-  }
-  async function navigatePane(paneId, path = '') {
-    const pane = paneFor(paneId);
-    const request = pane.navigationRequest = (pane.navigationRequest || 0) + 1;
-    if (!await renderPaneBrowserForDirectory(paneId, path, pane, request)) return;
-    if (path) {
-      const scan = await api(`/api/local/scan?path=${encodeURIComponent(path)}`);
-      if (paneFor(paneId) !== pane || pane.navigationRequest !== request) return;
-      applyLibraryScan(scan, paneId);
-    } else {
-      pane.directory = '';
-      pane.assets = [];
-      pane.culling = null;
-      pane.selectedAssets.clear();
-      setActivePane(paneId);
-      renderPhotoGrid();
-    }
-  }
-
-  function renderPaneBrowser(paneId) {
-    const pane = paneFor(paneId);
-    const crumbs = el(`${paneId}-folder-path`);
-    crumbs.replaceChildren();
-    const desktop = document.createElement('button');
-    desktop.type = 'button';
-    desktop.textContent = 'Desktop';
-    if (!pane.breadcrumbs.length) desktop.disabled = true;
-    else desktop.addEventListener('click', () => navigatePane(paneId, '').catch(showError));
-    crumbs.appendChild(desktop);
-    pane.breadcrumbs.forEach((crumb, index) => {
-      const separator = document.createElement('span');
-      separator.textContent = '›';
-      separator.setAttribute('aria-hidden', 'true');
-      crumbs.appendChild(separator);
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.textContent = crumb.name;
-      button.title = crumb.path;
-      if (index === pane.breadcrumbs.length - 1) button.disabled = true;
-      else button.addEventListener('click', () => navigatePane(paneId, crumb.path).catch(showError));
-      crumbs.appendChild(button);
-    });
-    el(`${paneId}-folder-up`).disabled = !pane.breadcrumbs.length;
-
-    const list = el(`${paneId}-folder-list`);
-    list.replaceChildren();
-    const atRoots = !pane.breadcrumbs.length;
-    pane.directories.forEach((directory) => {
-      const row = document.createElement('div');
-      row.className = 'folder-row';
-      const open = document.createElement('button');
-      open.type = 'button';
-      open.className = 'folder-row-name';
-      open.textContent = `📁 ${directory.name}`;
-      open.title = directory.path;
-      open.addEventListener('click', () => navigatePane(paneId, directory.path).catch(showError));
-      row.appendChild(open);
-      if (!atRoots) {
-        const renameButton = document.createElement('button');
-        renameButton.type = 'button';
-        renameButton.className = 'folder-row-action';
-        renameButton.textContent = 'Rename';
-        renameButton.setAttribute('aria-label', `Rename ${directory.name}`);
-        renameButton.addEventListener('click', () => renameFolderInPane(paneId, directory).catch(showError));
-        const deleteButton = document.createElement('button');
-        deleteButton.type = 'button';
-        deleteButton.className = 'folder-row-action danger';
-        deleteButton.textContent = 'Delete';
-        deleteButton.setAttribute('aria-label', `Delete ${directory.name}`);
-        deleteButton.addEventListener('click', () => deleteFolderInPane(paneId, directory).catch(showError));
-        row.append(renameButton, deleteButton);
-      }
-      list.appendChild(row);
-    });
-    if (!pane.directories.length) {
-      const empty = document.createElement('p');
-      empty.className = 'empty-folders';
-      empty.textContent = atRoots ? 'No drives found.' : 'No subfolders here.';
-      list.appendChild(empty);
-    }
-  }
-
-  async function createFolderInPane(paneId) {
-    const pane = paneFor(paneId);
-    if (!pane.directory) return;
-    const name = window.prompt('Name for the new folder:', '');
-    if (name === null) return;
-    await api('/api/local/mkdir', {
-      method: 'POST',
-      body: JSON.stringify({parent_path: pane.directory, name}),
-    });
-    toast(`Created folder “${name.trim()}”.`);
-    await navigatePane(paneId, pane.directory);
-  }
-
-  async function renameFolderInPane(paneId, directory) {
-    const name = window.prompt(`Rename “${directory.name}” to:`, directory.name);
-    if (name === null || name.trim() === directory.name) return;
-    const result = await api('/api/local/rename', {
-      method: 'POST',
-      body: JSON.stringify({path: directory.path, name}),
-    });
-    toast(`Renamed to “${result.name}”.`);
-    await navigatePane(paneId, paneFor(paneId).directory);
-  }
-
-  async function deleteFolderInPane(paneId, directory) {
-    if (!window.confirm(
-      `Move the folder “${directory.name}” to the Recycle Bin?\n\n` +
-      'The folder and everything inside it leaves this view. Nothing is permanently deleted; restore it from the Recycle Bin if needed.',
-    )) return;
-    await api('/api/local/delete', {
-      method: 'POST',
-      body: JSON.stringify({path: directory.path}),
-    });
-    toast(`“${directory.name}” moved to the Recycle Bin.`);
-    await navigatePane(paneId, paneFor(paneId).directory);
-  }
-
-  function folderLabel(path) {
-    const normalized = path.replace(/[\\/]+$/, '');
-    return normalized.split(/[\\/]/).pop() || path;
-  }
-
-  function paneFor(paneId = state.activePaneId) {
-    return state.libraryPanes[paneId];
-  }
-
-  function emptyPane() {
-    return {directory: '', assets: [], culling: null, selectedAssets: new Set(), selectMode: false, parent: null, breadcrumbs: [], directories: []};
-  }
-
-  function closePane(paneId) {
-    document.querySelectorAll('.pane-more[open]').forEach((menu) => { menu.open = false; });
-    if (paneId === 'left' && state.rightPaneOpen) {
-      // Keep the remaining folder and its selection when closing the left side.
-      state.libraryPanes.left = {...paneFor('right'), comparing: false, uploading: false, organizing: false, tagging: false};
-      state.tileAnchor.left = state.tileAnchor.right;
-    } else if (paneId === 'left') {
-      state.libraryPanes.left = emptyPane();
-      state.tileAnchor.left = null;
-    }
-    state.libraryPanes.right = emptyPane();
-    state.tileAnchor.right = null;
-    state.rightPaneOpen = false;
-    setActivePane('left');
-    renderPaneBrowser('left');
-    renderPaneBrowser('right');
-    renderPhotoGrid();
-    if (!paneFor('left').directory) navigatePane('left', '').catch(showError);
-    el('browse-folders-right').focus();
-  }
-
-  function isAssetDisplayable(asset) {
-    if (state.showRawOnly) return true;
-    return asset.jpeg_files.length > 0 || (asset.video_files || []).length > 0;
-  }
-
-  function displayableAssets(pane) {
-    return pane.assets.filter(isAssetDisplayable);
-  }
-
-  function paneSummary(pane) {
-    if (!pane.directory) return 'No folder open';
-    const displayable = displayableAssets(pane);
-    const photoCount = displayable.filter((asset) => asset.jpeg_files.length).length;
-    const videoCount = displayable.filter((asset) => (asset.video_files || []).length).length;
-    const hiddenCount = pane.assets.length - displayable.length;
-    let summary = `${photoCount} photo group${photoCount === 1 ? '' : 's'} · ${videoCount} video group${videoCount === 1 ? '' : 's'}`;
-    if (hiddenCount > 0 && !state.showRawOnly) {
-      summary += ` · ${hiddenCount} RAW-only hidden`;
-    } else if (state.showRawOnly) {
-      const rawOnly = displayable.filter((asset) => asset.raw_files.length > 0 && asset.jpeg_files.length === 0 && !(asset.video_files || []).length).length;
-      if (rawOnly) summary += ` · ${rawOnly} RAW-only`;
-    }
-    return summary;
-  }
-
-  function renderDisplaySettings() {
-    const toggle = el('show-raw-toggle');
-    if (!toggle) return;
-    toggle.checked = state.showRawOnly;
-    const hiddenNote = el('raw-hidden-note');
-    if (!hiddenNote) return;
-    const active = paneFor();
-    if (!active.directory) {
-      hiddenNote.classList.add('hidden');
-      hiddenNote.textContent = '';
-      hiddenNote.removeAttribute('title');
-      return;
-    }
-    const hidden = active.assets.length - displayableAssets(active).length;
-    if (!state.showRawOnly && hidden > 0) {
-      hiddenNote.textContent = `${hidden} hidden`;
-      hiddenNote.title = `${hidden} RAW-only group${hidden === 1 ? '' : 's'} hidden — enable “Show RAW” to display`;
-      hiddenNote.classList.remove('hidden');
-    } else {
-      hiddenNote.classList.add('hidden');
-      hiddenNote.textContent = '';
-      hiddenNote.removeAttribute('title');
-    }
-  }
-
-  function renderPaneHeaders() {
-    el('library-split').classList.toggle('single-pane', !state.rightPaneOpen);
-    el('library-pane-right').classList.toggle('hidden', !state.rightPaneOpen);
-    el('library-split').querySelector('.split-move-actions').classList.toggle('hidden', !state.rightPaneOpen);
-    el('browse-folders-right').classList.toggle('hidden', state.rightPaneOpen);
-    ['left', 'right'].forEach((paneId) => {
-      const pane = paneFor(paneId);
-      const name = pane.breadcrumbs.length ? folderLabel(pane.directory || pane.breadcrumbs.at(-1).path) : 'Desktop';
-      el(`library-pane-${paneId}`).classList.toggle('active', paneId === state.activePaneId);
-      el(`${paneId}-folder-name`).textContent = name;
-      const canManage = Boolean(pane.directory);
-      el(`${paneId}-new-folder`).disabled = !canManage;
-      el(`${paneId}-close-folder`).disabled = paneId === 'left' && !canManage && !state.rightPaneOpen;
-      el(`photo-count-${paneId}`).textContent = paneSummary(pane);
-      el(`selection-count-${paneId}`).textContent = `${pane.selectedAssets.size} selected`;
-    });
-    const active = paneFor();
-    el('create-job-card').querySelectorAll('.folder-dependent').forEach((node) => {
-      node.classList.toggle('hidden', !active.directory);
-    });
-  }
-
-  function setActivePane(paneId) {
-    if (!state.libraryPanes[paneId]) return;
-    state.activePaneId = paneId;
-    renderPaneHeaders();
-    renderGoogleDestination();
-    renderGoogleOrganizer();
-    renderDisplaySettings();
-    updateSelectionUi();
-  }
-
-  function applyLibraryScan(result, paneId = state.activePaneId) {
-    const pane = paneFor(paneId);
-    pane.directory = result.directory;
-    pane.assets = result.assets;
-    pane.culling = result.culling || null;
-    pane.selectedAssets.clear();
-    setActivePane(paneId);
-    renderPhotoGrid();
-  }
-
-  function hasPhotoFilter() {
-    return state.tagFilter.size > 0 || Boolean(state.dateFrom || state.dateTo);
-  }
-
-  function matchesDateFilter(asset) {
-    if (!state.dateFrom && !state.dateTo) return true;
-    const taken = String(asset.taken_at || '').slice(0, 10);
-    if (!taken) return false;
-    if (state.dateFrom && taken < state.dateFrom) return false;
-    if (state.dateTo && taken > state.dateTo) return false;
-    return true;
-  }
-
-  function visiblePaneAssets(pane) {
-    let visible = displayableAssets(pane);
-    if (state.tagFilter.size) {
-      visible = visible.filter((asset) => (asset.tags || []).some((tag) => state.tagFilter.has(tag.toLowerCase())));
-    }
-    if (state.dateFrom || state.dateTo) {
-      visible = visible.filter(matchesDateFilter);
-    }
-    return visible;
-  }
-
-  function renderDateFilterBar() {
-    const bar = el('date-filter-bar');
-    if (!bar) return;
-    el('date-from').value = state.dateFrom;
-    el('date-to').value = state.dateTo;
-    el('date-clear').classList.toggle('hidden', !state.dateFrom && !state.dateTo);
-    const filters = [];
-    if (state.dateFrom || state.dateTo) filters.push('Date range');
-    if (state.tagFilter.size) filters.push(`${state.tagFilter.size} tag${state.tagFilter.size === 1 ? '' : 's'}`);
-    if (state.showRawOnly) filters.push('RAW visible');
-    el('filter-summary').textContent = filters.join(' · ');
-  }
-
-  function knownTags() {
-    const counts = new Map();
-    ['left', 'right'].forEach((paneId) => {
-      displayableAssets(paneFor(paneId)).forEach((asset) => {
-        (asset.tags || []).forEach((tag) => counts.set(tag, (counts.get(tag) || 0) + 1));
-      });
-    });
-    return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  }
-
-  function renderTagFilterBar() {
-    const tags = knownTags();
-    const chips = el('tag-filter-chips');
-    chips.replaceChildren();
-    tags.forEach(([tag]) => {
-      const chip = document.createElement('button');
-      chip.type = 'button';
-      chip.className = `tag-chip${state.tagFilter.has(tag.toLowerCase()) ? ' active' : ''}`;
-      chip.textContent = tag;
-      chip.setAttribute('aria-pressed', String(state.tagFilter.has(tag.toLowerCase())));
-      chip.addEventListener('click', () => {
-        toggleTagFilter(tag);
-      });
-      chips.appendChild(chip);
-    });
-    const showBar = tags.length > 0 || state.tagFilter.size > 0;
-    el('tag-filter-bar').classList.toggle('hidden', !showBar);
-    el('tag-clear').classList.toggle('hidden', state.tagFilter.size === 0);
-    const datalist = el('tag-options');
-    datalist.replaceChildren();
-    tags.forEach(([tag]) => {
-      const option = document.createElement('option');
-      option.value = tag;
-      datalist.appendChild(option);
-    });
-  }
-
-  function toggleTagFilter(tag) {
-    const key = String(tag).toLowerCase();
-    if (state.tagFilter.has(key)) state.tagFilter.delete(key);
-    else state.tagFilter.add(key);
-    renderTagFilterBar();
-    renderPhotoGrid();
-  }
-
-  function renderPaneOrganizers(paneId) {
-    const pane = paneFor(paneId);
-    const disabled = !pane.selectedAssets.size || Boolean(pane.organizing);
-    el(`${paneId}-move-menu`).querySelectorAll('[data-cull-action]').forEach((button) => {
-      button.disabled = disabled;
-      if (button.dataset.cullAction === 'restore') button.classList.toggle('hidden', !pane.culling || pane.culling.role === 'inbox');
-    });
-    el(`${paneId}-new-group`).disabled = disabled;
-    const groups = el(`${paneId}-move-groups`);
-    groups.replaceChildren();
-    (pane.culling?.folders || []).filter((folder) => folder.role === 'group').forEach((folder) => {
-      const name = folder.group_name || folder.name.replace(/^Compare:\s*/, '');
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'quiet-button compact-button';
-      button.textContent = name;
-      button.disabled = disabled || folder.path === pane.directory;
-      button.addEventListener('click', () => moveSelectedAssets('group', paneId, name));
-      groups.appendChild(button);
-    });
-    const taggingDisabled = !pane.selectedAssets.size || Boolean(pane.tagging);
-    el(`${paneId}-tag-input`).disabled = taggingDisabled;
-    el(`${paneId}-tag-form`).querySelector('button').disabled = taggingDisabled || !el(`${paneId}-tag-input`).value.trim();
-    const tags = el(`${paneId}-tag-list`);
-    const focusedTag = tags.contains(document.activeElement) ? document.activeElement.dataset.tag : null;
-    tags.replaceChildren();
-    const selected = pane.assets.filter((asset) => pane.selectedAssets.has(asset.id));
-    knownTags().forEach(([tag]) => {
-      const count = selected.filter((asset) => (asset.tags || []).includes(tag)).length;
-      const all = selected.length > 0 && count === selected.length;
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'quiet-button compact-button tag-choice';
-      button.dataset.tag = tag;
-      button.setAttribute('role', 'checkbox');
-      button.setAttribute('aria-checked', all ? 'true' : count ? 'mixed' : 'false');
-      button.title = `${all ? 'Remove' : 'Apply'} tag on selection`;
-      button.innerHTML = `<span aria-hidden="true">${all ? '✓' : count ? '−' : '+'}</span>${escapeHtml(tag)}`;
-      button.disabled = taggingDisabled;
-      button.addEventListener('click', (event) => {
-        event.stopPropagation();
-        updateSelectedTags(all ? 'remove' : 'add', paneId, tag);
-      });
-      tags.appendChild(button);
-    });
-    if (focusedTag) {
-      const replacement = [...tags.children].find((button) => button.dataset.tag === focusedTag);
-      (replacement || el(`${paneId}-tag-input`)).focus();
-    }
-  }
-
-  function previewUrl(path, size, version) {
-    return `/api/local/preview?path=${encodeURIComponent(path)}&size=${size}&v=${encodeURIComponent(version || '')}&token=${encodeURIComponent(state.token)}`;
-  }
-
-  function renderPanePhotoGrid(paneId) {
-    const pane = paneFor(paneId);
-    const grid = el(`photo-grid-${paneId}`);
-    grid.replaceChildren();
-    if (!pane.directory) {
-      grid.innerHTML = '<p class="pane-empty panel-copy">Open a folder to compare it here.</p>';
-      return;
-    }
-    if (!pane.assets.length) {
-      grid.innerHTML = '<p class="pane-empty panel-copy">No supported media in this folder.</p>';
-      return;
-    }
-    const displayable = displayableAssets(pane);
-    if (!displayable.length) {
-      const hidden = pane.assets.length;
-      grid.innerHTML = `<p class="pane-empty panel-copy">No JPEG or video previews in this folder — ${hidden} RAW-only group${hidden === 1 ? '' : 's'} hidden. Enable “Show RAW-only photos” to display them.</p>`;
-      return;
-    }
-    const visible = visiblePaneAssets(pane);
-    if (!visible.length) {
-      const hiddenByType = pane.assets.length - displayable.length;
-      if (hiddenByType > 0 && !hasPhotoFilter()) {
-        grid.innerHTML = '<p class="pane-empty panel-copy">No photos match the current display settings.</p>';
-      } else if (state.dateFrom || state.dateTo) {
-        grid.innerHTML = '<p class="pane-empty panel-copy">No photos match the selected date range.</p>';
-      } else {
-        grid.innerHTML = '<p class="pane-empty panel-copy">No photos match the selected tag filter.</p>';
-      }
-      return;
-    }
-    const fragment = document.createDocumentFragment();
-    visible.forEach((asset) => {
-      const selected = pane.selectedAssets.has(asset.id);
-      const tile = document.createElement('div');
-      tile.className = `photo-tile${selected ? ' selected' : ''}`;
-      tile.dataset.assetId = asset.id;
-      let media;
-      if (asset.preview_path) {
-        media = `<img src="${escapeHtml(previewUrl(asset.preview_path, 480, asset.preview_version))}" alt="${escapeHtml(asset.stem)}" loading="lazy" decoding="async">`;
-      } else if ((asset.video_files || []).length) {
-        media = '<span class="photo-placeholder video-placeholder"><span>▶</span>Video</span>';
-      } else if (asset.raw_files.length) {
-        media = `<span class="photo-placeholder raw-placeholder"><span>RAW</span>${escapeHtml(asset.raw_files[0].filename)}</span>`;
-      } else if ((asset.other_files || []).length) {
-        media = `<span class="photo-placeholder raw-placeholder"><span>${escapeHtml(asset.other_files[0].filename.split('.').pop().toUpperCase())}</span>${escapeHtml(asset.stem)}</span>`;
-      } else {
-        media = '<span class="photo-placeholder video-placeholder"><span>•</span>Media</span>';
-      }
-      const formatTags = [];
-      (asset.tags || []).forEach((tag) => formatTags.push(`<span class="format-tag tile-tag">${escapeHtml(tag)}</span>`));
-      if (asset.raw_files.length) formatTags.push(`<span class="format-tag">RAW${asset.raw_files.length > 1 ? ` ×${asset.raw_files.length}` : ''}</span>`);
-      if (asset.jpeg_files.length) formatTags.push(`<span class="format-tag">JPEG${asset.jpeg_files.length > 1 ? ` ×${asset.jpeg_files.length}` : ''}</span>`);
-      if ((asset.video_files || []).length) formatTags.push(`<span class="format-tag">VIDEO${asset.video_files.length > 1 ? ` ×${asset.video_files.length}` : ''}</span>`);
-      if ((asset.other_files || []).length && !asset.jpeg_files.length && !asset.raw_files.length && !(asset.video_files || []).length) {
-        formatTags.push(`<span class="format-tag">${escapeHtml(asset.other_files[0].filename.split('.').pop().toUpperCase())}</span>`);
-      }
-      const tags = formatTags.join('');
-      tile.innerHTML = `<button class="photo-open" type="button" data-photo-name="${escapeHtml(asset.stem)}" data-has-preview="${Boolean(asset.preview_path)}" aria-label="Open ${escapeHtml(asset.stem)}">${media}<span class="photo-tile-info"><strong>${escapeHtml(asset.stem)}</strong><span class="format-tags">${tags}</span></span></button><input type="checkbox" class="pick-check" aria-label="Select ${escapeHtml(asset.stem)}" ${selected ? 'checked' : ''}>`;
-      tile.querySelector('.photo-open').addEventListener('click', (event) => {
-        setActivePane(paneId);
-        if (event.ctrlKey || event.metaKey || event.shiftKey || pane.selectMode || !asset.preview_path) {
-          selectPaneAsset(paneId, asset.id, event.shiftKey || !pane.selectedAssets.has(asset.id), event.shiftKey);
-        } else {
-          openLightbox(asset);
-        }
-      });
-      tile.querySelector('.pick-check').addEventListener('click', (event) => {
-        event.stopPropagation();
-        selectPaneAsset(paneId, asset.id, event.target.checked, event.shiftKey);
-      });
-      fragment.appendChild(tile);
-    });
-    grid.appendChild(fragment);
-  }
-
-  function renderPhotoGrid() {
-    renderPanePhotoGrid('left');
-    renderPanePhotoGrid('right');
-    renderPaneHeaders();
-    renderDateFilterBar();
-    renderTagFilterBar();
-    renderDisplaySettings();
-    updateSelectionUi();
-  }
-
-  function openLightbox(asset) {
-    if (!asset.preview_path) return;
-    el('lightbox-title').textContent = asset.stem;
-    el('lightbox-image').alt = asset.stem;
-    el('lightbox-image').src = `${previewUrl(asset.preview_path, 1600, asset.preview_version)}&original=1`;
-    el('lightbox-modal').showModal();
-  }
-
-  function selectPaneAsset(paneId, assetId, selected, range = false) {
-    setActivePane(paneId);
-    const pane = paneFor(paneId);
-    const visible = visiblePaneAssets(pane);
-    const anchorIndex = visible.findIndex((asset) => asset.id === state.tileAnchor[paneId]);
-    const targetIndex = visible.findIndex((asset) => asset.id === assetId);
-    if (targetIndex === -1) return;
-    if (range && anchorIndex !== -1) {
-      const from = Math.min(anchorIndex, targetIndex);
-      const to = Math.max(anchorIndex, targetIndex);
-      for (let i = from; i <= to; i++) {
-        if (selected) pane.selectedAssets.add(visible[i].id);
-        else pane.selectedAssets.delete(visible[i].id);
-      }
-    } else {
-      if (selected) pane.selectedAssets.add(assetId);
-      else pane.selectedAssets.delete(assetId);
-      state.tileAnchor[paneId] = assetId;
-    }
-    syncSelectionTiles();
-    updateSelectionUi();
-  }
-
-  function syncSelectionTiles() {
-    ['left', 'right'].forEach((paneId) => {
-      const pane = paneFor(paneId);
-      document.querySelectorAll(`#photo-grid-${paneId} .photo-tile`).forEach((tile) => {
-        const selected = pane.selectedAssets.has(tile.dataset.assetId);
-        tile.classList.toggle('selected', selected);
-        tile.querySelector('.pick-check').checked = selected;
-      });
-    });
-    renderPaneHeaders();
-  }
-
-  function updateSelectionUi() {
-    const active = paneFor();
-    const count = active.selectedAssets.size;
-    el('selection-summary').textContent = `${count} selected in ${folderLabel(active.directory)}`;
-    el('selection-job-form').querySelector('button[type="submit"]').disabled = count === 0;
-    ['left', 'right'].forEach((paneId) => {
-      const pane = paneFor(paneId);
-      const visible = visiblePaneAssets(pane);
-      const selectMode = Boolean(pane.selectMode);
-      el(`${paneId}-select-mode`).setAttribute('aria-pressed', String(selectMode));
-      el(`${paneId}-select-mode`).title = selectMode ? 'Photo clicks select. Turn off to open photos.' : 'Make photo clicks select instead of opening photos.';
-      el(`photo-grid-${paneId}`).classList.toggle('select-mode', selectMode);
-      el(`photo-grid-${paneId}`).querySelectorAll('.photo-open').forEach((button) => {
-        const selecting = selectMode || button.dataset.hasPreview !== 'true';
-        button.setAttribute('aria-label', `${selecting ? 'Select' : 'Open'} ${button.dataset.photoName}`);
-      });
-      el(`${paneId}-select-all`).disabled = !visible.length || visible.every((asset) => pane.selectedAssets.has(asset.id));
-      el(`${paneId}-clear-picked`).disabled = !pane.selectedAssets.size;
-      el(`${paneId}-compare-picked`).disabled = selectedPreviewAssets(pane).length < 2;
-      el(`${paneId}-auto-compare`).disabled = !pane.directory || pane.comparing || !pane.assets.length;
-      el(`${paneId}-auto-compare`).textContent = pane.comparing ? 'Comparing…' : 'Auto-compare folder';
-      el(`${paneId}-google-upload`).disabled = !pane.selectedAssets.size || !state.google.connected || pane.uploading;
-      el(`${paneId}-google-upload`).textContent = pane.uploading ? 'Uploading…' : 'Upload to Google Photos';
-      renderPaneOrganizers(paneId);
-    });
-    const left = paneFor('left');
-    const right = paneFor('right');
-    [['left', left, right], ['right', right, left]].forEach(([paneId, source, destination]) => {
-      const label = `Move selection from ${folderLabel(source.directory) || 'this folder'} to ${folderLabel(destination.directory) || 'the other folder'}`;
-      el(`move-selected-${paneId}`).title = label;
-      el(`move-selected-${paneId}`).setAttribute('aria-label', label);
-    });
-    el('move-selected-left').disabled = !left.directory || !right.directory || left.selectedAssets.size === 0;
-    el('move-selected-right').disabled = !left.directory || !right.directory || right.selectedAssets.size === 0;
-  }
-
-  async function updateSelectedTags(action, paneId, value) {
-    const pane = paneFor(paneId);
-    if (!value || !pane.selectedAssets.size || pane.tagging) return;
-    const assetIds = Array.from(pane.selectedAssets);
-    pane.tagging = true;
-    updateSelectionUi();
-    const body = action === 'add'
-      ? {asset_ids: assetIds, add_tags: [value]}
-      : {asset_ids: assetIds, remove_tags: [value]};
-    try {
-      const result = await api('/api/local/tags', {method: 'POST', body: JSON.stringify(body)});
-      ['left', 'right'].forEach((paneId) => {
-        paneFor(paneId).assets.forEach((asset) => {
-          if (Object.prototype.hasOwnProperty.call(result.assignments, asset.id)) {
-            asset.tags = result.assignments[asset.id];
-          }
-        });
-      });
-      el(`${paneId}-tag-input`).value = '';
-      renderTagFilterBar();
-      renderPhotoGrid();
-      toast(`${action === 'add' ? 'Added' : 'Removed'} tag “${value}” ${action === 'add' ? 'on' : 'from'} ${assetIds.length} photo group${assetIds.length === 1 ? '' : 's'}.`);
-    } catch (error) {
-      toast(error.message);
-    } finally {
-      pane.tagging = false;
-      updateSelectionUi();
-    }
-  }
-
-  async function moveSelectedAssets(action, paneId, groupName = '') {
-    const pane = paneFor(paneId);
-    if (!pane.selectedAssets.size || pane.organizing) return;
-    const directory = pane.directory;
-    const labels = {
-      select: 'Move the selected photo groups into the select folder?',
-      unselect: 'Move the selected photo groups into the unselect folder? Nothing will be deleted.',
-      restore: 'Move the selected photo groups back to the inbox folder?',
-      group: 'Move the selected photo groups into this comparison group?',
-    };
-    if (!window.confirm(labels[action])) return;
-    pane.organizing = true;
-    el(`${paneId}-move-menu`).open = false;
-    updateSelectionUi();
-    try {
-      const result = await api('/api/local/cull', {
-        method: 'POST',
-        body: JSON.stringify({
-          source_directory: directory,
-          asset_ids: Array.from(pane.selectedAssets),
-          action,
-          group_name: groupName,
-        }),
-      });
-      if (paneFor(paneId) === pane && pane.directory === directory) {
-        applyLibraryScan(result, paneId);
-        await renderPaneBrowserForDirectory(paneId, result.directory);
-      }
-      const closedGroup = result.group_deleted ? ' The empty comparison group was removed.' : '';
-      const duplicates = result.deleted_duplicate_files || 0;
-      const renamed = (result.renamed_files || []).length;
-      const details = [];
-      if (duplicates) details.push(`${duplicates} visually identical duplicate${duplicates === 1 ? '' : 's'} removed from the source folder`);
-      if (renamed) details.push(`${renamed} same-name file${renamed === 1 ? '' : 's'} kept with a variant name`);
-      const destinationLabel = action === 'group' ? (result.destination_group_name || groupName) : result.destination;
-      const moved = `${result.moved_assets} photo group${result.moved_assets === 1 ? '' : 's'} moved to ${destinationLabel}`;
-      toast(`${moved}${details.length ? `; ${details.join('; ')}` : ''}.${closedGroup}`);
-    } catch (error) {
-      toast(error.message);
-    } finally {
-      pane.organizing = false;
-      updateSelectionUi();
-    }
-  }
-
-  async function autoCompareGroups(paneId) {
-    const pane = paneFor(paneId);
-    if (!pane.directory || pane.comparing) return;
-    const minSize = Math.min(50, Math.max(2, Math.round(Number(el(`${paneId}-compare-min-size`).value) || 3)));
-    if (!window.confirm(`Find similar photos in this folder and create comparison groups of at least ${minSize} photos? Similar photos will be moved into new compare folders.`)) return;
-    const button = el(`${paneId}-auto-compare`);
-    const directory = pane.directory;
-    pane.comparing = true;
-    button.disabled = true;
-    const originalLabel = button.textContent;
-    button.textContent = 'Comparing…';
-    try {
-      const result = await api('/api/local/compare-groups', {
-        method: 'POST',
-        body: JSON.stringify({
-          source_directory: directory,
-          min_group_size: minSize,
-        }),
-      });
-      if (paneFor(paneId) === pane && pane.directory === directory) {
-        applyLibraryScan(result, paneId);
-        await renderPaneBrowserForDirectory(paneId, directory);
-      }
-      const groups = result.created_groups || [];
-      if (!groups.length) {
-        toast(`No clusters of at least ${result.min_group_size || minSize} similar photos were found.`);
-      } else {
-        const moved = groups.reduce((total, group) => total + (group.moved_assets || 0), 0);
-        const duplicates = groups.reduce((total, group) => total + (group.deleted_duplicate_files || 0), 0);
-        const details = [];
-        if (duplicates) details.push(`${duplicates} visually identical duplicate${duplicates === 1 ? '' : 's'} removed`);
-        const movedLabel = `${moved} photo group${moved === 1 ? '' : 's'} moved`;
-        toast(`${groups.length} comparison group${groups.length === 1 ? '' : 's'} created; ${movedLabel}${details.length ? `; ${details.join('; ')}` : ''}.`);
-      }
-    } catch (error) {
-      toast(error.message);
-    } finally {
-      pane.comparing = false;
-      button.textContent = originalLabel;
-      updateSelectionUi();
-    }
-  }
-
-  async function moveSelectedAssetsBetweenDirectories(sourcePaneId, destinationPaneId) {
-    const sourcePane = paneFor(sourcePaneId);
-    const destinationPane = paneFor(destinationPaneId);
-    if (!sourcePane.directory || !destinationPane.directory || !sourcePane.selectedAssets.size) return;
-    const paneNames = {left: 'origin folder', right: 'comparison folder'};
-    if (!window.confirm(`Move the selected photo groups from the ${paneNames[sourcePaneId]} to the ${paneNames[destinationPaneId]}?`)) return;
-    const button = sourcePaneId === 'left' ? el('move-selected-left') : el('move-selected-right');
-    button.disabled = true;
-    try {
-      const result = await api('/api/local/move', {
-        method: 'POST',
-        body: JSON.stringify({
-          source_directory: sourcePane.directory,
-          destination_directory: destinationPane.directory,
-          asset_ids: Array.from(sourcePane.selectedAssets),
-        }),
-      });
-      applyLibraryScan(result.source, sourcePaneId);
-      applyLibraryScan(result.destination, destinationPaneId);
-      setActivePane(sourcePaneId);
-      updateSelectionUi();
-      toast(`${result.moved_assets} photo group${result.moved_assets === 1 ? '' : 's'} moved to the ${paneNames[destinationPaneId]}.`);
-    } catch (error) {
-      toast(error.message);
-      updateSelectionUi();
-    }
-  }
-
-  function selectedPreviewAssets(pane) {
-    return pane.assets.filter((asset) => pane.selectedAssets.has(asset.id) && asset.preview_path);
-  }
-
-  function openCompare() {
-    const pane = paneFor();
-    const assets = selectedPreviewAssets(pane);
-    if (assets.length < 2) {
-      toast('Select at least two photos that have JPEG previews.');
-      return;
-    }
-    state.compareZoom = 1;
-    state.comparePan = {x: 0, y: 0};
-    el('compare-zoom').value = '100';
-    el('compare-zoom-value').textContent = '100%';
-    const grid = el('compare-grid');
-    grid.replaceChildren();
-    const count = assets.length;
-    const cols = count <= 2 ? count : count <= 4 ? 2 : 3;
-    const rows = Math.ceil(count / cols);
-    grid.style.setProperty('--compare-cols', String(cols));
-    grid.style.setProperty('--compare-rows', String(rows));
-    assets.forEach((asset) => {
-      const item = document.createElement('div');
-      item.className = 'compare-item';
-      item.dataset.assetId = asset.id;
-      item.innerHTML = `<img src="${escapeHtml(previewUrl(asset.preview_path, 1600, asset.preview_version))}" alt="${escapeHtml(asset.stem)}" decoding="async"><div class="compare-label"><strong>${escapeHtml(asset.stem)}</strong><button type="button" class="is-picked">Selected</button></div>`;
-      const pickButton = item.querySelector('button');
-      pickButton.addEventListener('click', (event) => {
-        event.stopPropagation();
-        if (pane.selectedAssets.has(asset.id)) pane.selectedAssets.delete(asset.id);
-        else pane.selectedAssets.add(asset.id);
-        const picked = pane.selectedAssets.has(asset.id);
-        pickButton.classList.toggle('is-picked', picked);
-        pickButton.textContent = picked ? 'Selected' : 'Removed';
-        updateSelectionUi();
-      });
-      attachSynchronizedPan(item);
-      grid.appendChild(item);
-    });
-    applyCompareTransform();
-    el('compare-modal').classList.remove('hidden');
-  }
-
-  function attachSynchronizedPan(item) {
-    let start = null;
-    item.addEventListener('pointerdown', (event) => {
-      if (event.target.closest('button')) return;
-      start = {pointerX: event.clientX, pointerY: event.clientY, panX: state.comparePan.x, panY: state.comparePan.y};
-      item.setPointerCapture(event.pointerId);
-    });
-    item.addEventListener('pointermove', (event) => {
-      if (!start || state.compareZoom <= 1) return;
-      const maxX = item.clientWidth * (state.compareZoom - 1) / 2;
-      const maxY = item.clientHeight * (state.compareZoom - 1) / 2;
-      state.comparePan.x = Math.max(-maxX, Math.min(maxX, start.panX + event.clientX - start.pointerX));
-      state.comparePan.y = Math.max(-maxY, Math.min(maxY, start.panY + event.clientY - start.pointerY));
-      applyCompareTransform();
-    });
-    const stop = () => { start = null; };
-    item.addEventListener('pointerup', stop);
-    item.addEventListener('pointercancel', stop);
-  }
-
-  function applyCompareTransform() {
-    document.querySelectorAll('#compare-grid img').forEach((image) => {
-      image.style.transform = `translate(${state.comparePan.x}px, ${state.comparePan.y}px) scale(${state.compareZoom})`;
-    });
-  }
-
-  async function openJob(jobId) {
-    state.currentJob = await api(`/api/jobs/${jobId}`);
-    renderJob(state.currentJob);
-    showOnly(jobView);
-    window.scrollTo({top: 0, behavior: 'smooth'});
-  }
-
-  function downloadUrl(path) {
-    const separator = path.includes('?') ? '&' : '?';
-    return `${path}${separator}token=${encodeURIComponent(state.token)}`;
-  }
-
-  function renderJob(job) {
-    el('job-title').textContent = job.name;
-    const sourceLabel = job.edit_source_format ? ` · ${job.edit_source_format.toUpperCase()} edit sources` : '';
-    el('job-summary').textContent = `${job.files.length} files ready${sourceLabel} · ${job.returns.length} edits returned`;
-    const bundle = el('download-bundle');
-    bundle.href = downloadUrl(`/api/jobs/${job.id}/bundle.zip`);
-    bundle.classList.toggle('hidden', job.files.length === 0);
-    const showPairing = state.desktop && state.bootstrap;
-    el('job-pairing').classList.toggle('hidden', !showPairing);
-    if (showPairing) {
-      el('job-ipad-url').textContent = state.bootstrap.ipad_url;
-      el('job-pair-code').textContent = state.bootstrap.pair_code;
-      el('job-pair-qr').src = `${state.bootstrap.pair_qr_url}?v=${Date.now()}`;
-    }
-    el('export-panel').classList.toggle('hidden', !state.desktop);
-    el('delete-job').classList.toggle('hidden', !state.desktop);
-    if (state.desktop) {
-      const postprocess = job.postprocess || {status: 'pending'};
-      const result = el('organize-result');
-      const finished = postprocess.status === 'complete' && postprocess.layout_version >= 2;
-      const hasResult = ['complete', 'complete_with_warnings'].includes(postprocess.status);
-      el('organize-source').disabled = finished;
-      el('organize-source').textContent = finished ? 'Source folder organized' : hasResult ? 'Retry organization' : 'Finish & organize source folder';
-      result.classList.toggle('hidden', !hasResult);
-      const warnings = el('organize-errors');
-      warnings.replaceChildren();
-      warnings.classList.toggle('hidden', !postprocess.errors?.length);
-      for (const message of postprocess.errors || []) {
-        const item = document.createElement('li');
-        item.textContent = message;
-        warnings.append(item);
-      }
-      if (hasResult) {
-        const warningText = postprocess.errors?.length ? ` · ${postprocess.errors.length} warning(s)` : '';
-        result.textContent = `${postprocess.source_directory} · ${postprocess.moved_count} moved · ${postprocess.copied_count} edits copied${warningText}`;
-      }
-    }
-
-    const files = el('job-files');
-    files.replaceChildren();
-    job.files.forEach((file) => {
-      const row = document.createElement('div');
-      row.className = 'file-row';
-      const verification = file.sha256 ? `SHA-256 ${file.sha256.slice(0, 10)}…` : 'Verified while packaging';
-      row.innerHTML = `<div class="file-name"><strong>${escapeHtml(file.filename)}</strong><small>${formatBytes(file.size)} · ${verification}</small></div>`;
-      const link = document.createElement('a');
-      link.className = 'download-link';
-      link.textContent = 'Download';
-      link.href = downloadUrl(`/api/jobs/${job.id}/files/${file.id}/download`);
-      row.appendChild(link);
-      files.appendChild(row);
-    });
-    if (!job.files.length) files.innerHTML = '<p class="panel-copy">No source photos have been uploaded yet.</p>';
-
-    const returns = el('job-returns');
-    returns.replaceChildren();
-    job.returns.forEach((file) => {
-      const row = document.createElement('div');
-      row.className = 'return-row';
-      const label = file.association_status === 'suggested' ? 'Possible original' : file.match_status;
-      row.innerHTML = `<div class="file-name"><strong>${escapeHtml(file.filename)}</strong><small>${formatBytes(file.size)}${file.matched_filename ? ` · possible original: ${escapeHtml(file.matched_filename)}` : ''}</small></div><span class="match-badge ${escapeHtml(file.match_status)}">${escapeHtml(label)}</span>`;
-      returns.appendChild(row);
-    });
-    if (!job.returns.length) returns.innerHTML = '<p class="panel-copy">No edits returned yet.</p>';
-  }
-
-  async function uploadFile(jobId, file, kind, onProgress) {
-    const sha256 = await KiraHash.fileSHA256(file, bytes => onProgress(bytes, 'checking'));
-    onProgress(0, 'sending');
-    const started = await api(`/api/jobs/${jobId}/uploads/start`, {
-      method: 'POST',
-      body: JSON.stringify({
-        kind,
-        filename: file.name,
-        size: file.size,
-        last_modified: file.lastModified || 0,
-        sha256,
-      }),
-    });
-    if (started.complete) {
-      onProgress(file.size);
-      return started.record;
-    }
-
-    let offset = started.offset;
-    onProgress(offset);
-    while (offset < file.size) {
-      const end = Math.min(offset + CHUNK_SIZE, file.size);
-      const chunk = file.slice(offset, end);
-      let result;
-      try {
-        result = await api(`/api/jobs/${jobId}/uploads/${started.upload_id}/chunk?offset=${offset}`, {
-          method: 'PUT',
-          headers: {'Content-Type': 'application/octet-stream'},
-          body: chunk,
-        });
-      } catch (error) {
-        if (error.status === 409 && Number.isFinite(error.body.expected_offset)) {
-          offset = error.body.expected_offset;
-          onProgress(offset);
-          continue;
-        }
-        throw error;
-      }
-      offset = result.offset;
-      onProgress(offset);
-    }
-    return api(`/api/jobs/${jobId}/uploads/${started.upload_id}/complete`, {method: 'POST', body: '{}'});
-  }
-
-  async function uploadFiles(jobId, files, kind, progressElements) {
-    const total = files.reduce((sum, file) => sum + file.size, 0);
-    let completedBeforeCurrent = 0;
-    progressElements.container.classList.remove('hidden');
-    for (let index = 0; index < files.length; index += 1) {
-      const file = files[index];
-      progressElements.label.textContent = `${kind === 'originals' ? 'Sending' : 'Returning'} ${index + 1} of ${files.length}: ${file.name}`;
-      await uploadFile(jobId, file, kind, (currentBytes, phase) => {
-        progressElements.label.textContent = `${phase === 'checking' ? 'Checking' : 'Returning'} ${index + 1} of ${files.length}: ${file.name}`;
-        const transferred = completedBeforeCurrent + currentBytes;
-        const percent = total ? Math.round((transferred / total) * 100) : 100;
-        progressElements.bar.value = percent;
-        progressElements.value.textContent = phase === 'checking' ? 'Checking…' : `${percent}%`;
-      });
-      completedBeforeCurrent += file.size;
-    }
-    progressElements.label.textContent = `Verified ${files.length} ${files.length === 1 ? 'file' : 'files'}`;
-    progressElements.bar.value = 100;
-    progressElements.value.textContent = '100%';
-  }
-
-  function progressSet(prefix) {
-    return {
-      container: el(`${prefix}-progress`),
-      label: el(`${prefix}-progress-label`),
-      value: el(`${prefix}-progress-value`),
-      bar: el(`${prefix}-progress-bar`),
-    };
+  function setConnected(connected) {
+    const node = el('connection-state');
+    node.classList.toggle('connected', connected);
+    node.lastChild.textContent = connected ? (state.desktop ? 'This PC' : 'Paired') : 'Not paired';
   }
 
   el('pair-form').addEventListener('submit', async (event) => {
@@ -1359,516 +149,979 @@
       const response = await api('/api/pair', {method: 'POST', body: JSON.stringify({code: el('pair-code').value})});
       state.token = response.token;
       localStorage.setItem('kira-token', state.token);
-      await loadDashboard();
+      setConnected(true);
+      el('nav').classList.remove('hidden');
+      await loadLibrary();
+      location.hash = 'ipad';
+      route();
     } catch (error) {
       el('pair-error').textContent = error.message;
     }
   });
 
-  el('google-connect').addEventListener('click', async () => {
-    const popup = window.open('about:blank', 'kira-google-oauth', 'width=620,height=760');
+  window.addEventListener('hashchange', route);
+
+  // -- Library ---------------------------------------------------------------------------
+
+  async function loadLibrary() {
+    state.library = await api('/api/library');
+    updateBadges();
+    return state.library;
+  }
+
+  function updateBadges() {
+    const lib = state.library || {};
+    setBadge('review-badge', lib.review_count);
+    setBadge('ipad-badge', lib.outbox_waiting);
+  }
+
+  function setBadge(id, count) {
+    const node = el(id);
+    node.textContent = count || '';
+    node.classList.toggle('hidden', !count);
+  }
+
+  async function refreshBadges() {
+    if (!state.token || document.hidden) return;
+    try { await loadLibrary(); } catch { /* offline */ }
+  }
+
+  el('setup-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    el('setup-error').textContent = '';
     try {
-      if (!popup) throw new Error('Allow pop-ups for Kira, then try connecting again.');
-      const result = await api('/api/google/oauth/start', {method: 'POST', body: '{}'});
-      popup.location.href = result.authorization_url;
-      await waitForGoogleConnection();
+      await post('/api/library/root', {path: el('setup-path').value});
+      await loadLibrary();
+      location.hash = 'library';
+      route();
     } catch (error) {
-      if (popup) popup.close();
-      showError(error);
+      el('setup-error').textContent = error.message;
     }
   });
 
-  el('google-pick').addEventListener('click', async () => {
-    const popup = window.open('about:blank', 'kira-google-picker', 'width=900,height=760');
+  function renderLibrary() {
+    const lib = state.library;
+    el('library-root').textContent = lib.root;
+    el('library-offline').classList.toggle('hidden', lib.online);
+    el('library-empty').classList.toggle('hidden', lib.shoots.length > 0);
+    el('empty-trash').classList.toggle('hidden', !lib.trash_count);
+    el('empty-trash').textContent = `Empty trash (${plural(lib.trash_count || 0, 'file')})`;
+    el('shoot-grid').innerHTML = lib.shoots.map((shoot) => {
+      const cover = shoot.cover ? `<img loading="lazy" src="${previewUrl(shoot.id, shoot.cover.photo_id, shoot.cover.file)}" alt="">` : '<div class="no-cover"></div>';
+      const dates = shoot.first_capture ? `${day(shoot.first_capture)}${day(shoot.last_capture) !== day(shoot.first_capture) ? ` – ${day(shoot.last_capture)}` : ''}` : shoot.year;
+      return `<a class="shoot-card" href="#shoot/${shoot.id}">${cover}<div class="shoot-card-body"><b>${escapeHtml(shoot.name)}</b><span class="muted">${escapeHtml(dates)}</span><span class="muted">${plural(shoot.photo_count, 'photo')} · ${shoot.edited_count} edited</span></div></a>`;
+    }).join('');
+  }
+
+  el('empty-trash').addEventListener('click', () => guarded(el('empty-trash'), async () => {
+    if (!confirm(`Permanently erase ${plural(state.library.trash_count, 'file')} in the library's _trash folder? This cannot be undone.`)) return;
+    const result = await post('/api/trash/empty', {confirm: true});
+    toast(`Erased ${plural(result.removed, 'file')}`);
+    await loadLibrary();
+    renderLibrary();
+  }));
+
+  el('new-shoot').addEventListener('click', async () => {
+    const name = prompt('Name the shoot, for example "2026-07 NYC"');
+    if (!name) return;
+    await guarded(el('new-shoot'), async () => {
+      const shoot = await post('/api/shoots', {name});
+      await loadLibrary();
+      location.hash = `shoot/${shoot.id}`;
+    });
+  });
+
+  // -- Shoot -----------------------------------------------------------------------------
+
+  async function openShoot(shootId, keepSelection = false) {
     try {
-      if (!popup) throw new Error('Allow pop-ups for Kira, then choose photos again.');
-      saveGoogleImportPreferences();
-      const session = await api('/api/google/picker/sessions', {
-        method: 'POST',
-        body: JSON.stringify({max_items: 2000}),
+      state.shoot = await api(`/api/shoots/${shootId}`);
+    } catch (error) {
+      toast(error.message, true);
+      location.hash = 'library';
+      return;
+    }
+    if (!keepSelection) state.selected.clear();
+    renderShoot();
+  }
+
+  function visiblePhotos() {
+    const photos = state.shoot.photos;
+    if (state.filter === 'rejected') return photos.filter((p) => p.rejected);
+    const kept = photos.filter((p) => !p.rejected);
+    if (state.filter === 'edited') return kept.filter((p) => p.files.some((f) => f.role === 'edit'));
+    if (state.filter === 'unedited') return kept.filter((p) => !p.files.some((f) => f.role === 'edit'));
+    return kept;
+  }
+
+  function renderShoot() {
+    const shoot = state.shoot;
+    el('shoot-title').textContent = shoot.name;
+    el('shoot-meta').textContent = `${plural(shoot.photo_count, 'photo')} · ${shoot.edited_count} edited · ${shoot.rejected_count} rejected · ${shoot.path}`;
+    const photos = visiblePhotos();
+    el('shoot-empty').classList.toggle('hidden', photos.length > 0);
+    el('photo-grid').innerHTML = photos.map((photo) => {
+      const edits = photo.files.filter((f) => f.role === 'edit').length;
+      const formats = [...new Set(photo.files.filter((f) => f.role === 'original').map((f) => f.name.split('.').pop().toUpperCase()))].join('+');
+      const image = photo.cover ? `<img loading="lazy" src="${previewUrl(shoot.id, photo.id, photo.cover)}" alt="">` : `<div class="no-cover">${escapeHtml(formats || photo.kind)}</div>`;
+      const badges = [
+        edits ? `<span class="pill edited">${edits === 1 ? 'Edited' : `${edits} edits`}</span>` : '',
+        photo.kind === 'video' ? '<span class="pill">Video</span>' : '',
+      ].join('');
+      return `<div class="photo-card ${state.selected.has(photo.id) ? 'selected' : ''}" data-id="${photo.id}">
+        <button type="button" class="select-box" aria-label="Select ${escapeHtml(photo.stem)}" data-select="${photo.id}"></button>
+        <button type="button" class="photo-open" data-open="${photo.id}">${image}</button>
+        <div class="photo-caption"><span>${escapeHtml(photo.stem)}</span><span class="muted">${escapeHtml(formats)}</span></div>
+        <div class="photo-badges">${badges}</div>
+      </div>`;
+    }).join('');
+    updateSelection();
+  }
+
+  function updateSelection() {
+    const count = state.selected.size;
+    el('selection-count').textContent = count ? `${count} selected` : '';
+    el('send-ipad').disabled = !count;
+    el('reject-selected').disabled = !count;
+    el('reject-selected').textContent = state.filter === 'rejected' ? 'Restore' : 'Reject';
+    document.querySelectorAll('.photo-card').forEach((card) => card.classList.toggle('selected', state.selected.has(card.dataset.id)));
+  }
+
+  document.querySelectorAll('[data-filter]').forEach((button) => button.addEventListener('click', () => {
+    state.filter = button.dataset.filter;
+    document.querySelectorAll('[data-filter]').forEach((item) => item.classList.toggle('active', item === button));
+    state.selected.clear();
+    renderShoot();
+  }));
+
+  el('photo-grid').addEventListener('click', (event) => {
+    const select = event.target.closest('[data-select]');
+    if (select) {
+      const id = select.dataset.select;
+      state.selected.has(id) ? state.selected.delete(id) : state.selected.add(id);
+      return updateSelection();
+    }
+    const open = event.target.closest('[data-open]');
+    if (open) {
+      if (event.shiftKey || event.ctrlKey || event.metaKey) {
+        const id = open.dataset.open;
+        state.selected.has(id) ? state.selected.delete(id) : state.selected.add(id);
+        return updateSelection();
+      }
+      openPhoto(open.dataset.open);
+    }
+  });
+
+  el('select-all').addEventListener('click', () => {
+    const photos = visiblePhotos();
+    const all = photos.every((p) => state.selected.has(p.id));
+    photos.forEach((p) => (all ? state.selected.delete(p.id) : state.selected.add(p.id)));
+    updateSelection();
+  });
+
+  el('send-ipad').addEventListener('click', () => guarded(el('send-ipad'), async () => {
+    const result = await post('/api/ipad/send', {shoot_id: state.shoot.id, photo_ids: [...state.selected], format: el('send-format').value});
+    toast(`${plural(result.queued, 'photo')} waiting for the iPad${result.skipped.length ? ` (${result.skipped.length} skipped)` : ''}`);
+    state.selected.clear();
+    updateSelection();
+    loadLibrary();
+  }));
+
+  el('reject-selected').addEventListener('click', () => guarded(el('reject-selected'), async () => {
+    await post(`/api/shoots/${state.shoot.id}/reject`, {photo_ids: [...state.selected], rejected: state.filter !== 'rejected'});
+    await openShoot(state.shoot.id);
+  }));
+
+  el('shoot-rename').addEventListener('click', async () => {
+    const name = prompt('New name for this shoot', state.shoot.name);
+    if (!name || name === state.shoot.name) return;
+    await guarded(el('shoot-rename'), async () => {
+      await post(`/api/shoots/${state.shoot.id}/rename`, {name});
+      await Promise.all([openShoot(state.shoot.id), loadLibrary()]);
+    });
+  });
+
+  el('shoot-rescan').addEventListener('click', () => guarded(el('shoot-rescan'), async () => {
+    const report = await post(`/api/shoots/${state.shoot.id}/rescan`);
+    const parts = [];
+    if (report.added.length) parts.push(`${report.added.length} added`);
+    if (report.changed.length) parts.push(`${report.changed.length} changed (kept as new versions)`);
+    if (report.missing.length) parts.push(`${report.missing.length} missing`);
+    if (report.waiting.length) parts.push(`${report.waiting.length} still being written`);
+    toast(parts.length ? parts.join(', ') : 'Everything is up to date');
+    await openShoot(state.shoot.id, true);
+  }));
+
+  el('shoot-reveal').addEventListener('click', () => guarded(el('shoot-reveal'), () => post(`/api/shoots/${state.shoot.id}/reveal`)));
+
+  el('shoot-trash').addEventListener('click', async () => {
+    const count = state.shoot.photos.length;
+    if (!confirm(`Delete “${state.shoot.name}”${count ? ` and its ${plural(count, 'photo')}` : ''}? The folder moves to the library trash; nothing is erased until you empty the trash.`)) return;
+    await guarded(el('shoot-trash'), async () => {
+      const result = await post(`/api/shoots/${state.shoot.id}/trash`);
+      toast(`Moved ${plural(result.trashed, 'file')} to the trash`);
+      await loadLibrary();
+      location.hash = '#library';
+    });
+  });
+
+  // Drag and drop into a shoot
+  const dropZone = el('drop-zone');
+  ['dragenter', 'dragover'].forEach((type) => document.addEventListener(type, (event) => {
+    if (el('view-shoot').classList.contains('hidden')) return;
+    event.preventDefault();
+    dropZone.classList.add('active');
+  }));
+  ['dragleave', 'drop'].forEach((type) => document.addEventListener(type, (event) => {
+    if (type === 'dragleave' && event.relatedTarget) return;
+    dropZone.classList.remove('active');
+  }));
+  document.addEventListener('drop', async (event) => {
+    if (el('view-shoot').classList.contains('hidden')) return;
+    event.preventDefault();
+    const files = [...event.dataTransfer.files];
+    if (!files.length) return;
+    const counts = {};
+    for (const [index, file] of files.entries()) {
+      dropZone.textContent = `Adding ${index + 1} of ${files.length}: ${file.name}`;
+      try {
+        const result = await uploadFile(`/api/shoots/${state.shoot.id}/upload`, file);
+        counts[result.status] = (counts[result.status] || 0) + 1;
+      } catch (error) {
+        counts.failed = (counts.failed || 0) + 1;
+        toast(`${file.name}: ${error.message}`, true);
+      }
+    }
+    dropZone.textContent = 'Drop files here to add them to this shoot. Kira files edits next to their originals.';
+    toast(Object.entries(counts).map(([status, n]) => `${n} ${status}`).join(', '));
+    await Promise.all([openShoot(state.shoot.id, true), loadLibrary()]);
+  });
+
+  async function uploadFile(path, file, onProgress = () => {}) {
+    const sha256 = await KiraHash.fileSHA256(file, (done) => onProgress(done / file.size / 2));
+    const headers = {'X-Kira-Sha256': sha256, 'Content-Type': 'application/octet-stream'};
+    return api(`${path}?name=${encodeURIComponent(file.name)}`, {method: 'POST', body: file, headers});
+  }
+
+  // -- Photo detail -----------------------------------------------------------------------
+
+  const roleLabel = (file) => ({original: 'Original', edit: `Edit ${file.edit || ''}`.trim(), copy: 'Copy', live: 'Live Photo video', sidecar: 'Sidecar', project: 'Project file'}[file.role] || file.role);
+
+  const isVideoName = (name) => /\.(3g2|3gp|avi|m2ts|m4v|mkv|mov|mp4|mpe?g|mts|webm|wmv)$/i.test(name);
+
+  // Shows a still, or plays a video with its frame as the poster. Browsers that can't decode the
+  // video (HEVC without the Windows extension) keep the frame and say so.
+  function setViewer(viewer, image, video = '') {
+    const img = viewer.querySelector('img');
+    const player = viewer.querySelector('video');
+    const none = viewer.querySelector('.viewer-none');
+    const showStill = (message) => {
+      player.classList.add('hidden');
+      player.removeAttribute('src');
+      none.textContent = message;
+      none.classList.toggle('hidden', !message);
+      if (!image) return img.classList.add('hidden');
+      img.classList.remove('hidden');
+      img.onerror = () => { img.classList.add('hidden'); none.textContent = 'No preview for this file.'; none.classList.remove('hidden'); };
+      img.src = image;
+    };
+    player.pause();
+    if (!video) {
+      showStill(image ? '' : 'No preview for this file.');
+      player.load();
+      return;
+    }
+    img.classList.add('hidden');
+    none.classList.add('hidden');
+    player.classList.remove('hidden');
+    player.onerror = () => showStill("This browser can't play this video. Download it to watch.");
+    player.poster = image;
+    player.src = video;
+  }
+
+  document.querySelectorAll('dialog').forEach((dialog) => dialog.addEventListener('close', () => dialog.querySelectorAll('video').forEach((player) => player.pause())));
+
+  function openPhoto(photoId) {
+    state.photo = state.shoot.photos.find((p) => p.id === photoId);
+    state.version = state.photo.final || state.photo.cover || state.photo.files[0]?.name;
+    renderPhoto();
+    el('photo-dialog').showModal();
+  }
+
+  function renderPhoto() {
+    const photo = state.photo;
+    el('photo-title').textContent = photo.stem;
+    el('photo-meta').textContent = [captureDate(photo.capture_time)?.toLocaleString() ?? '', photo.model, photo.origin !== 'other' ? photo.origin : ''].filter(Boolean).join(' · ');
+    const order = {original: 0, live: 1, edit: 2, project: 3, sidecar: 4, copy: 5};
+    const files = [...photo.files].sort((a, b) => order[a.role] - order[b.role] || (a.edit || 0) - (b.edit || 0));
+    el('version-list').innerHTML = files.map((file) => `
+      <li class="${file.name === state.version ? 'current' : ''} ${file.missing ? 'missing' : ''}" data-version="${escapeHtml(file.name)}">
+        <span class="version-role">${escapeHtml(roleLabel(file))}${file.name === photo.final ? ' <span class="pill final">Final</span>' : ''}</span>
+        <span class="version-name">${escapeHtml(file.name)}</span>
+        <span class="muted">${bytes(file.size)}${file.source ? ` · from ${escapeHtml(file.source)}` : ''}${file.missing ? ' · missing' : ''}</span>
+      </li>`).join('');
+    const file = photo.files.find((f) => f.name === state.version);
+    const still = previewUrl(state.shoot.id, photo.id, state.version, 1600);
+    const playable = file && !file.missing && isVideoName(file.name);
+    setViewer(el('photo-viewer'), still, playable ? fileUrl(state.shoot.id, photo.id, state.version, '?inline=1') : '');
+    const finalable = file && ['original', 'edit'].includes(file.role) && photo.kind !== 'video';
+    el('make-final').disabled = !finalable || (photo.final === file.name && photo.final_pinned);
+    el('make-final').textContent = photo.final === file?.name ? (photo.final_pinned ? 'Final' : 'Keep as Final') : 'Make Final';
+    el('toggle-reject').textContent = photo.rejected ? 'Restore' : 'Reject';
+  }
+
+  el('version-list').addEventListener('click', (event) => {
+    const item = event.target.closest('[data-version]');
+    if (!item) return;
+    state.version = item.dataset.version;
+    renderPhoto();
+  });
+
+  el('make-final').addEventListener('click', () => guarded(el('make-final'), async () => {
+    const photo = await post(`/api/shoots/${state.shoot.id}/final`, {photo_id: state.photo.id, name: state.version});
+    Object.assign(state.photo, photo);
+    renderPhoto();
+    openShoot(state.shoot.id, true);
+  }));
+
+  el('download-version').addEventListener('click', () => {
+    window.location.href = fileUrl(state.shoot.id, state.photo.id, state.version);
+  });
+
+  el('toggle-reject').addEventListener('click', () => guarded(el('toggle-reject'), async () => {
+    await post(`/api/shoots/${state.shoot.id}/reject`, {photo_ids: [state.photo.id], rejected: !state.photo.rejected});
+    el('photo-dialog').close();
+    await openShoot(state.shoot.id, true);
+  }));
+
+  el('delete-version').addEventListener('click', async () => {
+    const whole = state.photo.files.length === 1;
+    if (!confirm(whole ? `Move ${state.photo.stem} to the library trash?` : `Move ${state.version} to the library trash? Other versions stay.`)) return;
+    await guarded(el('delete-version'), async () => {
+      await post(`/api/shoots/${state.shoot.id}/delete`, {photo_id: state.photo.id, name: state.version});
+      el('photo-dialog').close();
+      await openShoot(state.shoot.id, true);
+    });
+  });
+
+  document.querySelectorAll('dialog [data-close]').forEach((button) => button.addEventListener('click', () => button.closest('dialog').close()));
+
+  // -- Folder browser -------------------------------------------------------------------------
+
+  document.querySelectorAll('[data-browse]').forEach((button) => button.addEventListener('click', () => {
+    state.browseTarget = button.dataset.browse;
+    browse(el(state.browseTarget).value || '');
+    el('browse-dialog').showModal();
+  }));
+
+  async function browse(path) {
+    try {
+      const result = await api(`/api/browse?path=${encodeURIComponent(path)}`);
+      state.browsePath = result.current;
+      el('browse-current').textContent = result.current || 'Choose a drive';
+      el('browse-choose').disabled = !result.current;
+      el('browse-crumbs').innerHTML = result.breadcrumbs.map((crumb) => `<button type="button" data-path="${escapeHtml(crumb.path)}">${escapeHtml(crumb.name)}</button>`).join('<span>›</span>');
+      const up = result.parent !== null && result.current ? `<li><button type="button" data-path="${escapeHtml(result.parent)}">↑ Up</button></li>` : (result.current ? '<li><button type="button" data-path="">↑ Drives</button></li>' : '');
+      el('browse-list').innerHTML = up + result.directories.map((dir) => `<li><button type="button" data-path="${escapeHtml(dir.path)}">${escapeHtml(dir.name || dir.path)}</button></li>`).join('');
+    } catch (error) {
+      if (path) return browse('');
+      toast(error.message, true);
+    }
+  }
+
+  el('browse-dialog').addEventListener('click', (event) => {
+    const target = event.target.closest('[data-path]');
+    if (target) browse(target.dataset.path);
+  });
+  el('browse-choose').addEventListener('click', () => {
+    el(state.browseTarget).value = state.browsePath;
+    el(state.browseTarget).dispatchEvent(new Event('change'));
+    el('browse-dialog').close();
+  });
+
+  // -- Import ---------------------------------------------------------------------------------
+
+  function shootOptions(select) {
+    const current = select.value;
+    select.innerHTML = '<option value="">New shoot…</option>' + state.library.shoots.map((shoot) => `<option value="${shoot.id}">${escapeHtml(shoot.name)}</option>`).join('');
+    select.value = state.library.shoots.some((s) => s.id === current) ? current : '';
+  }
+
+  function renderImport() {
+    shootOptions(el('import-shoot'));
+    shootOptions(el('picker-shoot'));
+    el('import-shoot-name').classList.toggle('hidden', Boolean(el('import-shoot').value));
+    el('picker-shoot-name').classList.toggle('hidden', Boolean(el('picker-shoot').value));
+  }
+  el('import-shoot').addEventListener('change', renderImport);
+  el('picker-shoot').addEventListener('change', renderImport);
+
+  function shootChoice(select, input) {
+    return select.value ? {shoot_id: select.value} : {shoot_name: input.value.trim()};
+  }
+
+  function describeImport(report) {
+    const counts = report.counts || {};
+    const labels = {new: 'new photos', original: 'extra originals (RAW/JPEG pairs)', edit: 'edits filed with their originals', copy: 'lower-quality copies set aside', duplicate: 'already in the library', review: 'waiting for review', sidecar: 'sidecars', project: 'project files', loose: 'loose files', ignored: 'ignored'};
+    const lines = Object.entries(counts).map(([key, value]) => `<li>${value} ${escapeHtml(labels[key] || key)}</li>`);
+    if (report.failed?.length) lines.push(`<li class="error-text">${report.failed.length} failed: ${escapeHtml(report.failed.slice(0, 3).map((f) => `${f.name} (${f.error})`).join(', '))}</li>`);
+    return `<ul>${lines.join('') || '<li>Nothing new.</li>'}</ul>`;
+  }
+
+  el('import-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const button = event.submitter;
+    guarded(button, async () => {
+      const task = await post('/api/import', {source: el('import-source').value, ...shootChoice(el('import-shoot'), el('import-shoot-name'))});
+      el('import-result').innerHTML = '<p class="muted">Importing… you can keep working.</p>';
+      watchTask(task, async (done) => {
+        await loadLibrary();
+        renderImport();
+        if (done.state === 'done') {
+          el('import-result').innerHTML = describeImport(done.result) + `<a href="#shoot/${done.result.shoot_id}">Open the shoot →</a>`;
+        } else {
+          el('import-result').innerHTML = `<p class="error-text">${escapeHtml(done.error || done.state)}</p>`;
+        }
       });
-      const pickerUrl = `${String(session.pickerUri).replace(/\/$/, '')}/autoclose`;
-      popup.location.href = pickerUrl;
-      await pollPickerSession(session.id);
-      await importGoogleSelection(session.id);
-    } catch (error) {
-      if (popup) popup.close();
-      showError(error);
-    } finally {
-      el('google-progress').classList.add('hidden');
+    });
+  });
+
+  el('import-check').addEventListener('click', () => guarded(el('import-check'), async () => {
+    const result = await post('/api/import/check', {source: el('import-source').value});
+    const verdict = result.safe_to_wipe
+      ? '<p class="notice ok">Safe to wipe: every file is in the library and backed up.</p>'
+      : `<p class="notice warn">Not yet safe to wipe.</p>`;
+    el('import-result').innerHTML = `${verdict}<ul><li>${result.imported} of ${result.total} files are in the library</li><li>${result.backed_up} backed up to Drive or Google Photos</li>${result.not_imported.length ? `<li>Not imported: ${escapeHtml(result.not_imported.slice(0, 8).join(', '))}${result.not_imported.length > 8 ? '…' : ''}</li>` : ''}</ul>`;
+  }));
+
+  function describePickerFiling(google) {
+    if (!google) return '';
+    const parts = [];
+    if (google.archived) parts.push(`<p class="notice ok">${plural(google.archived, 'photo')} added to the “${escapeHtml(google.album)}” album and archived in Google Photos, so the picker won't offer them again.</p>`);
+    if (google.not_found.length) parts.push(`<p class="muted">Couldn't find these in Google Photos to archive, so they were left as they are: ${google.not_found.map(escapeHtml).join(', ')}</p>`);
+    if (google.error) parts.push(`<p class="error-text">${escapeHtml(google.error)}</p>`);
+    return parts.join('');
+  }
+
+  el('picker-start').addEventListener('click',() => guarded(el('picker-start'), async () => {
+    const choice = shootChoice(el('picker-shoot'), el('picker-shoot-name'));
+    if (!choice.shoot_id && !choice.shoot_name) throw new Error('Choose a shoot or name a new one first');
+    const session = await post('/api/photos/picker');
+    window.open(session.picker_uri, '_blank', 'noopener');
+    el('picker-result').innerHTML = '<p class="muted">Choose photos in the Google Photos tab, then press Done there. Waiting…</p>';
+    for (let attempt = 0; attempt < 360; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      const status = await api(`/api/photos/picker/${session.id}`);
+      if (status.ready) {
+        const task = await post(`/api/photos/picker/${session.id}/import`, choice);
+        el('picker-result').innerHTML = '<p class="muted">Downloading the chosen photos…</p>';
+        watchTask(task, async (done) => {
+          await loadLibrary();
+          renderImport();
+          el('picker-result').innerHTML = done.state === 'done' ? describeImport(done.result) + describePickerFiling(done.result.google) + `<a href="#shoot/${done.result.shoot_id}">Open the shoot →</a>` : `<p class="error-text">${escapeHtml(done.error)}</p>`;
+        });
+        return;
+      }
     }
+    el('picker-result').innerHTML = '<p class="error-text">The picker timed out. Start again.</p>';
+  }));
+
+  // -- Review -----------------------------------------------------------------------------------
+
+  async function loadReview() {
+    const {items} = await api('/api/review');
+    el('review-empty').classList.toggle('hidden', items.length > 0);
+    el('review-list').innerHTML = items.map((item) => `
+      <div class="card review-item" data-review="${item.id}">
+        <img loading="lazy" src="${withToken(`/api/review/${item.id}/preview?size=480`)}" alt="" onerror="this.classList.add('hidden')">
+        <div class="stack">
+          <b>${escapeHtml(item.name)}</b>
+          <span class="muted">${escapeHtml(item.reason)} · from ${escapeHtml(item.source)}${item.capture_time ? ` · taken ${escapeHtml(day(item.capture_time))}` : ''}</span>
+          <div class="candidates">${item.candidates.map((c) => `
+            <div class="candidate">
+              ${c.cover ? `<img loading="lazy" src="${previewUrl(c.shoot_id, c.photo_id, c.cover)}" alt="">` : '<div class="no-cover"></div>'}
+              <span>${escapeHtml(c.stem)}<br><span class="muted">${escapeHtml(c.shoot_name)}</span></span>
+              <button class="primary-button small" type="button" data-action="edit" data-shoot="${c.shoot_id}" data-photo="${c.photo_id}">Edit of this</button>
+              <button class="quiet-button small" type="button" data-action="copy" data-shoot="${c.shoot_id}" data-photo="${c.photo_id}">Copy of this</button>
+            </div>`).join('')}</div>
+          <div class="row">
+            <button class="quiet-button small" type="button" data-action="new">It's a new photo</button>
+            <button class="danger-button small" type="button" data-action="discard">Discard</button>
+          </div>
+        </div>
+      </div>`).join('');
+  }
+
+  el('review-list').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-action]');
+    if (!button) return;
+    const id = button.closest('[data-review]').dataset.review;
+    guarded(button, async () => {
+      await post(`/api/review/${id}`, {action: button.dataset.action, shoot_id: button.dataset.shoot, photo_id: button.dataset.photo});
+      await Promise.all([loadReview(), loadLibrary()]);
+    });
   });
 
-  el('google-download-settings-toggle').addEventListener('click', () => {
-    state.googleDownloadSettingsOpen = !state.googleDownloadSettingsOpen;
-    updateGooglePreferenceUi();
-  });
+  // -- iPad --------------------------------------------------------------------------------------
 
-  el('google-download-mode').addEventListener('change', () => {
-    updateGooglePreferenceUi();
-    saveGoogleImportPreferences();
-  });
-  el('google-zip-threshold').addEventListener('change', () => {
-    saveGoogleImportPreferences();
-  });
-  el('google-destination-folder').addEventListener('input', renderGoogleDestination);
-
-  el('google-disconnect').addEventListener('click', async () => {
-    if (!window.confirm('Disconnect Google Photos from Kira? Imported local files will stay on this desktop.')) return;
-    try {
-      await api('/api/google/disconnect', {method: 'POST', body: '{}'});
-      await refreshGoogleStatus();
-      await checkGoogleHealth();
-      toast('Google Photos disconnected. Imported files were kept.');
-    } catch (error) {
-      showError(error);
+  async function loadIpad() {
+    const {items} = await api('/api/ipad/outbox');
+    const visible = items.filter((item) => item.state === 'waiting' || !item.returned);
+    el('outbox-empty').classList.toggle('hidden', visible.length > 0);
+    el('outbox-list').innerHTML = visible.map((item) => `
+      <div class="outbox-item">
+        <img loading="lazy" src="${previewUrl(item.shoot_id, item.photo_id, item.file_name)}" alt="" onerror="this.classList.add('hidden')">
+        <div><b>${escapeHtml(item.file_name)}</b><br><span class="muted">${escapeHtml(item.shoot_name)} · ${bytes(item.size)} · ${item.state === 'waiting' ? 'waiting' : item.returned ? 'edit received' : 'on the iPad'}</span></div>
+        ${state.desktop ? '' : `<a class="quiet-button small link-button" href="${escapeHtml(item.url)}" download>Download</a>`}
+        <button class="quiet-button small" type="button" data-remove="${item.id}" aria-label="Remove">✕</button>
+      </div>`).join('');
+    const waiting = items.filter((item) => item.state === 'waiting');
+    el('ipad-download-all').classList.toggle('hidden', !waiting.length);
+    if (state.desktop && state.bootstrap) {
+      el('pair-qr').src = `${state.bootstrap.pair_qr_url}?v=${Date.now()}`;
+      el('ipad-url').textContent = state.bootstrap.ipad_url;
+      el('pair-code-display').textContent = state.bootstrap.pair_code;
+      const setup = await api('/api/ipad/setup');
+      el('receive-url').textContent = setup.receive_url;
+      el('outbox-url').textContent = setup.outbox_urls;
     }
+  }
+
+  el('outbox-list').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-remove]');
+    if (button) guarded(button, async () => { await api(`/api/ipad/outbox/${button.dataset.remove}`, {method: 'DELETE'}); await Promise.all([loadIpad(), loadLibrary()]); });
+  });
+  el('outbox-clear').addEventListener('click', () => guarded(el('outbox-clear'), async () => { await post('/api/ipad/outbox/clear'); loadIpad(); }));
+
+  el('ipad-download-all').addEventListener('click', async (event) => {
+    event.preventDefault();
+    const {items} = await api('/api/ipad/outbox?state=waiting');
+    for (const item of items) {
+      const link = document.createElement('a');
+      link.href = item.url;
+      link.download = item.file_name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      await new Promise((resolve) => setTimeout(resolve, 900));
+    }
+    setTimeout(loadIpad, 1500);
   });
 
-  el('google-organizer-connect-button').addEventListener('click', async () => {
-    const cookiesPath = el('google-cookies-path').value.trim();
-    const accountIndex = Number.parseInt(el('google-account-index').value, 10);
-    if (!cookiesPath) {
-      showError(new Error('Choose or enter the exported cookie JSON or cookies.txt path.'));
+  el('ipad-upload').addEventListener('change', async (event) => {
+    const files = [...event.target.files];
+    const out = el('ipad-upload-result');
+    const lines = [];
+    for (const [index, file] of files.entries()) {
+      out.innerHTML = `<p class="muted">Sending ${index + 1} of ${files.length}: ${escapeHtml(file.name)}</p>`;
+      try {
+        const result = await uploadFile('/api/ipad/receive', file);
+        lines.push(`<li>${escapeHtml(file.name)}: ${escapeHtml(result.detail || result.status)}</li>`);
+      } catch (error) {
+        lines.push(`<li class="error-text">${escapeHtml(file.name)}: ${escapeHtml(error.message)}</li>`);
+      }
+    }
+    out.innerHTML = `<ul>${lines.join('')}</ul>`;
+    event.target.value = '';
+    loadIpad();
+    loadLibrary();
+  });
+
+  document.querySelectorAll('[data-copy]').forEach((button) => button.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(el(button.dataset.copy).textContent); toast('Copied'); } catch { toast('Copy failed; select the text instead', true); }
+  }));
+
+  // -- Cloud --------------------------------------------------------------------------------------
+
+  async function loadCloud() {
+    const status = await api('/api/google/status');
+    const account = status.account;
+    el('google-account-state').textContent = !account.configured
+      ? 'Add Google OAuth credentials (google-oauth-client.json) next to Kira to enable backup and uploads.'
+      : account.connected ? (account.needs_consent ? 'Connected, but Kira needs extra permissions. Click Connect again.' : 'Connected for Drive backup, Photos uploads and the Photos picker.') : 'Not connected.';
+    el('google-connect').textContent = account.connected ? 'Reconnect' : 'Connect Google';
+    el('google-connect').disabled = !account.configured;
+    el('google-disconnect').classList.toggle('hidden', !account.connected);
+    const drive = status.drive;
+    el('drive-facts').innerHTML = `
+      <dt>Backed up</dt><dd>${drive.backed_up ?? 0} files</dd>
+      <dt>Waiting</dt><dd>${drive.pending ?? 0} files${drive.pending_bytes ? ` (${bytes(drive.pending_bytes)})` : ''}</dd>
+      <dt>Last run</dt><dd>${escapeHtml(when(drive.last_run))}</dd>
+      ${drive.last_error ? `<dt>Last problem</dt><dd class="error-text">${escapeHtml(drive.last_error)}</dd>` : ''}
+      ${status.missing ? `<dt>Missing locally</dt><dd class="error-text">${status.missing} files</dd>` : ''}`;
+    el('drive-backup').disabled = !drive.connected;
+    el('drive-restore').classList.toggle('hidden', !status.missing);
+    const photos = status.photos;
+    el('photos-facts').innerHTML = `
+      <dt>Finals to upload</dt><dd>${photos.pending_finals}${photos.skipped_finals ? ` (${photos.skipped_finals} can't be uploaded, e.g. RAW)` : ''}</dd>
+      <dt>Web session</dt><dd>${photos.web_signed_in ? `signed in${photos.web.account ? ` as ${escapeHtml(photos.web.account)}` : ''}` : 'not signed in'}</dd>
+      <dt>Last check</dt><dd>${escapeHtml(when(photos.last_check))}</dd>
+      ${photos.phone_not_in_photos ? `<dt>Phone photos not in Google Photos</dt><dd class="error-text">${photos.phone_not_in_photos} (kept on Drive instead)</dd>` : ''}`;
+    el('photos-upload').disabled = !photos.upload_connected || !photos.pending_finals;
+    el('photos-check').disabled = !photos.web_signed_in;
+    el('cleanup-plan').disabled = !photos.web_signed_in;
+    el('web-signin').textContent = photos.web_signed_in ? 'Sign out of Photos web' : 'Sign in to Photos web';
+    const warn = (drive.pending || 0) + (status.missing || 0);
+    setBadge('cloud-badge', warn);
+    const plan = await api('/api/photos/cleanup');
+    state.cleanup = plan.items || [];
+    state.cleanupChosen = new Set(state.cleanup.map((item) => item.media_key));
+    renderCleanup();
+  }
+
+  function renderCleanup() {
+    const items = state.cleanup;
+    el('cleanup-actions').classList.toggle('hidden', !items.length);
+    el('cleanup-list').innerHTML = items.length ? items.map((item) => `
+      <label class="cleanup-item">
+        <input type="checkbox" data-key="${escapeHtml(item.media_key)}" ${state.cleanupChosen.has(item.media_key) ? 'checked' : ''}>
+        <img loading="lazy" src="${previewUrl(item.shoot_id, item.photo_id, item.name)}" alt="" onerror="this.classList.add('hidden')">
+        <span><b>${escapeHtml(item.name)}</b><br><span class="muted">${escapeHtml(item.shoot_name)} · ${escapeHtml(item.reason_text)}</span></span>
+      </label>`).join('') : '<p class="muted">Click Find copies to see what could be hidden.</p>';
+    el('cleanup-apply').textContent = `Hide ${state.cleanupChosen.size} in Google Photos`;
+    el('cleanup-apply').disabled = !state.cleanupChosen.size;
+    el('cleanup-toggle').textContent = state.cleanupChosen.size === items.length ? 'Select none' : 'Select all';
+  }
+
+  el('cleanup-list').addEventListener('change', (event) => {
+    const key = event.target.dataset.key;
+    if (!key) return;
+    event.target.checked ? state.cleanupChosen.add(key) : state.cleanupChosen.delete(key);
+    renderCleanup();
+  });
+  el('cleanup-toggle').addEventListener('click', () => {
+    state.cleanupChosen = state.cleanupChosen.size === state.cleanup.length ? new Set() : new Set(state.cleanup.map((item) => item.media_key));
+    renderCleanup();
+  });
+
+  el('google-connect').addEventListener('click', () => guarded(el('google-connect'), async () => {
+    const {url} = await post('/api/google/connect');
+    window.open(url, '_blank');
+    const poll = setInterval(async () => {
+      const status = await api('/api/google/status');
+      if (status.account.connected && !status.account.needs_consent) { clearInterval(poll); loadCloud(); }
+    }, 3000);
+    setTimeout(() => clearInterval(poll), 300000);
+  }));
+  el('google-disconnect').addEventListener('click', () => guarded(el('google-disconnect'), async () => { await post('/api/google/disconnect'); loadCloud(); }));
+
+  el('web-signin').addEventListener('click', () => guarded(el('web-signin'), async () => {
+    const status = await api('/api/google/status');
+    if (status.photos.web_signed_in) {
+      if (!confirm('Sign Kira out of the Google Photos web session?')) return;
+      await api('/api/google/web-session', {method: 'DELETE'});
+      return loadCloud();
+    }
+    await post('/api/google/web-signin');
+    el('photos-result').innerHTML = '<p class="muted">Sign in to Google Photos in the window that opened. When your photos appear, close that window.</p>';
+    for (let attempt = 0; attempt < 400; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      const web = await api('/api/google/web-signin');
+      const signin = web.sign_in || {};
+      if (signin.status === 'verifying') el('photos-result').innerHTML = '<p class="muted">Checking the sign-in…</p>';
+      if (web.connected) { el('photos-result').innerHTML = '<p class="notice ok">Signed in.</p>'; return loadCloud(); }
+      if (['failed', 'cancelled'].includes(signin.status)) { el('photos-result').innerHTML = `<p class="error-text">${escapeHtml(signin.error || 'Sign-in was cancelled')}</p>`; return; }
+    }
+  }));
+
+  function cloudTask(button, path, output, describe) {
+    button.addEventListener('click', () => guarded(button, async () => {
+      const task = await post(path);
+      el(output).innerHTML = `<p class="muted">${escapeHtml(task.title)}…</p>`;
+      watchTask(task, async (done) => {
+        el(output).innerHTML = done.state === 'done' ? describe(done.result) : `<p class="error-text">${escapeHtml(done.error || done.state)}</p>`;
+        loadCloud();
+      });
+    }));
+  }
+
+  const failures = (result) => (result.failed?.length ? `<p class="error-text">${result.failed.length} failed, e.g. ${escapeHtml(result.failed[0].file)}: ${escapeHtml(result.failed[0].error)}</p>` : '');
+  cloudTask(el('drive-backup'), '/api/backup/run', 'drive-result', (r) => `<p class="notice ok">${r.uploaded} uploaded, ${r.moved} moved on Drive.</p>${failures(r)}`);
+  cloudTask(el('drive-restore'), '/api/backup/restore', 'drive-result', (r) => `<p class="notice ok">${r.restored} files restored from Drive.</p>${failures(r)}`);
+  cloudTask(el('photos-upload'), '/api/photos/upload-finals', 'photos-result', (r) => `<p class="notice ok">${r.uploaded} Finals uploaded to their shoot albums.</p>${r.skipped.length ? `<p class="muted">${r.skipped.length} skipped: ${escapeHtml(r.skipped.slice(0, 3).map((s) => `${s.file} (${s.reason})`).join(', '))}</p>` : ''}${failures(r)}`);
+  cloudTask(el('photos-check'), '/api/photos/check', 'photos-result', (r) => `<p class="notice ok">Checked ${r.checked} files; Google Photos holds ${r.present}.</p>${r.phone_not_in_photos ? `<p class="notice warn">${r.phone_not_in_photos} phone photos aren't in Google Photos as exact copies, so Drive backup keeps them.</p>` : ''}`);
+
+  el('cleanup-plan').addEventListener('click', () => guarded(el('cleanup-plan'), async () => {
+    const task = await post('/api/photos/cleanup/plan');
+    el('cleanup-list').innerHTML = '<p class="muted">Looking up copies in Google Photos…</p>';
+    watchTask(task, (done) => {
+      if (done.state !== 'done') { el('cleanup-list').innerHTML = `<p class="error-text">${escapeHtml(done.error)}</p>`; return; }
+      state.cleanup = done.result.items;
+      state.cleanupChosen = new Set(state.cleanup.map((item) => item.media_key));
+      if (!state.cleanup.length) { el('cleanup-list').innerHTML = '<p class="notice ok">Nothing to hide. Google Photos only shows your Finals.</p>'; el('cleanup-actions').classList.add('hidden'); return; }
+      renderCleanup();
+    });
+  }));
+
+  el('cleanup-apply').addEventListener('click', () => guarded(el('cleanup-apply'), async () => {
+    if (!confirm(`Hide ${state.cleanupChosen.size} items in Google Photos? They move to Archive and stay in your account.`)) return;
+    const task = await post('/api/photos/cleanup/apply', {media_keys: [...state.cleanupChosen]});
+    watchTask(task, (done) => {
+      toast(done.state === 'done' ? `${done.result.archived} items hidden` : done.error, done.state !== 'done');
+      loadCloud();
+    });
+  }));
+
+  // -- Drives -----------------------------------------------------------------------------------
+
+  const sourcePreview = (path, size = 480) => withToken(`/api/source/preview?size=${size}&path=${encodeURIComponent(path)}`);
+  const sourceFile = (path) => withToken(`/api/source/file?path=${encodeURIComponent(path)}`);
+  const isMedia = (file) => ['photo', 'video'].includes(file.kind);
+  const extension = (name) => (name.includes('.') ? name.split('.').pop().toUpperCase() : '');
+  const isRaw = (name) => /\.(3fr|arw|cr2|cr3|crw|dng|erf|iiq|kdc|mef|mos|mrw|nef|nrw|orf|pef|raf|rw2|rwl|sr2|srf|srw|x3f)$/i.test(name);
+  // A thumbnail that fails to load becomes the same placeholder a file without one gets.
+  const noCover = (label = '') => `this.outerHTML='<div class=&quot;no-cover&quot;>${escapeHtml(label)}</div>'`;
+
+  function folderCard(dir) {
+    const isDrive = dir.media === undefined;
+    const cover = dir.cover
+      ? `<img loading="lazy" src="${sourcePreview(dir.cover)}" alt="" onerror="${noCover()}">`
+      : `<div class="no-cover folder">${isDrive ? 'Drive' : ''}</div>`;
+    const counts = isDrive
+      ? dir.path
+      : [dir.media ? plural(dir.media, 'photo or video', 'photos and videos') : '', dir.folders ? plural(dir.folders, 'folder') : ''].filter(Boolean).join(' · ') || 'No photos';
+    return `<a class="shoot-card" href="#drives" data-drive-path="${escapeHtml(dir.path)}">${cover}<div class="shoot-card-body"><b>${escapeHtml(dir.name || dir.path)}</b><span class="muted">${escapeHtml(counts)}</span></div></a>`;
+  }
+
+  // One card per capture, like a shoot: IMG_1234.HEIC, .MOV and .AAE side by side are one item.
+  function driveGroups(files) {
+    const groups = new Map();
+    for (const file of files) {
+      const stem = file.name.replace(/\.[^.]+$/, '');
+      const key = `${file.folder || ''}\${stem}`.toLowerCase();
+      if (!groups.has(key)) groups.set(key, {stem, folder: file.folder || '', files: []});
+      groups.get(key).files.push(file);
+    }
+    const rank = (file) => (file.kind === 'photo' ? (isRaw(file.name) ? 1 : 0) : file.kind === 'video' ? 2 : 3);
+    return [...groups.values()].map((group) => {
+      const media = group.files.filter(isMedia);
+      const cover = [...group.files].sort((a, b) => rank(a) - rank(b))[0];
+      return {
+        ...group,
+        cover: isMedia(cover) ? cover : null,
+        video: media.length > 0 && media.every((file) => file.kind === 'video'),
+        size: group.files.reduce((total, file) => total + file.size, 0),
+        inLibrary: media.filter((file) => file.library),
+        missing: media.filter((file) => file.checked && !file.library),
+        duplicates: group.files.filter((file) => file.duplicate_of),
+        copies: Math.max(0, ...group.files.map((file) => file.copies || 0)),
+        unchecked: group.files.some((file) => !file.checked),
+      };
+    });
+  }
+
+  async function loadDrive(path = state.drivePath) {
+    el('drive-path').value = path;
+    if (!path) {
+      const roots = await api('/api/browse?path=');
+      state.drive = null;
+      el('drive-crumbs').innerHTML = '';
+      el('drive-title').textContent = 'Drives';
+      el('drive-summary').textContent = 'Look through a card or any folder without importing it. Kira shows which files the library already has and which repeat on the same drive. Nothing on the drive is moved.';
+      el('drive-folders').innerHTML = roots.directories.map((dir) => folderCard({name: dir.name, path: dir.path})).join('');
+      el('drive-grid').innerHTML = '';
+      el('drive-empty').classList.add('hidden');
+      el('drive-toolbar').classList.add('hidden');
+      el('drive-more-row').classList.add('hidden');
+      ['drive-scan', 'drive-links', 'drive-trash-copies', 'drive-import'].forEach((id) => el(id).classList.add('hidden'));
       return;
     }
     try {
-      await api('/api/google/web-session', {
-        method: 'POST',
-        body: JSON.stringify({cookies_path: cookiesPath, account_index: Number.isFinite(accountIndex) ? accountIndex : 0}),
-      });
-      await refreshGoogleStatus();
-      await checkGoogleHealth();
-      toast('Google Photos album and Archive automation connected.');
+      state.drive = await api(`/api/source?path=${encodeURIComponent(path)}${state.driveDeep ? '&recursive=1' : ''}`);
     } catch (error) {
-      showError(error);
+      toast(error.message, true);
+      return loadDrive('');
     }
-  });
-
-  async function signInToGooglePhotos() {
-    try {
-      const signIn = await api('/api/google/web-signin', {method: 'POST', body: '{}'});
-      state.google.organizer.sign_in = signIn;
-      renderGoogleSignIn(signIn);
-      await pollGoogleSignIn();
-    } catch (error) {
-      showError(error);
-    }
-  }
-  el('google-organizer-signin').addEventListener('click', signInToGooglePhotos);
-  el('google-organizer-reconnect').addEventListener('click', signInToGooglePhotos);
-  el('google-signin-cancel').addEventListener('click', async () => {
-    try {
-      const signIn = await api('/api/google/web-signin', {method: 'DELETE'});
-      state.google.organizer.sign_in = signIn;
-      renderGoogleSignIn(signIn);
-    } catch (error) {
-      showError(error);
-    }
-  });
-
-  el('google-organizer-disconnect').addEventListener('click', async () => {
-    if (!window.confirm('Remove the encrypted Google Photos web session from Kira?')) return;
-    try {
-      await api('/api/google/web-session', {method: 'DELETE'});
-      await refreshGoogleStatus();
-      await checkGoogleHealth();
-      toast('Google Photos web session removed.');
-    } catch (error) {
-      showError(error);
-    }
-  });
-
-  el('google-album-title').addEventListener('input', () => {
-    localStorage.setItem('kira-google-album-title', el('google-album-title').value.trim());
-    renderGoogleOrganizer();
-  });
-  el('google-archive-after-upload').addEventListener('change', renderGoogleOrganizer);
-
-  el('google-match-folder').addEventListener('click', async () => {
-    const albumTitle = el('google-album-title').value.trim();
-    const archive = el('google-archive-after-upload').checked;
-    const directory = paneFor().directory;
-    if (!directory || !albumTitle || !state.google.organizer?.connected) return;
-    const confirmed = window.confirm(
-      `Match every supported file directly inside:\n${directory}\n\n` +
-      `Confirmed Google Photos matches will be added to “${albumTitle}”` +
-      `${archive ? ' and archived' : ''}. Continue?`
-    );
-    if (!confirmed) return;
-    const button = el('google-match-folder');
-    button.disabled = true;
-    button.textContent = 'Matching folder…';
-    try {
-      const operation = await api('/api/google/match-folder', {
-        method: 'POST',
-        body: JSON.stringify({
-          source_directory: directory,
-          album_title: albumTitle,
-          archive,
-        }),
-      });
-      const finished = await pollGoogleOperation(operation.id);
-      if (finished.status === 'failed') {
-        throw new Error(finished.error || 'Google Photos folder matching failed.');
-      }
-      if (!finished.matched) {
-        toast(
-          `Checked ${finished.scanned} local files; no content matches were found in Google Photos` +
-          `${finished.failed ? `; ${finished.failed} file${finished.failed === 1 ? '' : 's'} failed and were logged` : ''}.`
-        );
-      } else {
-        toast(
-          `Matched ${finished.matched} Google item${finished.matched === 1 ? '' : 's'} ` +
-          `from ${finished.matched_local_files} local file${finished.matched_local_files === 1 ? '' : 's'}; ` +
-          `${finished.organized} added to ${albumTitle}${finished.archived_count ? ` and ${finished.archived_count} archived` : ''}` +
-          `${finished.failed ? `; ${finished.failed} failed and were logged` : ''}.`
-        );
-      }
-    } catch (error) {
-      showError(error);
-    } finally {
-      el('google-progress').classList.add('hidden');
-      renderGoogleOrganizer();
-    }
-  });
-
-  async function uploadPaneSelection(paneId) {
-    const pane = paneFor(paneId);
-    if (!pane.selectedAssets.size || !state.google.connected || pane.uploading) return;
-    const button = el(`${paneId}-google-upload`);
-    pane.uploading = true;
-    button.disabled = true;
-    try {
-      const operation = await api('/api/google/uploads', {
-        method: 'POST',
-        body: JSON.stringify({
-          source_directory: pane.directory,
-          asset_ids: Array.from(pane.selectedAssets),
-        }),
-      });
-      const finished = await pollGoogleOperation(operation.id);
-      if (finished.status === 'failed') throw new Error(finished.error || 'Google Photos upload failed.');
-      toast(`Uploaded ${finished.completed} media item${finished.completed === 1 ? '' : 's'}${finished.failed ? `; ${finished.failed} failed` : ''}.`);
-    } catch (error) {
-      showError(error);
-    } finally {
-      pane.uploading = false;
-      el('google-progress').classList.add('hidden');
-      updateSelectionUi();
-    }
+    state.drivePath = state.drive.current;
+    localStorage.setItem('kira-drive', state.drivePath);
+    renderDrive();
   }
 
-  ['left', 'right'].forEach((paneId) => {
-    el(`${paneId}-select-mode`).addEventListener('click', () => {
-      const pane = paneFor(paneId);
-      pane.selectMode = !pane.selectMode;
-      setActivePane(paneId);
+  function openDrive(path) {
+    el('drives-result').innerHTML = '';
+    state.driveLimit = DRIVE_PAGE;
+    state.drivePath = path;
+    if (!path) localStorage.removeItem('kira-drive');
+    return loadDrive(path);
+  }
+
+  // Every file below a big card runs to thousands; draw them a page at a time.
+  const DRIVE_PAGE = 600;
+
+  function renderDrive() {
+    const drive = state.drive;
+    const sum = drive.summary;
+    el('drive-path').value = drive.current;
+    const parents = [{name: '← Drives', path: ''}, ...drive.breadcrumbs.slice(0, -1)];
+    el('drive-crumbs').innerHTML = parents.map((crumb) => `<button type="button" data-drive-path="${escapeHtml(crumb.path)}">${escapeHtml(crumb.name)}</button>`).join('<span>›</span>');
+    el('drive-title').textContent = drive.breadcrumbs.at(-1)?.name || drive.current;
+    const unchecked = sum.files - sum.checked;
+    const whole = drive.drive.copies ? ` Whole drive: ${plural(drive.drive.copies, 'extra copy', 'extra copies')} of ${plural(drive.drive.groups, 'file')} (${bytes(drive.drive.copy_bytes)}).` : '';
+    const counts = sum.files ? `${plural(sum.files, 'file')} · ${sum.in_library} in the library · ${sum.not_in_library} not in the library · ${plural(sum.duplicates, 'duplicate')}${unchecked ? ` · ${unchecked} not checked yet` : ''} · ` : '';
+    el('drive-summary').textContent = drive.library === 'inside'
+      ? 'This folder is inside the library. Open it from the Library page instead.'
+      : `${counts}${drive.current}${whole}`;
+    el('drive-scan').classList.toggle('hidden', drive.library === 'inside');
+    el('drive-import').classList.toggle('hidden', drive.library !== 'other-drive');
+    el('drive-links').classList.toggle('hidden', drive.library !== 'other-drive' || !drive.drive.copies);
+    el('drive-trash-copies').classList.toggle('hidden', drive.library !== 'same-drive');
+    el('drive-folders').innerHTML = drive.recursive ? '' : drive.directories.map(folderCard).join('');
+    const groups = driveGroups(drive.files);
+    const shown = groups.filter((group) => {
+      if (state.driveFilter === 'missing') return group.missing.length > 0;
+      if (state.driveFilter === 'duplicates') return group.duplicates.length > 0 || group.copies > 0;
+      return true;
     });
-    el(`${paneId}-close-folder`).addEventListener('click', () => closePane(paneId));
-    el(`${paneId}-select-all`).addEventListener('click', () => {
-      setActivePane(paneId);
-      const pane = paneFor(paneId);
-      visiblePaneAssets(pane).forEach((asset) => pane.selectedAssets.add(asset.id));
-      syncSelectionTiles();
-      updateSelectionUi();
-    });
-    el(`${paneId}-clear-picked`).addEventListener('click', () => {
-      setActivePane(paneId);
-      paneFor(paneId).selectedAssets.clear();
-      state.tileAnchor[paneId] = null;
-      syncSelectionTiles();
-      updateSelectionUi();
-    });
-    el(`${paneId}-compare-picked`).addEventListener('click', () => {
-      setActivePane(paneId);
-      openCompare();
-    });
-    el(`${paneId}-auto-compare`).addEventListener('click', () => autoCompareGroups(paneId));
-    el(`${paneId}-google-upload`).addEventListener('click', () => uploadPaneSelection(paneId));
-    el(`${paneId}-move-menu`).querySelectorAll('[data-cull-action]').forEach((button) => {
-      button.addEventListener('click', () => moveSelectedAssets(button.dataset.cullAction, paneId));
-    });
-    el(`${paneId}-new-group`).addEventListener('click', () => {
-      const name = window.prompt('New comparison group name:');
-      if (name?.trim()) moveSelectedAssets('group', paneId, name.trim());
-    });
-    el(`${paneId}-tag-input`).addEventListener('input', () => {
-      el(`${paneId}-tag-form`).querySelector('button').disabled = !el(`${paneId}-tag-input`).value.trim();
-    });
-    el(`${paneId}-tag-form`).addEventListener('submit', (event) => {
+    state.driveShown = shown;
+    const limit = state.driveLimit || DRIVE_PAGE;
+    el('drive-toolbar').classList.toggle('hidden', !groups.length && !drive.directories.length);
+    el('drive-count').textContent = groups.length ? plural(shown.length, 'item') : '';
+    el('drive-empty').classList.toggle('hidden', shown.length > 0 || (!groups.length && !drive.recursive && drive.directories.length > 0));
+    el('drive-empty').textContent = state.driveFilter === 'all' ? 'No photos or videos here.' : drive.summary.checked < drive.summary.files ? 'Nothing found among the checked files. Click Check files to check the rest.' : 'Nothing found.';
+    el('drive-more-row').classList.toggle('hidden', shown.length <= limit);
+    el('drive-more').textContent = `Show more (${shown.length - limit} left)`;
+    el('drive-grid').innerHTML = shown.slice(0, limit).map((group, index) => {
+      const formats = [...new Set(group.files.map((file) => extension(file.name)))].join('+');
+      const image = group.cover
+        ? `<img loading="lazy" src="${sourcePreview(group.cover.path)}" alt="" onerror="${noCover(formats)}">`
+        : `<div class="no-cover">${escapeHtml(formats)}</div>`;
+      const shoots = [...new Set(group.inLibrary.map((file) => file.library.shoot_name))].join(', ');
+      const badges = [
+        group.missing.length ? '<span class="pill warn">Not in library</span>' : group.inLibrary.length ? `<span class="pill ok" title="In ${escapeHtml(shoots)}">In library</span>` : '',
+        group.duplicates.length ? '<span class="pill warn">Duplicate</span>' : '',
+        group.copies ? `<span class="pill" title="Kept; the same bytes appear ${plural(group.copies, 'more time')} on this drive">+${group.copies}</span>` : '',
+        group.unchecked ? '<span class="pill">Not checked</span>' : '',
+        group.video ? '<span class="pill">Video</span>' : '',
+      ].join('');
+      const why = group.duplicates.length ? `<div class="photo-why">Same bytes as ${escapeHtml(group.duplicates[0].duplicate_of)}</div>` : '';
+      return `<div class="photo-card">
+        <button type="button" class="photo-open" data-drive-group="${index}">${image}</button>
+        <div class="photo-caption"><span title="${escapeHtml(group.stem)}">${escapeHtml(group.stem)}</span><span class="muted">${escapeHtml(formats)}</span></div>
+        ${group.folder ? `<div class="photo-folder" title="${escapeHtml(group.folder)}">${escapeHtml(group.folder)}</div>` : ''}${why}<div class="photo-badges">${badges}</div>
+      </div>`;
+    }).join('');
+  }
+
+  function openSource(group, path) {
+    state.sourceGroup = group;
+    const file = group.files.find((item) => item.path === path) || group.cover || group.files[0];
+    el('source-title').textContent = group.stem;
+    el('source-meta').textContent = [group.folder, plural(group.files.length, 'file'), bytes(group.size)].filter(Boolean).join(' · ');
+    el('source-list').innerHTML = group.files.map((item) => {
+      const status = [
+        bytes(item.size),
+        item.library ? `in ${item.library.shoot_name}` : item.checked && isMedia(item) ? 'not in the library' : '',
+        item.duplicate_of ? `same bytes as ${item.duplicate_of}` : '',
+        item.checked ? '' : 'not checked',
+      ].filter(Boolean).join(' · ');
+      return `<li class="${item === file ? 'current' : ''}" data-source-file="${escapeHtml(item.path)}"><span class="version-name">${escapeHtml(item.name)}</span><span class="muted">${escapeHtml(status)}</span></li>`;
+    }).join('');
+    const still = isMedia(file) ? sourcePreview(file.path, 1600) : '';
+    setViewer(el('source-viewer'), still, file.kind === 'video' ? sourceFile(file.path) : '');
+    if (!el('source-dialog').open) el('source-dialog').showModal();
+  }
+
+  el('source-list').addEventListener('click', (event) => {
+    const item = event.target.closest('[data-source-file]');
+    if (item) openSource(state.sourceGroup, item.dataset.sourceFile);
+  });
+
+  el('view-drives').addEventListener('click', (event) => {
+    const folder = event.target.closest('[data-drive-path]');
+    if (folder) {
       event.preventDefault();
-      updateSelectedTags('add', paneId, el(`${paneId}-tag-input`).value.trim());
+      return openDrive(folder.dataset.drivePath);
+    }
+    const open = event.target.closest('[data-drive-group]');
+    if (open) openSource(state.driveShown[Number(open.dataset.driveGroup)]);
+  });
+  document.querySelectorAll('[data-drive-scope]').forEach((button) => {
+    button.classList.toggle('active', (button.dataset.driveScope === 'deep') === state.driveDeep);
+    button.addEventListener('click', () => {
+      state.driveDeep = button.dataset.driveScope === 'deep';
+      localStorage.setItem('kira-drive-deep', state.driveDeep ? '1' : '0');
+      document.querySelectorAll('[data-drive-scope]').forEach((item) => item.classList.toggle('active', item === button));
+      if (state.drivePath) openDrive(state.drivePath);
     });
-    el(`library-pane-${paneId}`).addEventListener('click', (event) => {
-      if (!event.target.closest('button')) setActivePane(paneId);
+  });
+  el('drive-more').addEventListener('click', () => {
+    state.driveLimit = (state.driveLimit || DRIVE_PAGE) + DRIVE_PAGE;
+    renderDrive();
+  });
+  el('drive-path').addEventListener('change', () => openDrive(el('drive-path').value.trim()));
+  document.querySelectorAll('[data-drive-filter]').forEach((button) => button.addEventListener('click', () => {
+    state.driveFilter = button.dataset.driveFilter;
+    state.driveLimit = DRIVE_PAGE;
+    document.querySelectorAll('[data-drive-filter]').forEach((item) => item.classList.toggle('active', item === button));
+    if (state.drive) renderDrive();
+  }));
+
+  el('drive-scan').addEventListener('click', () => guarded(el('drive-scan'), async () => {
+    const task = await post('/api/source/scan', {path: state.drivePath});
+    el('drives-result').innerHTML = '<p class="muted">Checking files… you can keep browsing.</p>';
+    watchTask(task, async (done) => {
+      if (done.state === 'done') {
+        const r = done.result;
+        el('drives-result').innerHTML = `<p class="notice ok">Checked ${plural(r.total, 'file')}: ${r.hashed} hashed now, the rest already known.</p>${r.failed.length ? `<p class="error-text">${r.failed.length} could not be read, e.g. ${escapeHtml(r.failed[0].name)}</p>` : ''}`;
+      } else {
+        el('drives-result').innerHTML = `<p class="error-text">${escapeHtml(done.error || done.state)}</p>`;
+      }
+      await loadDrive();
     });
-    el(`${paneId}-folder-up`).addEventListener('click', () => navigatePane(paneId, paneFor(paneId).parent || '').catch(showError));
-    el(`${paneId}-new-folder`).addEventListener('click', () => createFolderInPane(paneId).catch(showError));
+  }));
+
+  el('drive-links').addEventListener('click', () => guarded(el('drive-links'), async () => {
+    const r = await post('/api/source/links', {path: state.drivePath});
+    el('drives-result').innerHTML = `<p class="notice ok">Wrote ${plural(r.links, 'shortcut')} for ${plural(r.groups, 'duplicated file')} to <code>${escapeHtml(r.folder)}</code>. Nothing was moved; DUPLICATES.txt there lists which copy each one repeats.</p>`;
+    await loadDrive();
+  }));
+
+  el('drive-trash-copies').addEventListener('click', () => guarded(el('drive-trash-copies'), async () => {
+    if (!confirm('Move every checked file under this folder whose exact bytes are already in the library into the library trash? A WHY.txt in the trash records where each came from.')) return;
+    const r = await post('/api/source/trash-copies', {path: state.drivePath});
+    el('drives-result').innerHTML = `<p class="notice ok">Moved ${plural(r.moved, 'file')} to <code>${escapeHtml(r.trash_folder || 'the trash')}</code>.</p>${r.failed.length ? `<p class="error-text">${r.failed.length} could not be moved, e.g. ${escapeHtml(r.failed[0].name)}: ${escapeHtml(r.failed[0].error)}</p>` : ''}`;
+    await loadLibrary();
+    await loadDrive();
+  }));
+
+  el('drive-import').addEventListener('click', () => {
+    el('import-source').value = state.drivePath;
+    location.hash = 'import';
   });
 
-  document.addEventListener('click', (event) => {
-    document.querySelectorAll('.pane-more[open]').forEach((menu) => {
-      if (!menu.contains(event.target)) menu.open = false;
-    });
-  });
-  document.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape') return;
-    document.querySelectorAll('.pane-more[open]').forEach((menu) => {
-      menu.open = false;
-      menu.querySelector('summary').focus();
-    });
-  });
+  // -- Background tasks -----------------------------------------------------------------------
 
-  el('browse-folders-right').addEventListener('click', () => {
-    const pane = paneFor('right');
-    state.rightPaneOpen = true;
-    setActivePane('right');
-    // Render the navigator shell immediately so the pane is never a dead end,
-    // then fill in the real drive/folder listing.
-    renderPaneBrowser('right');
-    navigatePane('right', pane.directory || '').catch(showError);
-  });
-  el('move-selected-left').addEventListener('click', () => moveSelectedAssetsBetweenDirectories('left', 'right'));
-  el('move-selected-right').addEventListener('click', () => moveSelectedAssetsBetweenDirectories('right', 'left'));
-  el('tag-clear').addEventListener('click', () => {
-    state.tagFilter.clear();
-    renderTagFilterBar();
-    renderPhotoGrid();
-  });
-  el('date-from').addEventListener('input', (event) => {
-    state.dateFrom = event.target.value;
-    renderDateFilterBar();
-    renderPhotoGrid();
-  });
-  el('date-to').addEventListener('input', (event) => {
-    state.dateTo = event.target.value;
-    renderDateFilterBar();
-    renderPhotoGrid();
-  });
-  el('date-clear').addEventListener('click', () => {
-    state.dateFrom = '';
-    state.dateTo = '';
-    renderDateFilterBar();
-    renderPhotoGrid();
-  });
-  el('show-raw-toggle').addEventListener('change', (event) => {
-    state.showRawOnly = event.target.checked;
-    localStorage.setItem('kira-show-raw-only', String(state.showRawOnly));
-    // Deselect hidden assets so selection counts match the RAW display setting.
-    if (!state.showRawOnly) {
-      ['left', 'right'].forEach((paneId) => {
-        const pane = paneFor(paneId);
-        const visibleIds = new Set(displayableAssets(pane).map((a) => a.id));
-        for (const id of Array.from(pane.selectedAssets)) {
-          if (!visibleIds.has(id)) pane.selectedAssets.delete(id);
+  function watchTask(task, onDone) {
+    state.watched.set(task.id, {task, onDone});
+    renderTasks();
+    if (!watchTask.timer) watchTask.timer = setInterval(pollTasks, 1200);
+  }
+
+  async function pollTasks() {
+    if (!state.watched.size) { clearInterval(watchTask.timer); watchTask.timer = null; return; }
+    for (const [id, entry] of [...state.watched]) {
+      try {
+        const task = await api(`/api/tasks/${id}`);
+        entry.task = task;
+        if (task.state !== 'running') {
+          state.watched.delete(id);
+          if (task.state === 'failed') toast(`${task.title}: ${task.error}`, true);
+          await entry.onDone(task);
         }
-      });
-    }
-    renderPhotoGrid();
-    toast(state.showRawOnly ? 'Showing all files including RAW-only' : 'Hiding RAW-only photos');
-  });
-  el('close-lightbox').addEventListener('click', () => el('lightbox-modal').close());
-  el('lightbox-modal').addEventListener('click', (event) => {
-    if (event.target === el('lightbox-modal') || event.target.classList.contains('lightbox-stage')) el('lightbox-modal').close();
-  });
-  el('lightbox-modal').addEventListener('close', () => el('lightbox-image').removeAttribute('src'));
-  el('close-compare').addEventListener('click', () => {
-    el('compare-modal').classList.add('hidden');
-    syncSelectionTiles();
-  });
-  el('compare-zoom').addEventListener('input', (event) => {
-    state.compareZoom = Number(event.target.value) / 100;
-    if (state.compareZoom === 1) state.comparePan = {x: 0, y: 0};
-    el('compare-zoom-value').textContent = `${event.target.value}%`;
-    applyCompareTransform();
-  });
-  el('compare-grid').addEventListener('wheel', (event) => {
-    event.preventDefault();
-    const step = event.deltaY < 0 ? 10 : -10;
-    const percent = Math.min(300, Math.max(100, Math.round(state.compareZoom * 100) + step));
-    state.compareZoom = percent / 100;
-    if (state.compareZoom === 1) state.comparePan = {x: 0, y: 0};
-    el('compare-zoom').value = String(percent);
-    el('compare-zoom-value').textContent = `${percent}%`;
-    applyCompareTransform();
-  }, {passive: false});
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !el('compare-modal').classList.contains('hidden')) {
-      el('compare-modal').classList.add('hidden');
-      syncSelectionTiles();
-    }
-  });
-
-  el('selection-job-form').addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const button = event.submitter;
-    button.disabled = true;
-    const originalLabel = button.textContent;
-    button.textContent = 'Creating job…';
-    try {
-      const job = await api('/api/jobs/from-selection', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: el('job-name').value,
-          source_directory: paneFor().directory,
-          selected_ids: Array.from(paneFor().selectedAssets),
-          source_format: el('edit-source-format').value,
-        }),
-      });
-      el('selection-job-form').reset();
-      toast('Edit job ready on the iPad. Source photos were not copied.');
-      await loadDashboard();
-      await openJob(job.id);
-    } catch (error) {
-      toast(error.message);
-    } finally {
-      button.textContent = originalLabel;
-      button.disabled = paneFor().selectedAssets.size === 0;
-    }
-  });
-
-  el('return-files').addEventListener('change', () => {
-    const count = el('return-files').files.length;
-    el('upload-returns').disabled = !count;
-    const strong = document.querySelector('.return-picker-content strong');
-    strong.textContent = count ? `${count} ${count === 1 ? 'file' : 'files'} selected` : 'Choose edited photos or ZIP';
-  });
-
-  el('upload-returns').addEventListener('click', async () => {
-    const files = Array.from(el('return-files').files);
-    if (!state.currentJob || !files.length) return;
-    const button = el('upload-returns');
-    button.disabled = true;
-    try {
-      await uploadFiles(state.currentJob.id, files, 'returns', progressSet('return'));
-      el('return-files').value = '';
-      document.querySelector('.return-picker-content strong').textContent = 'Choose edited photos or ZIP';
-      toast('Returned edits are verified on the desktop.');
-      await openJob(state.currentJob.id);
-    } catch (error) {
-      toast(error.message);
-      button.disabled = false;
-    }
-  });
-
-  el('back-to-jobs').addEventListener('click', loadDashboard);
-  el('refresh-jobs').addEventListener('click', loadDashboard);
-  el('organize-source').addEventListener('click', async () => {
-    if (!state.currentJob) return;
-    const confirmed = window.confirm(
-      `Organize the original folder for “${state.currentJob.name}”?\n\n` +
-      'Kira will move the existing RAW and JPEG files into subfolders and copy returned Lightroom edits into selected_jpeg/edited.'
-    );
-    if (!confirmed) return;
-    const button = el('organize-source');
-    button.disabled = true;
-    button.textContent = 'Organizing…';
-    try {
-      const result = await api(`/api/jobs/${state.currentJob.id}/organize`, {method: 'POST', body: '{}'});
-      toast(result.errors?.length ? 'Some files need attention. Review the details and retry.' : `Organized ${result.source_directory}`);
-      await openJob(state.currentJob.id);
-    } catch (error) {
-      button.disabled = false;
-      button.textContent = 'Finish & organize source folder';
-      toast(error.message);
-    }
-  });
-  el('delete-job').addEventListener('click', async () => {
-    if (!state.currentJob) return;
-    const message = `Remove the transfer job “${state.currentJob.name}”?\n\nCompleted files and their local checkpoints will be kept. Unfinished uploads must be recovered first.`;
-    if (!window.confirm(message)) return;
-    const button = el('delete-job');
-    button.disabled = true;
-    try {
-      await api(`/api/jobs/${state.currentJob.id}`, {method: 'DELETE'});
-      state.currentJob = null;
-      toast('Transfer job removed. Checkpoints remain in Saved files.');
-      await loadDashboard();
-    } catch (error) {
-      button.disabled = false;
-      toast(error.message);
-    }
-  });
-
-  el('open-history').addEventListener('click', async () => {
-    const list = el('history-list');
-    list.textContent = 'Loading saved files…';
-    el('history-modal').showModal();
-    async function loadSavedFiles(offset = 0) {
-      const response = await api(`/api/local/history?offset=${offset}`);
-      if (!offset) list.replaceChildren();
-      if (!offset && !response.revisions.length) list.textContent = 'Files appear here after they are sent, received, or organized.';
-      for (const saved of response.revisions) {
-        const row = document.createElement('div');
-        row.className = 'saved-file-row';
-        const details = document.createElement('div');
-        const title = document.createElement('strong');
-        title.textContent = saved.record.original_filename || saved.record.filename;
-        const subtitle = document.createElement('small');
-        subtitle.textContent = `${formatBytes(saved.record.size)} · ${new Date(saved.created_at).toLocaleString()} · Local checkpoint`;
-        details.append(title, subtitle);
-        const restore = document.createElement('button');
-        restore.className = 'quiet-button';
-        restore.textContent = 'Restore a copy';
-        restore.addEventListener('click', async () => {
-          const directory = window.prompt('Restore into this folder:', state.libraryPanes[state.activePaneId].directory || '');
-          if (!directory) return;
-          restore.disabled = true;
-          try {
-            const result = await api('/api/local/restore', {method:'POST',body:JSON.stringify({revision_id:saved.id,directory})});
-            toast(`Restored ${result.path}`);
-          } catch (error) { toast(error.message); }
-          finally { restore.disabled = false; }
-        });
-        row.append(details, restore);
-        list.append(row);
-      }
-      if (response.next_offset != null) {
-        const more = document.createElement('button');
-        more.className = 'quiet-button';
-        more.textContent = 'Load older files';
-        more.addEventListener('click', async () => {
-          more.disabled = true;
-          try { await loadSavedFiles(response.next_offset); more.remove(); }
-          catch (error) { toast(error.message); more.disabled = false; }
-        });
-        list.append(more);
+      } catch {
+        state.watched.delete(id);
       }
     }
-    try { await loadSavedFiles(); }
-    catch (error) { list.textContent = error.message; }
-  });
-  el('close-history').addEventListener('click', () => el('history-modal').close());
-
-  let toastTimer;
-  function toast(message) {
-    const node = el('toast');
-    node.textContent = message;
-    node.classList.remove('hidden');
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => node.classList.add('hidden'), 4200);
+    renderTasks();
   }
 
-  function showError(error) {
-    toast(error.message || String(error));
+  function renderTasks() {
+    el('tasks').innerHTML = [...state.watched.values()].map(({task}) => {
+      const percent = task.total ? Math.round((task.done / task.total) * 100) : 0;
+      return `<div class="task"><div class="row spread"><b>${escapeHtml(task.title)}</b><span class="muted">${task.total ? `${task.done}/${task.total}` : ''}</span></div>
+        <div class="bar"><span style="width:${percent}%"></span></div><span class="muted task-current">${escapeHtml(task.current || '')}</span></div>`;
+    }).join('');
   }
 
-  function formatBytes(bytes) {
-    if (!bytes) return '0 B';
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-    return `${(bytes / (1024 ** index)).toFixed(index ? 1 : 0)} ${units[index]}`;
-  }
-
-  function formatDate(value) {
-    const date = new Date(value);
-    return Number.isNaN(date.valueOf()) ? '' : date.toLocaleDateString(undefined, {month: 'short', day: 'numeric'});
-  }
-
-  function escapeHtml(value) {
-    return String(value).replace(/[&<>'"]/g, (character) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[character]));
-  }
-
-  initialize();
+  start();
 })();

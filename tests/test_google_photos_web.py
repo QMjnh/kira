@@ -4,6 +4,7 @@ import json
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -185,10 +186,11 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
 
     def test_browser_sign_in_verifies_and_encrypts_the_session(self) -> None:
         browser = SimpleNamespace(
+            wait_until_closed=lambda _deadline: True,
             session=lambda: (
                 [{"domain": ".google.com", "name": "SID", "value": "automatic-session", "session": True}],
                 2,
-            )
+            ),
         )
         with (
             patch("kira.google_photos_web.find_browser", return_value="chrome.exe"),
@@ -206,10 +208,11 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
     def test_disconnect_during_verification_cannot_restore_the_connection(self) -> None:
         verifying, release = threading.Event(), threading.Event()
         browser = SimpleNamespace(
+            wait_until_closed=lambda _deadline: True,
             session=lambda: (
                 [{"domain": ".google.com", "name": "SID", "value": "cancelled-session", "session": True}],
                 0,
-            )
+            ),
         )
         verify = self.service._verified_session
 
@@ -524,6 +527,67 @@ class GooglePhotosWebServiceTests(unittest.TestCase):
         self.assertFalse(self.service.status()["connected"])
         with self.assertRaisesRegex(GooglePhotosWebError, "cookie export"):
             self.service.check()
+
+
+class NameAndTimeMatchTests(unittest.TestCase):
+    def test_matches_by_filename_near_capture_time_and_skips_ambiguous_or_missing(self) -> None:
+        base = 1_783_159_260_000
+        library = [
+            ("k-exact", "IMG_0101.JPG", base + 300),
+            ("k-dupe-far", "IMG_0101.JPG", base + 3 * 60 * 60 * 1000),
+            ("k-other", "IMG_0200.JPG", base),
+            ("k-twin-a", "IMG_0300.JPG", base + 5 * 60 * 1000),
+            ("k-twin-b", "IMG_0300.JPG", base + 6 * 60 * 1000),
+            ("k-shifted", "IMG_0400.HEIC", base - 7 * 60 * 60 * 1000),
+        ]
+        pages = [library[:3], library[3:]]
+
+        class Client:
+            def send_api_request(self, payload):
+                if payload.kind == "page":
+                    index = 0 if payload.page_id is None else 1
+                    items = [
+                        SimpleNamespace(media_key=key, dedup_key=f"d-{key}", timestamp=ms)
+                        for key, _, ms in pages[index]
+                    ]
+                    return SimpleNamespace(
+                        data=SimpleNamespace(
+                            items=items,
+                            next_page_id="p2" if index == 0 else None,
+                            last_item_timestamp=items[-1].timestamp,
+                        )
+                    )
+                names = {key: name for key, name, _ in library}
+                return SimpleNamespace(
+                    data=[SimpleNamespace(media_key=key, file_name=names[key]) for key in payload.media_keys]
+                )
+
+        payloads = SimpleNamespace(
+            GetLibraryPageByTakenDate=lambda **values: SimpleNamespace(kind="page", **values),
+            GetBatchMediaInfo=lambda keys: SimpleNamespace(kind="info", media_keys=keys),
+        )
+
+        @contextmanager
+        def client():
+            yield Client(), payloads
+
+        service = GooglePhotosWebService(Path(tempfile.gettempdir()))
+        with patch.object(service, "_client", client):
+            found = service.find_by_name_and_time(
+                [
+                    {"name": "img_0101.jpg", "time_ms": base},
+                    {"name": "IMG_0300.JPG", "time_ms": base},
+                    {"name": "IMG_0400.HEIC", "time_ms": base},
+                    {"name": "IMG_0999.JPG", "time_ms": base},
+                ]
+            )
+        self.assertEqual(
+            found,
+            {
+                0: {"media_key": "k-exact", "dedup_key": "d-k-exact"},
+                2: {"media_key": "k-shifted", "dedup_key": "d-k-shifted"},
+            },
+        )
 
 
 if __name__ == "__main__":

@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 from threading import Event
-from urllib.parse import urlparse
 
 import websocket
 
@@ -36,12 +34,16 @@ def find_browser() -> str | None:
 
 
 class GoogleSignInBrowser:
-    """Own a temporary browser profile; never attach to a personal browser."""
+    """Own a temporary browser profile; never attach to a personal browser.
 
-    def __init__(self, root: Path, cancelled: Event, *, headless: bool = False) -> None:
+    Google refuses sign-in from a browser started with remote debugging, so the visible window is a plain
+    browser. Once the user closes it, the same profile is reopened headless on loopback just to read cookies.
+    """
+
+    def __init__(self, root: Path, cancelled: Event) -> None:
         self.root = root
         self.cancelled = cancelled
-        self.headless = headless
+        self.executable = None
         self.process = None
         self.socket = None
         self.profile = None
@@ -50,49 +52,71 @@ class GoogleSignInBrowser:
     def __enter__(self) -> GoogleSignInBrowser:
         if self.cancelled.is_set():
             raise GoogleSignInError("Sign-in cancelled.")
-        executable = find_browser()
-        if not executable:
+        self.executable = find_browser()
+        if not self.executable:
             raise GoogleSignInError("Install Google Chrome or Microsoft Edge to sign in to Google Photos.")
         self.profile = tempfile.TemporaryDirectory(prefix=".kira-google-signin-", dir=self.root)
-        arguments = [
-            executable,
-            f"--user-data-dir={self.profile.name}",
-            "--remote-debugging-port=0",
-            "--remote-debugging-address=127.0.0.1",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-background-mode",
-            "--new-window",
-        ]
-        if self.headless:
-            arguments.extend(("--headless=new", "--disable-gpu"))
-        arguments.append("https://photos.google.com/")
         try:
-            self.process = subprocess.Popen(arguments, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            active_port = Path(self.profile.name) / "DevToolsActivePort"
-            deadline = time.monotonic() + 20
-            while not self.cancelled.is_set() and time.monotonic() < deadline:
-                try:
-                    lines = active_port.read_text(encoding="utf-8").splitlines()
-                    port = int(lines[0])
-                    endpoint = lines[1]
-                    if not 0 < port < 65536 or not endpoint.startswith("/devtools/browser/"):
-                        raise ValueError
-                    self.socket = websocket.create_connection(
-                        f"ws://127.0.0.1:{port}{endpoint}",
-                        timeout=5,
-                        suppress_origin=True,
-                        http_no_proxy=["127.0.0.1", "localhost"],
-                    )
-                    return self
-                except (OSError, ValueError, IndexError, websocket.WebSocketException):
-                    if self.process.poll() is not None:
-                        break
-                    self.cancelled.wait(0.2)
-            raise GoogleSignInError("Could not open the Google sign-in window. Try again.")
+            self.process = subprocess.Popen(
+                [*self._base_arguments(), "--new-window", "https://photos.google.com/"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         except BaseException:
             self.close()
             raise
+        return self
+
+    def _base_arguments(self) -> list[str]:
+        return [
+            self.executable,
+            f"--user-data-dir={self.profile.name}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-mode",
+        ]
+
+    def wait_until_closed(self, deadline: float) -> bool:
+        """Wait for the user to close the sign-in window; False on timeout or cancel."""
+        while not self.cancelled.is_set() and time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                self.process = None
+                return True
+            self.cancelled.wait(0.5)
+        return False
+
+    def _open_reader(self) -> None:
+        (Path(self.profile.name) / "DevToolsActivePort").unlink(missing_ok=True)
+        arguments = [
+            *self._base_arguments(),
+            "--headless=new",
+            "--disable-gpu",
+            "--remote-debugging-port=0",
+            "--remote-debugging-address=127.0.0.1",
+            "about:blank",
+        ]
+        self.process = subprocess.Popen(arguments, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        active_port = Path(self.profile.name) / "DevToolsActivePort"
+        deadline = time.monotonic() + 20
+        while not self.cancelled.is_set() and time.monotonic() < deadline:
+            try:
+                lines = active_port.read_text(encoding="utf-8").splitlines()
+                port = int(lines[0])
+                endpoint = lines[1]
+                if not 0 < port < 65536 or not endpoint.startswith("/devtools/browser/"):
+                    raise ValueError
+                self.socket = websocket.create_connection(
+                    f"ws://127.0.0.1:{port}{endpoint}",
+                    timeout=5,
+                    suppress_origin=True,
+                    http_no_proxy=["127.0.0.1", "localhost"],
+                )
+                return
+            except (OSError, ValueError, IndexError, websocket.WebSocketException):
+                if self.process.poll() is not None:
+                    break
+                self.cancelled.wait(0.2)
+        raise GoogleSignInError("Could not read the Google sign-in. Try again.")
 
     def command(self, method: str, params: dict | None = None) -> dict:
         self.request_id += 1
@@ -110,24 +134,27 @@ class GoogleSignInBrowser:
         raise GoogleSignInError("The Google sign-in window stopped responding. Try again.")
 
     def session(self) -> tuple[list[dict], int] | None:
-        targets = self.command("Target.getTargets").get("targetInfos", [])
-        for target in targets:
-            url = urlparse(target.get("url", ""))
-            if target.get("type") != "page" or url.scheme != "https" or url.hostname != "photos.google.com":
-                continue
-            match = re.match(r"/u/(\d+)(?:/|$)", url.path)
-            account_index = int(match[1]) if match else 0
+        """Read the signed-in Google cookies from the closed sign-in profile."""
+        self._open_reader()
+        try:
             cookies = self.command("Storage.getCookies").get("cookies", [])
-            google_cookies = []
-            for cookie in cookies:
-                domain = str(cookie.get("domain", "")).lstrip(".").casefold()
-                if domain == "google.com" or domain.endswith(".google.com"):
-                    google_cookies.append({**cookie, "expirationDate": cookie.get("expires")})
-            if any(cookie.get("name") in {"SID", "__Secure-1PSID", "__Secure-3PSID"} for cookie in google_cookies):
-                return google_cookies, account_index
+        finally:
+            self._close_reader()
+        return self.google_session(cookies)
+
+    @staticmethod
+    def google_session(cookies: list[dict]) -> tuple[list[dict], int] | None:
+        google_cookies = []
+        for cookie in cookies:
+            domain = str(cookie.get("domain", "")).lstrip(".").casefold()
+            if domain == "google.com" or domain.endswith(".google.com"):
+                google_cookies.append({**cookie, "expirationDate": cookie.get("expires")})
+        if any(cookie.get("name") in {"SID", "__Secure-1PSID", "__Secure-3PSID"} for cookie in google_cookies):
+            # A fresh profile has exactly the accounts signed in here, and the first is /u/0.
+            return google_cookies, 0
         return None
 
-    def close(self) -> None:
+    def _close_reader(self) -> None:
         if self.socket:
             try:
                 self.command("Browser.close")
@@ -136,12 +163,16 @@ class GoogleSignInBrowser:
             finally:
                 self.socket.close()
                 self.socket = None
+
+    def close(self) -> None:
+        self._close_reader()
         if self.process:
             try:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.process.terminate()
                 self.process.wait(timeout=5)
+            self.process = None
         if self.profile:
             self.profile.cleanup()
             self.profile = None

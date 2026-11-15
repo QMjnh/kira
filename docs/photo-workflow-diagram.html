@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Kira photo workflow</title>
+<style>
+  .wrap {
+    --fg: var(--foreground, #1f2328);
+    --dim: var(--muted-foreground, #656d76);
+    --line: var(--border, #d0d7de);
+    --box: var(--card, #ffffff);
+    --kira: var(--chart-1, #2f6fdb);
+    --drive: var(--chart-2, #2a9d62);
+    --gphotos: var(--chart-3, #d9891c);
+    --click: var(--warning, #c2410c);
+    --mono: var(--font-mono, ui-monospace, Consolas, monospace);
+    font-family: var(--font-sans, system-ui, sans-serif);
+    color: var(--fg);
+    max-width: 728px;
+  }
+  svg { display: block; width: 100%; height: auto; }
+  .step { font-size: 11px; letter-spacing: .06em; fill: var(--dim); }
+  .t { font-size: 14px; font-weight: 600; fill: var(--fg); text-anchor: middle; }
+  .s { font-size: 12px; fill: var(--dim); text-anchor: middle; }
+  .m { font-size: 12px; font-family: var(--mono); fill: var(--fg); text-anchor: middle; }
+  .note { font-size: 11.5px; fill: var(--dim); }
+  .b { fill: var(--box); stroke: var(--line); stroke-width: 1.2; }
+  .k { fill: var(--kira); fill-opacity: .12; stroke: var(--kira); stroke-width: 1.2; }
+  .g { fill: var(--gphotos); fill-opacity: .14; stroke: var(--gphotos); stroke-width: 1.2; }
+  .d { fill: var(--drive); fill-opacity: .14; stroke: var(--drive); stroke-width: 1.2; }
+  .c { fill: var(--click); fill-opacity: .10; stroke: var(--click); stroke-width: 1.2; stroke-dasharray: 5 4; }
+  .a { stroke: var(--dim); stroke-width: 1.4; fill: none; marker-end: url(#ah); }
+  .ad { stroke-dasharray: 4 4; }
+  #ah path { fill: var(--dim); }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12px; color: var(--dim); margin: 10px 0 22px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
+  h3 { font-size: 14px; margin: 0 0 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; }
+  .foot { font-size: 12px; color: var(--dim); margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<svg viewBox="0 0 728 1040" role="img" aria-label="Flow of photos from capture to backup">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z"/>
+    </marker>
+  </defs>
+
+  <text class="step" x="0" y="14">1 · TAKEN ON</text>
+  <rect class="b" x="0" y="24" width="224" height="62" rx="8"/>
+  <text class="t" x="112" y="50">Phone</text>
+  <text class="s" x="112" y="69">auto-backup, Original quality</text>
+  <rect class="b" x="252" y="24" width="224" height="62" rx="8"/>
+  <text class="t" x="364" y="50">Camera</text>
+  <text class="s" x="364" y="69">SD card, RAW + JPEG</text>
+  <rect class="b" x="504" y="24" width="224" height="62" rx="8"/>
+  <text class="t" x="616" y="50">Other phone or camera</text>
+  <text class="s" x="616" y="69">no auto-sync</text>
+
+  <path class="a" d="M112 86 V134"/>
+  <path class="a" d="M364 86 V134"/>
+  <path class="a" d="M616 86 V134"/>
+
+  <text class="step" x="0" y="126">2 · ARRIVES</text>
+  <rect class="g" x="0" y="136" width="224" height="62" rx="8"/>
+  <text class="t" x="112" y="162">Google Photos</text>
+  <text class="s" x="112" y="181">arrives by itself</text>
+  <rect class="k" x="252" y="136" width="476" height="62" rx="8"/>
+  <text class="t" x="490" y="162">Import into Kira</text>
+  <text class="s" x="490" y="181">card reader, cable or upload page · copies only new files</text>
+
+  <path class="a" d="M112 198 V250"/>
+  <text class="note" x="122" y="222">only the photos you add to a shoot</text>
+  <path class="a" d="M490 198 V250"/>
+
+  <text class="step" x="0" y="244">3 · IDENTIFY</text>
+  <rect class="k" x="0" y="252" width="728" height="84" rx="8"/>
+  <text class="t" x="364" y="276">Kira identifies every file</text>
+  <text class="s" x="112" y="300">Exact same file</text>
+  <text class="s" x="112" y="317">→ stored once</text>
+  <text class="s" x="364" y="300">Same camera + capture time</text>
+  <text class="s" x="364" y="317">→ same photo</text>
+  <text class="s" x="616" y="300">Not sure</text>
+  <text class="s" x="616" y="317">→ asks you, keeps the file</text>
+
+  <path class="a" d="M364 336 V384"/>
+
+  <text class="step" x="0" y="376">4 · STORED</text>
+  <rect class="k" x="0" y="386" width="728" height="96" rx="8"/>
+  <text class="t" x="364" y="411">Shoot folder on G:</text>
+  <text class="m" x="364" y="436">DSC01234.ARW    DSC01234.JPG    IMG_5521.HEIC</text>
+  <text class="s" x="364" y="461">Originals are read-only. Rejects move to _rejects, nothing is deleted.</text>
+
+  <path class="a" d="M112 482 V534"/>
+  <path class="a" d="M364 482 V534"/>
+  <path class="a" d="M616 482 V534"/>
+
+  <text class="step" x="0" y="526">5 · EDITED ON</text>
+  <rect class="b" x="0" y="536" width="224" height="62" rx="8"/>
+  <text class="t" x="112" y="562">iPad (Lightroom)</text>
+  <text class="s" x="112" y="581">Kira sends your picks over Wi-Fi</text>
+  <rect class="b" x="252" y="536" width="224" height="62" rx="8"/>
+  <text class="t" x="364" y="562">Phone app</text>
+  <text class="s" x="364" y="581">already there, or sent by Kira</text>
+  <rect class="b" x="504" y="536" width="224" height="62" rx="8"/>
+  <text class="t" x="616" y="562">Desktop editor</text>
+  <text class="s" x="616" y="581">opens straight from the folder</text>
+
+  <path class="a" d="M112 598 V646"/>
+  <path class="a" d="M364 598 V646"/>
+  <path class="a" d="M616 598 V646"/>
+
+  <text class="step" x="0" y="638">6 · COMES BACK</text>
+  <rect class="k" x="0" y="648" width="224" height="62" rx="8"/>
+  <text class="t" x="112" y="674">Share to Kira</text>
+  <text class="s" x="112" y="693">one tap, straight over Wi-Fi</text>
+  <rect class="g" x="252" y="648" width="224" height="62" rx="8"/>
+  <text class="t" x="364" y="674">Saved on the phone</text>
+  <text class="s" x="364" y="693">returns via Google Photos sync</text>
+  <rect class="k" x="504" y="648" width="224" height="62" rx="8"/>
+  <text class="t" x="616" y="674">Save into the shoot folder</text>
+  <text class="s" x="616" y="693">Kira notices the new file</text>
+
+  <path class="a" d="M112 710 V762"/>
+  <path class="a" d="M364 710 V762"/>
+  <path class="a" d="M616 710 V762"/>
+
+  <text class="step" x="0" y="754">7 · VERSIONS</text>
+  <rect class="k" x="0" y="764" width="728" height="112" rx="8"/>
+  <text class="t" x="364" y="789">Kira files each edit next to its original</text>
+  <text class="m" x="364" y="815">DSC01234.ARW  DSC01234_edit1.jpg  DSC01234_edit2.jpg  DSC01234_edit2.psd</text>
+  <text class="s" x="364" y="840">You mark one Final.</text>
+  <text class="s" x="364" y="857">A re-edit on any device becomes the next number.</text>
+
+  <path class="a" d="M112 876 V928"/>
+  <path class="a" d="M364 876 V928"/>
+
+  <text class="step" x="0" y="920">8 · BACKED UP</text>
+  <rect class="d" x="0" y="930" width="224" height="100" rx="8"/>
+  <text class="t" x="112" y="954">Google Drive</text>
+  <text class="s" x="112" y="975">camera originals</text>
+  <text class="s" x="112" y="992">every edit of a camera photo</text>
+  <text class="s" x="112" y="1009">PSD, XMP, desktop edits</text>
+  <rect class="g" x="252" y="930" width="224" height="100" rx="8"/>
+  <text class="t" x="364" y="954">Google Photos</text>
+  <text class="s" x="364" y="975">phone photos</text>
+  <text class="s" x="364" y="992">edits made on the phone</text>
+  <text class="s" x="364" y="1009">Finals of camera photos</text>
+  <rect class="c" x="504" y="930" width="224" height="100" rx="8"/>
+  <text class="t" x="616" y="954">Clean up</text>
+  <text class="s" x="616" y="975">waits for your click</text>
+  <text class="s" x="616" y="992">hides non-Finals in Google Photos</text>
+  <text class="s" x="616" y="1009">deletes nothing</text>
+  <path class="a ad" d="M504 980 H478"/>
+</svg>
+
+<div class="legend">
+  <span><i style="background:var(--kira)"></i>Kira, on your PC and G:</span>
+  <span><i style="background:var(--gphotos)"></i>Google Photos</span>
+  <span><i style="background:var(--drive)"></i>Google Drive</span>
+  <span><i style="background:var(--click)"></i>Only when you click</span>
+</div>
+
+<h3>Every combination of where it was taken and where it was edited</h3>
+<table>
+  <tr><th>Taken on</th><th>Edited on</th><th>How the edit comes back</th><th>Where the cloud copies are</th></tr>
+  <tr><td>Phone</td><td>Not edited</td><td>Nothing to return</td><td>Google Photos</td></tr>
+  <tr><td>Phone</td><td>Phone app</td><td>Syncs by itself</td><td>Google Photos, original and edit</td></tr>
+  <tr><td>Phone</td><td>iPad</td><td>Shared to Kira over Wi-Fi</td><td>Original in Google Photos, edit in Drive. A Final is also added to Google Photos.</td></tr>
+  <tr><td>Phone</td><td>Desktop</td><td>Saved into the folder</td><td>Original in Google Photos, edit in Drive. A Final is also added to Google Photos.</td></tr>
+  <tr><td>Camera</td><td>Not edited</td><td>Nothing to return</td><td>Drive. If you mark it Final, a JPEG goes to Google Photos.</td></tr>
+  <tr><td>Camera</td><td>iPad</td><td>Shared to Kira over Wi-Fi</td><td>Drive. A Final is also added to Google Photos.</td></tr>
+  <tr><td>Camera</td><td>Phone app</td><td>Saved on the phone, then Google Photos</td><td>Drive. After clean up, only the Final stays visible in Google Photos.</td></tr>
+  <tr><td>Camera</td><td>Desktop</td><td>Saved into the folder</td><td>Drive. A Final is also added to Google Photos.</td></tr>
+  <tr><td>Any</td><td>Edited again, any device</td><td>Same routes as above</td><td>Same as the first edit, filed as the next number</td></tr>
+</table>
+<p class="foot">A phone or camera without auto-sync follows the Camera rows. Every file is also on G:.</p>
+</div>
+</body>
+</html>

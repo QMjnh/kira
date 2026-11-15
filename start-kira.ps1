@@ -6,6 +6,6 @@ param(
 $ErrorActionPreference = "Stop"
 
 Write-Host "Starting Kira..." -ForegroundColor Green
-Write-Host "Files and returned edits will be stored in: $DataDir"
+Write-Host "Kira working data: $DataDir (the photo library folder is chosen in the app)"
 python (Join-Path $PSScriptRoot "server.py") --port $Port --data-dir $DataDir
 

@@ -13,22 +13,30 @@
   <div id="app" class="app-shell">
     <header class="topbar">
       <div class="topbar-inner">
-        <a class="brand" href="/" aria-label="Kira home">
+        <a class="brand" href="#library" aria-label="Kira library">
           <img class="brand-mark" src="/media/kira_light.png" alt="Kira" width="72" height="36">
         </a>
-        <button id="open-history" class="quiet-button hidden" type="button">Saved files</button>
+        <nav id="nav" class="nav hidden" aria-label="Sections">
+          <a href="#library" data-view="library">Library</a>
+          <a href="#import" data-view="import" class="desktop-only">Import</a>
+          <a href="#drives" data-view="drives" class="desktop-only">Drives</a>
+          <a href="#review" data-view="review">Review <span id="review-badge" class="badge hidden"></span></a>
+          <a href="#ipad" data-view="ipad">iPad <span id="ipad-badge" class="badge hidden"></span></a>
+          <a href="#cloud" data-view="cloud" class="desktop-only">Cloud <span id="cloud-badge" class="badge warn hidden"></span></a>
+        </nav>
         <div id="connection-state" class="connection-state"><span></span>Connecting…</div>
       </div>
     </header>
 
     <main>
-      <section id="pair-view" class="pair-view hidden" aria-labelledby="pair-title">
-        <div class="pair-card">
+      <!-- Pairing (iPad) -->
+      <section id="view-pair" class="view pair-view hidden" aria-labelledby="pair-title">
+        <div class="card pair-card">
           <img class="pair-brand" src="/media/kira_light.png" alt="Kira" width="128" height="64">
-          <div class="eyebrow">Connect this iPad</div>
+          <div class="eyebrow">Connect this device</div>
           <h1 id="pair-title">Pair with your desktop</h1>
-          <p>Enter the six-digit code shown in Kira on your desktop.</p>
-          <form id="pair-form">
+          <p>Enter the six-digit code shown on the iPad page of Kira on your desktop.</p>
+          <form id="pair-form" class="stack">
             <label for="pair-code">Pairing code</label>
             <input id="pair-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required>
             <button class="primary-button" type="submit">Connect</button>
@@ -37,382 +45,300 @@
         </div>
       </section>
 
-      <section id="dashboard-view" class="dashboard hidden">
-        <section id="desktop-services" class="desktop-services hidden" aria-labelledby="services-title">
-          <div id="google-health-notice" class="health-notice hidden" role="status"></div>
-          <header class="dashboard-section-heading">
-            <div>
-              <div class="eyebrow">Import &amp; connect</div>
-              <h2 id="services-title">Bring photos in. Send edits out.</h2>
+      <!-- First run: choose the library folder -->
+      <section id="view-setup" class="view hidden" aria-labelledby="setup-title">
+        <div class="card narrow">
+          <div class="eyebrow">First step</div>
+          <h1 id="setup-title">Where should your photo library live?</h1>
+          <p>Kira keeps every original and every edit here, one folder per shoot. Pick a drive with room to grow, for example <code>G:\Kira Library</code>. It's an ordinary folder you can open without Kira.</p>
+          <form id="setup-form" class="stack">
+            <label for="setup-path">Library folder</label>
+            <div class="row">
+              <input id="setup-path" type="text" placeholder="G:\Kira Library" required>
+              <button class="quiet-button" type="button" data-browse="setup-path">Browse…</button>
             </div>
-            <p>Optional connections stay out of the way until you need them.</p>
-          </header>
-        <section id="desktop-setup" class="setup-card hidden">
-          <div class="setup-intro">
-            <div class="eyebrow">Send without cloud storage</div>
-            <h2>Send directly to your iPad</h2>
-            <p>Scan once with the iPad Camera. Kira opens already paired—no password to type.</p>
-          </div>
-          <div class="setup-transfer-row">
-            <div class="qr-column">
-              <div class="qr-wrap">
-                <img id="pair-qr" alt="QR code that opens and pairs Kira on the iPad">
-              </div>
-              <span class="qr-caption">Scan with iPad Camera</span>
-            </div>
-            <dl class="connection-details">
-              <div><dt>Manual address</dt><dd id="ipad-url">—</dd></div>
-              <div><dt>Fallback pairing code</dt><dd id="pair-code-display">—</dd></div>
-              <div><dt>Hard-drive folder</dt><dd id="data-dir">—</dd></div>
-            </dl>
-          </div>
-        </section>
-
-        <section id="google-photos-card" class="panel google-photos-card hidden">
-          <div class="panel-heading">
-            <div><div class="eyebrow">Build one collection</div><h2>Google Photos</h2></div>
-            <span id="google-status" class="google-status">Checking…</span>
-          </div>
-          <p id="google-copy" class="panel-copy">Choose Google photos and videos, then save them into the folder below.</p>
-          <div class="google-destination">
-            <label for="google-destination-folder"><span>Import destination</span><input id="google-destination-folder" type="text" value="" placeholder="C:\Users\you\Pictures\google-photos-inbox" autocomplete="off"></label>
-            <div class="google-destination-preview"><span>Google media will be saved to</span><strong id="google-destination">—</strong></div>
-            <button id="google-download-settings-toggle" class="disclosure-button" type="button" aria-expanded="false" aria-controls="google-import-settings">
-              <span>Download settings</span>
-              <svg class="disclosure-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7.5 5 5 5-5"/></svg>
-            </button>
-          </div>
-          <div id="google-import-settings" class="google-import-settings hidden">
-            <label>
-              <span>Download method</span>
-              <select id="google-download-mode">
-                <option value="automatic">Automatic</option>
-                <option value="zip">Always use temporary ZIP</option>
-                <option value="files">Never use ZIP</option>
-              </select>
-            </label>
-            <label id="google-zip-threshold-field">
-              <span>Automatic ZIP at</span>
-              <span class="number-with-unit"><input id="google-zip-threshold" type="number" min="2" max="2000" step="1" value="50"><span>items</span></span>
-            </label>
-            <p>Google transfers media individually. ZIP mode packages completed downloads temporarily on this desktop, extracts them as one verified batch, then deletes the ZIP.</p>
-          </div>
-          <div class="google-actions">
-            <button id="google-connect" class="primary-button" type="button">Connect Google Photos</button>
-            <button id="google-pick" class="primary-button hidden" type="button">Add Google media</button>
-            <button id="google-disconnect" class="quiet-button hidden" type="button">Disconnect</button>
-          </div>
-          <label class="google-import-archive-option"><input id="google-import-archive" type="checkbox" checked><span>Create the folder-named album and archive media after downloading</span></label>
-          <details id="google-organizer" class="google-organizer">
-            <summary class="google-organizer-heading">
-              <div><span class="google-section-kicker">Google Photos organizer</span><strong>Match a local folder in Google Photos</strong></div>
-              <span class="google-organizer-summary-meta"><span id="google-organizer-status" class="google-status">Not connected</span><svg class="disclosure-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7.5 5 5 5-5"/></svg></span>
-            </summary>
-            <div class="google-organizer-body">
-              <p class="google-organizer-description">Kira checks the open local folder against Google Photos using cryptographic file content—not filenames—then adds confirmed matches to an album.</p>
-              <div id="google-organizer-connect" class="google-signin">
-                <p>Sign in in the browser window that opens on this desktop. Kira finishes connecting automatically.</p>
-                <button id="google-organizer-signin" class="primary-button" type="button">Sign in to Google Photos</button>
-                <details class="google-manual-session">
-                  <summary>Import a session manually</summary>
-                  <div class="google-organizer-fields">
-                    <label><span>Cookie export path</span><input id="google-cookies-path" type="text" placeholder="C:\Users\you\Downloads\photos.google.com.json"></label>
-                    <label><span>Google account index</span><input id="google-account-index" type="number" min="0" max="99" value="0"></label>
-                    <button id="google-organizer-connect-button" class="quiet-button" type="button">Import session</button>
-                  </div>
-                </details>
-              </div>
-              <div class="google-signin-progress"><p id="google-signin-message" role="status" aria-live="polite"></p><button id="google-signin-cancel" class="quiet-button hidden" type="button">Cancel sign-in</button></div>
-              <div id="google-organizer-controls" class="google-organizer-fields hidden">
-                <div id="google-match-source" class="google-match-source"><span>Source folder</span><strong>Open a local folder below first.</strong></div>
-                <div class="google-organizer-control-row">
-                  <label><span>Album name for matches</span><input id="google-album-title" type="text" maxlength="500" placeholder="Album name"></label>
-                  <label class="google-archive-option"><input id="google-archive-after-upload" type="checkbox" checked><span>Archive matched items after adding</span></label>
-                  <button id="google-match-folder" class="primary-button" type="button" disabled>Match folder → album + archive</button>
-                </div>
-                <div class="google-organizer-footer">
-                  <button id="google-organizer-reconnect" class="link-button quiet-button" type="button">Sign in again</button>
-                  <button id="google-organizer-disconnect" class="link-button quiet-button" type="button">Remove web session</button>
-                </div>
-              </div>
-            </div>
-          </details>
-          <div id="google-progress" class="transfer-progress hidden" aria-live="polite">
-            <div class="progress-label"><span id="google-progress-label">Preparing…</span><span id="google-progress-value">0%</span></div>
-            <progress id="google-progress-bar" max="100" value="0"></progress>
-          </div>
-          <div id="google-result" class="google-result hidden" role="status"></div>
-        </section>
-        </section>
-
-        <section id="create-job-card" class="panel library-panel hidden">
-          <div class="panel-heading">
-            <div><div class="eyebrow">Desktop library</div><h2>Compare folders</h2></div>
-            <button id="browse-folders-right" class="quiet-button compact-button" type="button">+ Compare folder</button>
-          </div>
-          <div id="photo-workspace" class="photo-workspace hidden">
-            <details id="library-filters" class="workspace-disclosure library-filters">
-              <summary>Filters &amp; display <span id="filter-summary" class="disclosure-context"></span></summary>
-              <div class="workspace-disclosure-body">
-                <label class="toggle-switch toggle-switch--inline" title="Show RAW-only photos that have no JPEG preview">
-                  <input id="show-raw-toggle" type="checkbox">
-                  <span class="toggle-slider" aria-hidden="true"></span>
-                  <span class="toggle-label">Show RAW</span>
-                  <span id="raw-hidden-note" class="toggle-badge hidden"></span>
-                </label>
-                <div id="date-filter-bar" class="tag-filter-bar date-filter-bar folder-dependent hidden" aria-label="Filter photos by date">
-                  <span class="eyebrow">Filter by date</span>
-                  <label class="date-filter-field">From <input id="date-from" type="date"></label>
-                  <label class="date-filter-field">To <input id="date-to" type="date"></label>
-                  <button id="date-clear" class="quiet-button compact-button hidden" type="button">Clear dates</button>
-                </div>
-                <div id="tag-filter-bar" class="tag-filter-bar hidden" aria-label="Filter photos by tag">
-                  <span class="eyebrow">Filter by tag</span>
-                  <div id="tag-filter-chips" class="tag-filter-chips"></div>
-                  <button id="tag-clear" class="quiet-button compact-button hidden" type="button">Clear filter</button>
-                </div>
-              </div>
-            </details>
-            <div id="library-split" class="library-split single-pane">
-              <section id="library-pane-left" class="library-pane active" aria-labelledby="left-folder-name">
-                <header class="library-pane-header">
-                  <div class="library-pane-title"><div class="eyebrow">Folder</div><h3 id="left-folder-name">Desktop</h3></div>
-                  <div class="library-pane-actions">
-                    <button id="left-new-folder" class="quiet-button compact-button" type="button" disabled>New folder</button>
-                    <details id="left-move-menu" class="pane-more pane-move">
-                      <summary class="quiet-button compact-button">Move</summary>
-                      <div class="pane-more-menu">
-                        <span class="menu-caption">Move selection to</span>
-                        <button class="quiet-button compact-button" data-cull-action="select" type="button" disabled>Selected</button>
-                        <button class="quiet-button compact-button" data-cull-action="unselect" type="button" disabled>Unselected</button>
-                        <button class="quiet-button compact-button hidden" data-cull-action="restore" type="button" disabled>Inbox</button>
-                        <span class="menu-caption">Comparison groups</span>
-                        <div id="left-move-groups" class="menu-items"></div>
-                        <button id="left-new-group" class="quiet-button compact-button" type="button" disabled>+ New group…</button>
-                      </div>
-                    </details>
-                    <details id="left-tags-menu" class="pane-more pane-tags">
-                      <summary class="quiet-button compact-button">Tags</summary>
-                      <div class="pane-more-menu">
-                        <form id="left-tag-form" class="tag-entry">
-                          <input id="left-tag-input" type="text" maxlength="40" placeholder="Add a tag…" aria-label="Tag name" list="tag-options" autocomplete="off">
-                          <button class="quiet-button compact-button" type="submit" disabled>Add</button>
-                        </form>
-                        <div id="left-tag-list" class="menu-items"></div>
-                      </div>
-                    </details>
-                    <details id="left-more-menu" class="pane-more">
-                      <summary class="quiet-button compact-button">More</summary>
-                      <div class="pane-more-menu">
-                        <button id="left-google-upload" class="quiet-button compact-button" type="button" disabled>Upload to Google Photos</button>
-                        <div class="pane-auto-compare">
-                          <label class="auto-compare-size" for="left-compare-min-size">Minimum group <input id="left-compare-min-size" type="number" min="2" max="50" step="1" value="3"></label>
-                          <button id="left-auto-compare" class="quiet-button compact-button" type="button" disabled>Auto-compare folder</button>
-                        </div>
-                      </div>
-                    </details>
-                    <button id="left-close-folder" class="quiet-button compact-button icon-close-button" type="button" disabled title="Close this folder" aria-label="Close this folder">✕</button>
-                  </div>
-                </header>
-                <div class="pane-nav-bar">
-                  <button id="left-folder-up" class="quiet-button compact-button arrow-button" type="button" aria-label="Up one folder" title="Up one folder" disabled>↑</button>
-                  <nav id="left-folder-path" class="folder-breadcrumbs" aria-label="Folder path"></nav>
-                </div>
-                <div id="left-folder-list" class="folder-list inline"></div>
-                <div class="pane-photo-toolbar">
-                  <div class="pane-selection-actions" role="group" aria-label="Left folder selection">
-                    <button id="left-select-mode" class="quiet-button compact-button select-mode-toggle" type="button" aria-pressed="false">Select mode</button>
-                    <button id="left-select-all" class="quiet-button compact-button" type="button" disabled>Select all</button>
-                    <button id="left-clear-picked" title="Deselect all in this folder" class="quiet-button compact-button" type="button" disabled>Clear</button>
-                    <span id="selection-count-left" aria-live="polite">0 selected</span>
-                  </div>
-                  <div class="pane-selection-actions">
-                    <button id="left-compare-picked" title="Compare selected photos" class="quiet-button compact-button" type="button" disabled>Compare</button>
-                  </div>
-                </div>
-                <small id="photo-count-left" class="pane-media-count">No folder open</small>
-                <div id="photo-grid-left" class="photo-grid"></div>
-              </section>
-              <div class="split-move-actions hidden" aria-label="Move selected photos between folders">
-                <button id="move-selected-left" class="primary-button compact-button arrow-button" type="button" aria-label="Move selected photos to the right folder" title="Move selected to right" disabled><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></button>
-                <button id="move-selected-right" class="quiet-button compact-button arrow-button" type="button" aria-label="Move selected photos to the left folder" title="Move selected to left" disabled><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M19 12H5m6-6-6 6 6 6"/></svg></button>
-              </div>
-              <section id="library-pane-right" class="library-pane hidden" aria-labelledby="right-folder-name">
-                <header class="library-pane-header">
-                  <div class="library-pane-title"><div class="eyebrow">Comparison folder</div><h3 id="right-folder-name">Desktop</h3></div>
-                  <div class="library-pane-actions">
-                    <button id="right-new-folder" class="quiet-button compact-button" type="button" disabled>New folder</button>
-                    <details id="right-move-menu" class="pane-more pane-move">
-                      <summary class="quiet-button compact-button">Move</summary>
-                      <div class="pane-more-menu">
-                        <span class="menu-caption">Move selection to</span>
-                        <button class="quiet-button compact-button" data-cull-action="select" type="button" disabled>Selected</button>
-                        <button class="quiet-button compact-button" data-cull-action="unselect" type="button" disabled>Unselected</button>
-                        <button class="quiet-button compact-button hidden" data-cull-action="restore" type="button" disabled>Inbox</button>
-                        <span class="menu-caption">Comparison groups</span>
-                        <div id="right-move-groups" class="menu-items"></div>
-                        <button id="right-new-group" class="quiet-button compact-button" type="button" disabled>+ New group…</button>
-                      </div>
-                    </details>
-                    <details id="right-tags-menu" class="pane-more pane-tags">
-                      <summary class="quiet-button compact-button">Tags</summary>
-                      <div class="pane-more-menu">
-                        <form id="right-tag-form" class="tag-entry">
-                          <input id="right-tag-input" type="text" maxlength="40" placeholder="Add a tag…" aria-label="Tag name" list="tag-options" autocomplete="off">
-                          <button class="quiet-button compact-button" type="submit" disabled>Add</button>
-                        </form>
-                        <div id="right-tag-list" class="menu-items"></div>
-                      </div>
-                    </details>
-                    <details id="right-more-menu" class="pane-more">
-                      <summary class="quiet-button compact-button">More</summary>
-                      <div class="pane-more-menu">
-                        <button id="right-google-upload" class="quiet-button compact-button" type="button" disabled>Upload to Google Photos</button>
-                        <div class="pane-auto-compare">
-                          <label class="auto-compare-size" for="right-compare-min-size">Minimum group <input id="right-compare-min-size" type="number" min="2" max="50" step="1" value="3"></label>
-                          <button id="right-auto-compare" class="quiet-button compact-button" type="button" disabled>Auto-compare folder</button>
-                        </div>
-                      </div>
-                    </details>
-                    <button id="right-close-folder" class="quiet-button compact-button icon-close-button" type="button" title="Close comparison pane" aria-label="Close comparison pane">✕</button>
-                  </div>
-                </header>
-                <div class="pane-nav-bar">
-                  <button id="right-folder-up" class="quiet-button compact-button arrow-button" type="button" aria-label="Up one folder" title="Up one folder" disabled>↑</button>
-                  <nav id="right-folder-path" class="folder-breadcrumbs" aria-label="Folder path"></nav>
-                </div>
-                <div id="right-folder-list" class="folder-list inline"></div>
-                <div class="pane-photo-toolbar">
-                  <div class="pane-selection-actions" role="group" aria-label="Right folder selection">
-                    <button id="right-select-mode" class="quiet-button compact-button select-mode-toggle" type="button" aria-pressed="false">Select mode</button>
-                    <button id="right-select-all" class="quiet-button compact-button" type="button" disabled>Select all</button>
-                    <button id="right-clear-picked" title="Deselect all in this folder" class="quiet-button compact-button" type="button" disabled>Clear</button>
-                    <span id="selection-count-right" aria-live="polite">0 selected</span>
-                  </div>
-                  <div class="pane-selection-actions">
-                    <button id="right-compare-picked" title="Compare selected photos" class="quiet-button compact-button" type="button" disabled>Compare</button>
-                  </div>
-                </div>
-                <small id="photo-count-right" class="pane-media-count">No folder open</small>
-                <div id="photo-grid-right" class="photo-grid"></div>
-              </section>
-            </div>
-            <datalist id="tag-options"></datalist>
-            <form id="selection-job-form" class="selection-job-form folder-dependent hidden">
-              <label><span>Job name</span><input id="job-name" name="name" type="text" maxlength="120" placeholder="Lake Michigan · Aug 12" required></label>
-              <label><span>Send photos to iPad as</span><select id="edit-source-format" name="source-format">
-                <option value="jpeg" selected>JPEG · videos stay original</option>
-                <option value="raw">RAW · videos stay original</option>
-              </select></label>
-              <div id="selection-summary">0 selected</div>
-              <button class="primary-button" type="submit" disabled>Create iPad edit job</button>
-            </form>
-          </div>
-        </section>
-
-        <section class="jobs-section panel">
-          <div class="section-heading">
-            <div><div class="eyebrow">Transfer queue</div><h2>Edit jobs</h2></div>
-            <button id="refresh-jobs" class="quiet-button" type="button">Refresh</button>
-          </div>
-          <div id="jobs-list" class="jobs-list"></div>
-          <div id="empty-jobs" class="empty-state hidden">
-            <h3>No edit jobs yet</h3>
-            <p>Create one on the desktop, then open Kira on the iPad.</p>
-          </div>
-        </section>
+            <button class="primary-button" type="submit">Use this folder</button>
+          </form>
+          <p id="setup-error" class="error-text" role="alert"></p>
+        </div>
       </section>
 
-      <section id="job-view" class="job-view hidden">
-        <button id="back-to-jobs" class="back-button" type="button">← All jobs</button>
-        <header class="job-header">
-          <div><div class="eyebrow">Edit job</div><h1 id="job-title">—</h1><p id="job-summary">—</p></div>
-          <div class="job-header-actions">
-            <a id="download-bundle" class="primary-button link-button" href="#">Download edit sources</a>
-            <button id="delete-job" class="danger-button" type="button">Delete job</button>
+      <!-- Library: shoots -->
+      <section id="view-library" class="view hidden">
+        <div class="view-head">
+          <div>
+            <h1>Library</h1>
+            <p id="library-root" class="muted"></p>
           </div>
-        </header>
-
-        <section id="job-pairing" class="job-pairing hidden" aria-label="Connect iPad to this job">
-          <div class="job-pairing-copy">
-            <div class="eyebrow">Open this job on iPad</div>
-            <h2>Scan to connect</h2>
-            <p>Scan with the iPad Camera, or use the address and pairing code.</p>
-            <dl>
-              <div><dt>Manual address</dt><dd id="job-ipad-url">—</dd></div>
-              <div><dt>Pairing code</dt><dd id="job-pair-code">—</dd></div>
-            </dl>
+          <div class="row desktop-only">
+            <button id="empty-trash" class="quiet-button hidden" type="button">Empty trash</button>
+            <button id="new-shoot" class="quiet-button" type="button">New shoot</button>
+            <a class="primary-button link-button" href="#import">Import photos</a>
           </div>
-          <div class="qr-wrap job-qr-wrap"><img id="job-pair-qr" alt="QR code that opens and pairs Kira on the iPad"><span>Scan with iPad Camera</span></div>
-        </section>
-
-        <div class="job-columns">
-          <section class="panel">
-            <div class="panel-heading"><div><div class="eyebrow">Step 1</div><h2>Download to iPad</h2></div></div>
-            <p class="panel-copy">Download the ZIP, tap it once in Files to unzip it, then import those photos into Lightroom.</p>
-            <div id="job-files" class="file-list"></div>
-          </section>
-
-          <section class="panel return-panel">
-            <div class="panel-heading"><div><div class="eyebrow">Step 2</div><h2>Return Lightroom exports</h2></div></div>
-            <p class="panel-copy">In Lightroom, export with the original filename to Files. Select those exports here and Kira will upload them to the desktop.</p>
-            <label class="return-picker">
-              <input id="return-files" type="file" multiple accept="image/*,video/*,.dng,.tif,.tiff,.avif,.jxl,.zip,.xmp,.aae,.psd,.psb,.xcf,.kra,.ora,.afphoto,application/zip">
-              <span class="return-picker-content"><strong>Choose edited photos or ZIP</strong><small>JPG, DNG, TIFF, AVIF, JXL, or ZIP</small></span>
-            </label>
-            <button id="upload-returns" class="primary-button full-button" type="button" disabled>Upload returned edits</button>
-            <div id="return-progress" class="transfer-progress hidden" aria-live="polite">
-              <div class="progress-label"><span id="return-progress-label">Preparing…</span><span id="return-progress-value">0%</span></div>
-              <progress id="return-progress-bar" max="100" value="0"></progress>
-            </div>
-            <div id="job-returns" class="return-list"></div>
-          </section>
         </div>
-        <section id="export-panel" class="panel export-panel hidden">
-          <div class="panel-heading">
-            <div><div class="eyebrow">Step 3</div><h2>Finish and organize files</h2></div>
+        <p id="library-offline" class="notice warn hidden">The library drive is not connected. You can browse previews; imports and changes wait until it's back.</p>
+        <div id="shoot-grid" class="shoot-grid"></div>
+        <p id="library-empty" class="empty hidden">No shoots yet. Import a card or folder to start.</p>
+      </section>
+
+      <!-- One shoot -->
+      <section id="view-shoot" class="view hidden">
+        <div class="view-head">
+          <div>
+            <a href="#library" class="back-link">← Library</a>
+            <h1 id="shoot-title"></h1>
+            <p id="shoot-meta" class="muted"></p>
           </div>
-          <p class="panel-copy">Kira moves the existing camera files inside the chosen source folder and copies—or extracts—the returned Lightroom edits into that same folder structure.</p>
-          <button id="organize-source" class="primary-button" type="button">Finish &amp; organize source folder</button>
-          <p id="organize-result" class="organize-result hidden" role="status"></p>
-          <ul id="organize-errors" class="error-text hidden"></ul>
-          <div class="folder-preview" aria-label="Organized folder structure">
-            <code>selected/</code>
-            <code>selected/raw/</code>
-            <code>selected/pre-edit/</code>
-            <code>unselected_jpeg/</code>
+          <div class="row desktop-only">
+            <button id="shoot-rename" class="quiet-button" type="button">Rename</button>
+            <button id="shoot-rescan" class="quiet-button" type="button" title="Pick up files an editor saved into the shoot folder">Rescan folder</button>
+            <button id="shoot-reveal" class="quiet-button" type="button">Open folder</button>
+            <button id="shoot-trash" class="danger-button" type="button">Delete shoot</button>
           </div>
-          <p class="panel-copy">Sending and organizing retain verified copies in Kira’s working folder, using extra disk space. Removing the transfer job keeps these checkpoints and your organized folders. You can restore copies from Saved files.</p>
-        </section>
+        </div>
+        <div class="toolbar">
+          <div class="segmented" role="tablist" aria-label="Filter">
+            <button type="button" data-filter="kept" class="active">Keepers</button>
+            <button type="button" data-filter="edited">Edited</button>
+            <button type="button" data-filter="unedited">Not edited</button>
+            <button type="button" data-filter="rejected">Rejected</button>
+          </div>
+          <div class="row selection-actions">
+            <span id="selection-count" class="muted"></span>
+            <button id="select-all" class="quiet-button small" type="button">Select all</button>
+            <button id="send-ipad" class="primary-button small" type="button" disabled>Send to iPad</button>
+            <select id="send-format" class="small" aria-label="File to send">
+              <option value="raw">RAW when available</option>
+              <option value="jpeg">JPEG</option>
+            </select>
+            <button id="reject-selected" class="quiet-button small" type="button" disabled>Reject</button>
+          </div>
+        </div>
+        <div id="drop-zone" class="drop-zone desktop-only">Drop files here to add them to this shoot. Kira files edits next to their originals.</div>
+        <div id="photo-grid" class="photo-grid"></div>
+        <p id="shoot-empty" class="empty hidden">Nothing here.</p>
+      </section>
+
+      <!-- Import -->
+      <section id="view-import" class="view hidden">
+        <div class="view-head"><div><h1>Import</h1><p class="muted">Copy new photos from a card, phone folder or any folder. Kira skips what it already has and never changes the source.</p></div></div>
+        <div class="grid-2">
+          <form id="import-form" class="card stack">
+            <h2>Import a folder or card</h2>
+            <label for="import-source">From</label>
+            <div class="row">
+              <input id="import-source" type="text" placeholder="E:\DCIM" required>
+              <button class="quiet-button" type="button" data-browse="import-source">Browse…</button>
+            </div>
+            <label for="import-shoot">Into shoot</label>
+            <select id="import-shoot"></select>
+            <input id="import-shoot-name" type="text" placeholder="New shoot name, e.g. 2026-07 NYC">
+            <div class="row">
+              <button class="primary-button" type="submit">Import new photos</button>
+              <button id="import-check" class="quiet-button" type="button">Is it safe to wipe?</button>
+            </div>
+            <div id="import-result" class="result"></div>
+          </form>
+          <div class="card stack">
+            <h2>Pick from Google Photos</h2>
+            <p class="muted">For phone photos that synced to Google Photos. Choose the ones that belong in a shoot; the rest stay in Google Photos only.</p>
+            <label for="picker-shoot">Into shoot</label>
+            <select id="picker-shoot"></select>
+            <input id="picker-shoot-name" type="text" placeholder="New shoot name">
+            <button id="picker-start" class="quiet-button" type="button">Open Google Photos picker</button>
+            <div id="picker-result" class="result"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Drives: look through a card or folder without importing it -->
+      <section id="view-drives" class="view hidden">
+        <div class="view-head">
+          <div>
+            <div id="drive-crumbs" class="crumbs back-crumbs"></div>
+            <h1 id="drive-title">Drives</h1>
+            <p id="drive-summary" class="muted"></p>
+          </div>
+          <div class="row wrap desktop-only">
+            <input id="drive-path" type="hidden">
+            <button class="quiet-button" type="button" data-browse="drive-path">Go to folder…</button>
+            <button id="drive-scan" class="quiet-button hidden" type="button" title="Hash every file in this folder and below, several at a time">Check files</button>
+            <button id="drive-links" class="quiet-button hidden" type="button" title="Writes shortcuts to the duplicates into a _trash folder on the drive; the files stay where they are">Make shortcuts to duplicates</button>
+            <button id="drive-trash-copies" class="danger-button hidden" type="button" title="Moves files under this folder that the library already holds into the library trash">Move library copies to trash</button>
+            <button id="drive-import" class="primary-button hidden" type="button">Import this folder</button>
+          </div>
+        </div>
+        <div id="drives-result" class="result"></div>
+        <div id="drive-toolbar" class="toolbar hidden">
+          <div class="row wrap">
+          <div class="segmented" role="tablist" aria-label="Which files">
+            <button type="button" data-drive-scope="here" class="active">This folder</button>
+            <button type="button" data-drive-scope="deep">All subfolders</button>
+          </div>
+          <div class="segmented" role="tablist" aria-label="Show">
+            <button type="button" data-drive-filter="all" class="active">All</button>
+            <button type="button" data-drive-filter="missing">Not in library</button>
+            <button type="button" data-drive-filter="duplicates">Duplicates</button>
+          </div>
+          </div>
+          <span id="drive-count" class="muted"></span>
+        </div>
+        <div id="drive-folders" class="shoot-grid"></div>
+        <div id="drive-grid" class="photo-grid"></div>
+        <div class="row hidden" id="drive-more-row"><button id="drive-more" class="quiet-button" type="button">Show more</button></div>
+        <p id="drive-empty" class="empty hidden">No photos or videos here.</p>
+      </section>
+
+      <!-- Review -->
+      <section id="view-review" class="view hidden">
+        <div class="view-head"><div><h1>Review</h1><p class="muted">Files Kira couldn't place with confidence. Nothing is thrown away while it waits here.</p></div></div>
+        <div id="review-list" class="review-list"></div>
+        <p id="review-empty" class="empty hidden">Nothing to review.</p>
+      </section>
+
+      <!-- iPad -->
+      <section id="view-ipad" class="view hidden">
+        <div class="view-head"><div><h1>iPad</h1><p class="muted">Photos go to Lightroom on the iPad and edits come straight back over Wi-Fi. Nothing passes through the Camera Roll or Google Photos.</p></div></div>
+        <div class="grid-2">
+          <div class="card stack">
+            <div class="row spread"><h2>Waiting to go to the iPad</h2><button id="outbox-clear" class="quiet-button small" type="button">Clear sent</button></div>
+            <div id="outbox-list" class="outbox-list"></div>
+            <p id="outbox-empty" class="empty hidden">Select photos in a shoot and click <b>Send to iPad</b>.</p>
+            <div id="ipad-device-actions" class="stack ipad-only">
+              <a id="ipad-download-all" class="primary-button link-button" href="#">Download all to Files</a>
+              <label class="primary-button file-button">Send edits to Kira<input id="ipad-upload" type="file" accept="image/*,.dng,.tif,.tiff,.psd" multiple></label>
+              <div id="ipad-upload-result" class="result"></div>
+            </div>
+          </div>
+          <div class="card stack desktop-only" id="ipad-setup">
+            <h2>One-time setup</h2>
+            <div class="pairing">
+              <img id="pair-qr" alt="Pairing QR code" width="148" height="148">
+              <div>
+                <p>Scan with the iPad camera, or open <b id="ipad-url"></b> and enter <b id="pair-code-display" class="code"></b>.</p>
+              </div>
+            </div>
+            <details>
+              <summary><b>Shortcut 1: "Send to Kira"</b> (edits back from Lightroom)</summary>
+              <ol class="steps">
+                <li>Shortcuts app → <b>+</b> → name it <b>Send to Kira</b>. In its settings, turn on <b>Show in Share Sheet</b> and accept <b>Images</b> and <b>Files</b>.</li>
+                <li>Add <b>Repeat with Each</b> over <b>Shortcut Input</b>.</li>
+                <li>Inside it, add <b>Get Contents of URL</b>: URL = the address below followed by the <b>Name</b> of <b>Repeated Item</b>; Method <b>POST</b>; Request Body <b>File</b> = <b>Repeated Item</b>.</li>
+                <li>After the loop, add <b>Show Notification</b> "Sent to Kira".</li>
+              </ol>
+              <div class="copy-row"><code id="receive-url"></code><button class="quiet-button small" type="button" data-copy="receive-url">Copy</button></div>
+              <p class="muted">In Lightroom: select the edited photos → Share → <b>Share to…</b> → set size to <b>Full size</b> once → <b>Send to Kira</b>.</p>
+            </details>
+            <details>
+              <summary><b>Shortcut 2: "Get from Kira"</b> (photos to edit)</summary>
+              <ol class="steps">
+                <li>New shortcut <b>Get from Kira</b>. Add <b>Get Contents of URL</b> with the address below.</li>
+                <li>Add <b>Split Text</b> by <b>New Lines</b>, then <b>Repeat with Each</b> item.</li>
+                <li>Inside: <b>Get Contents of URL</b> (Repeat Item), then <b>Import to Lightroom</b>. If that action is missing or fails on your iOS, use <b>Save File</b> to a "Kira" folder instead and import it in Lightroom with Add Photos → From Files.</li>
+                <li>Optional: Automation → <b>When Lightroom is opened</b> → run Get from Kira.</li>
+              </ol>
+              <div class="copy-row"><code id="outbox-url"></code><button class="quiet-button small" type="button" data-copy="outbox-url">Copy</button></div>
+            </details>
+            <p class="muted">No Shortcuts? Open Kira in Safari on the iPad and use the buttons on this page instead.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Cloud -->
+      <section id="view-cloud" class="view hidden">
+        <div class="view-head"><div><h1>Cloud</h1><p class="muted">Google Drive keeps exact copies of camera files, edits and project files. Google Photos keeps your phone photos and shows your Finals.</p></div></div>
+        <div class="card stack" id="google-account">
+          <div class="row spread">
+            <div><h2>Google account</h2><p id="google-account-state" class="muted"></p></div>
+            <div class="row"><button id="google-connect" class="primary-button" type="button">Connect Google</button><button id="google-disconnect" class="quiet-button hidden" type="button">Disconnect</button></div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="card stack">
+            <h2>Google Drive backup</h2>
+            <dl class="facts" id="drive-facts"></dl>
+            <div class="row">
+              <button id="drive-backup" class="primary-button" type="button">Back up now</button>
+              <button id="drive-restore" class="quiet-button hidden" type="button">Restore missing files</button>
+            </div>
+            <p class="muted small-text">Drive never loses a file because of Kira: changed files are added as new copies, and files deleted on the library drive stay on Drive.</p>
+            <div id="drive-result" class="result"></div>
+          </div>
+          <div class="card stack">
+            <h2>Google Photos</h2>
+            <dl class="facts" id="photos-facts"></dl>
+            <div class="row wrap">
+              <button id="photos-upload" class="primary-button" type="button">Upload Finals</button>
+              <button id="photos-check" class="quiet-button" type="button">Check phone photos</button>
+              <button id="web-signin" class="quiet-button" type="button">Sign in to Photos web</button>
+            </div>
+            <p class="muted small-text">Checking and clean-up use Google Photos' web session (unofficial). If it ever stops working, nothing is lost; uploads keep using the official API.</p>
+            <div id="photos-result" class="result"></div>
+          </div>
+        </div>
+        <div class="card stack">
+          <div class="row spread">
+            <div>
+              <h2>Clean up Google Photos</h2>
+              <p class="muted">Hides copies that duplicate a Final, such as other edits and phone originals you edited. They move to Archive: out of the timeline, still in your account, never deleted. Nothing happens until you click Hide.</p>
+            </div>
+            <button id="cleanup-plan" class="quiet-button" type="button">Find copies</button>
+          </div>
+          <div id="cleanup-list" class="cleanup-list"></div>
+          <div class="row hidden" id="cleanup-actions">
+            <button id="cleanup-toggle" class="quiet-button small" type="button">Select none</button>
+            <button id="cleanup-apply" class="primary-button" type="button">Hide selected in Google Photos</button>
+          </div>
+        </div>
       </section>
     </main>
 
-    <div id="compare-modal" class="compare-modal hidden" role="dialog" aria-modal="true" aria-labelledby="compare-title">
-      <div class="compare-shell">
-        <header class="compare-header">
-          <div class="compare-title-group"><div class="eyebrow">Matched view</div><h2 id="compare-title">Compare photos</h2></div>
-          <label class="zoom-control"><span>Zoom</span><input id="compare-zoom" type="range" min="100" max="300" value="100" step="10"><output id="compare-zoom-value">100%</output></label>
-          <button id="close-compare" class="quiet-button" type="button">Done</button>
-        </header>
-        <div id="compare-grid" class="compare-grid"></div>
-        <p class="compare-hint">Scroll to zoom, drag any image to pan all images together. Uncheck weaker shots to remove them from the edit job.</p>
+    <!-- Photo detail -->
+    <dialog id="photo-dialog" class="photo-dialog">
+      <div class="dialog-body">
+        <div id="photo-viewer" class="viewer"><img alt=""><video controls playsinline preload="metadata"></video><p class="viewer-none hidden"></p></div>
+        <aside class="versions">
+          <div class="row spread"><h2 id="photo-title"></h2><button class="quiet-button small" type="button" data-close>Close</button></div>
+          <p id="photo-meta" class="muted"></p>
+          <ol id="version-list" class="version-list"></ol>
+          <div class="row wrap">
+            <button id="make-final" class="primary-button small" type="button">Make Final</button>
+            <button id="download-version" class="quiet-button small" type="button">Download</button>
+            <button id="toggle-reject" class="quiet-button small" type="button">Reject</button>
+            <button id="delete-version" class="danger-button small desktop-only" type="button">Move to trash</button>
+          </div>
+          <p class="muted small-text">Nothing is overwritten. Each edit that comes back becomes the next version; the Final is the one shown in Google Photos.</p>
+        </aside>
       </div>
-    </div>
-
-    <dialog id="lightbox-modal" class="lightbox-modal" aria-labelledby="lightbox-title">
-      <header class="lightbox-header"><strong id="lightbox-title"></strong><button id="close-lightbox" class="quiet-button compact-button" type="button">Close</button></header>
-      <div class="lightbox-stage"><img id="lightbox-image" alt=""></div>
     </dialog>
 
-    <dialog id="history-modal" class="history-modal" aria-labelledby="history-title">
-      <header class="panel-heading"><h2 id="history-title">Saved files</h2><button id="close-history" class="quiet-button" type="button">Close</button></header>
-      <p class="panel-copy">Verified local checkpoints stay here after transfer jobs are removed. Keep a separate backup of Kira’s working folder to protect against losing this drive.</p>
-      <div id="history-list" class="return-list" aria-live="polite"></div>
+    <!-- A file on a drive -->
+    <dialog id="source-dialog" class="photo-dialog">
+      <div class="dialog-body">
+        <div id="source-viewer" class="viewer"><img alt=""><video controls playsinline preload="metadata"></video><p class="viewer-none hidden"></p></div>
+        <aside class="versions">
+          <div class="row spread"><h2 id="source-title"></h2><button class="quiet-button small" type="button" data-close>Close</button></div>
+          <p id="source-meta" class="muted"></p>
+          <ol id="source-list" class="version-list"></ol>
+          <p class="muted small-text">Nothing on the drive is changed by looking at it.</p>
+        </aside>
+      </div>
     </dialog>
 
+    <!-- Folder browser -->
+    <dialog id="browse-dialog" class="browse-dialog">
+      <div class="stack">
+        <div class="row spread"><h2>Choose a folder</h2><button class="quiet-button small" type="button" data-close>Cancel</button></div>
+        <div id="browse-crumbs" class="crumbs"></div>
+        <ul id="browse-list" class="browse-list"></ul>
+        <div class="row spread"><code id="browse-current"></code><button id="browse-choose" class="primary-button" type="button">Choose this folder</button></div>
+      </div>
+    </dialog>
+
+    <div id="tasks" class="tasks" aria-live="polite"></div>
     <div id="toast" class="toast hidden" role="status"></div>
   </div>
-  <script src="/sha256.js" defer></script>
-  <script src="/app.js" defer></script>
+  <script src="/sha256.js"></script>
+  <script src="/app.js"></script>
 </body>
 </html>

@@ -16,12 +16,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import visual
-from .google_photos import GooglePhotosError, _windows_protect, _windows_unprotect
+from .google_auth import GoogleError, _windows_protect, _windows_unprotect
 from .google_signin import GoogleSignInBrowser, GoogleSignInError, find_browser
 from .media import atomic_json_write, match_key
 
 
-class GooglePhotosWebError(GooglePhotosError):
+class GooglePhotosWebError(GoogleError):
     pass
 
 
@@ -87,7 +87,7 @@ class GooglePhotosWebService:
     def cancel_sign_in(self) -> dict:
         with self._signin_lock:
             self._signin_cancelled.set()
-            if self._signin_state["status"] in {"starting", "waiting"}:
+            if self._signin_state["status"] in {"starting", "waiting", "verifying"}:
                 self._signin_state = {"status": "cancelled"}
             return dict(self._signin_state)
 
@@ -98,30 +98,32 @@ class GooglePhotosWebService:
 
     def _run_sign_in(self, cancelled: threading.Event) -> None:
         try:
-            wrapper = None
-            deadline = time.monotonic() + 600
             with GoogleSignInBrowser(self.root, cancelled) as browser:
                 with self._signin_lock:
                     if cancelled.is_set():
                         return
                     self._signin_state = {"status": "waiting"}
-                next_verification = 0.0
-                while not cancelled.is_set() and time.monotonic() < deadline:
-                    session = browser.session()
-                    if session and time.monotonic() >= next_verification:
-                        cookies, account_index = session
-                        raw = self._normalize_cookie_export(json.dumps(cookies).encode("utf-8"))
-                        try:
-                            wrapper = self._verified_session(raw, account_index)
-                            break
-                        except GooglePhotosWebError:
-                            next_verification = time.monotonic() + 5
-                    cancelled.wait(1)
+                closed = browser.wait_until_closed(time.monotonic() + 900)
+                if cancelled.is_set():
+                    return
+                if not closed:
+                    raise GoogleSignInError("Sign-in timed out. Click Sign in to Photos web and try again.")
+                with self._signin_lock:
+                    self._signin_state = {"status": "verifying"}
+                session = browser.session()
+            if session is None:
+                raise GoogleSignInError(
+                    "The window closed before Google sign-in finished. Sign in to Google Photos, then close the window."
+                )
+            cookies, account_index = session
+            raw = self._normalize_cookie_export(json.dumps(cookies).encode("utf-8"))
+            try:
+                wrapper = self._verified_session(raw, account_index)
+            except GooglePhotosWebError as exc:
+                raise GoogleSignInError("Signed in, but Google Photos did not accept the session. Try again.") from exc
             with self._signin_lock:
                 if cancelled.is_set():
                     return
-                if wrapper is None:
-                    raise GoogleSignInError("Sign-in timed out. Click Sign in to Google Photos and try again.")
                 self._write_session(wrapper)
                 self._signin_state = {"status": "completed"}
         except Exception as exc:
@@ -280,6 +282,114 @@ class GooglePhotosWebService:
                     if content_hash in batch and media_key and dedup_key:
                         matches[(content_hash, media_key)] = {"content_hash": content_hash, "media_key": media_key}
         return list(matches.values())
+
+    def lookup_hashes(self, hashes: list[str]) -> dict[str, dict]:
+        """Which exact files Google Photos holds: content hash -> media key and dedup key."""
+        requested = list(dict.fromkeys(value for value in hashes if value))
+        found: dict[str, dict] = {}
+        if not requested:
+            return found
+        with self._client() as (client, payloads):
+            for start in range(0, len(requested), self.HASH_BATCH_SIZE):
+                batch = requested[start : start + self.HASH_BATCH_SIZE]
+                try:
+                    response = client.send_api_request(payloads.GetRemoteMatchesByHash(batch))
+                    items = getattr(response, "data", None) or []
+                except Exception as exc:
+                    raise GooglePhotosWebError(f"Could not look up files in Google Photos: {exc}") from exc
+                for item in items:
+                    content_hash = str(getattr(item, "hash", "") or "")
+                    media_key = str(getattr(item, "media_key", "") or "")
+                    dedup_key = str(getattr(item, "dedup_key", "") or "")
+                    if content_hash in batch and media_key and dedup_key:
+                        found[content_hash] = {"media_key": media_key, "dedup_key": dedup_key}
+        return found
+
+    def find_by_name_and_time(self, wanted: list[dict]) -> dict[int, dict]:
+        """Find library items by original filename and capture time (UTC epoch ms).
+
+        Used when hashes cannot match, e.g. picker downloads that Google stripped of location.
+        Returns ``{index into wanted: {media_key, dedup_key}}``; ambiguous entries are left out.
+        """
+        if not wanted:
+            return {}
+        day = 24 * 60 * 60 * 1000
+        oldest = min(entry["time_ms"] for entry in wanted) - day
+        candidates: dict[int, list[dict]] = {}
+        with self._client() as (client, payloads):
+            page_id, timestamp, seen_pages = None, None, set()
+            while True:
+                try:
+                    page = client.send_api_request(
+                        payloads.GetLibraryPageByTakenDate(
+                            timestamp=timestamp, page_id=page_id, source="both", page_size=500
+                        )
+                    ).data
+                except Exception as exc:
+                    raise GooglePhotosWebError(f"Could not scan the Google Photos library: {exc}") from exc
+                for item in page.items:
+                    taken = self._epoch_ms(item.timestamp)
+                    if not item.media_key or taken is None:
+                        continue
+                    for index, entry in enumerate(wanted):
+                        if abs(taken - entry["time_ms"]) <= day:
+                            candidates.setdefault(index, []).append(
+                                {"media_key": str(item.media_key), "dedup_key": str(item.dedup_key or ""), "ms": taken}
+                            )
+                token = (str(page.next_page_id or ""), str(page.last_item_timestamp or ""))
+                last = self._epoch_ms(page.last_item_timestamp)
+                if not token[0] or token in seen_pages or (last is not None and last < oldest):
+                    break
+                seen_pages.add(token)
+                page_id, timestamp = page.next_page_id, page.last_item_timestamp
+
+            keys = list(dict.fromkeys(item["media_key"] for items in candidates.values() for item in items))
+            names: dict[str, str] = {}
+            for start in range(0, len(keys), self.INFO_BATCH_SIZE):
+                try:
+                    response = client.send_api_request(
+                        payloads.GetBatchMediaInfo(keys[start : start + self.INFO_BATCH_SIZE])
+                    )
+                except Exception as exc:
+                    raise GooglePhotosWebError(f"Could not read Google Photos filenames: {exc}") from exc
+                for metadata in getattr(response, "data", None) or []:
+                    names[str(getattr(metadata, "media_key", ""))] = str(getattr(metadata, "file_name", "") or "")
+
+        found: dict[int, dict] = {}
+        for index, items in candidates.items():
+            name = wanted[index]["name"].casefold()
+            same_name = [item for item in items if names.get(item["media_key"], "").casefold() == name]
+            close = [item for item in same_name if abs(item["ms"] - wanted[index]["time_ms"]) <= 2000]
+            chosen = close if len(close) == 1 else same_name if len(same_name) == 1 else []
+            if chosen and chosen[0]["dedup_key"]:
+                found[index] = {"media_key": chosen[0]["media_key"], "dedup_key": chosen[0]["dedup_key"]}
+        return found
+
+    @staticmethod
+    def _epoch_ms(value: object) -> int | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if number > 100_000_000_000_000:
+            return int(number / 1000)
+        if number > 100_000_000_000:
+            return int(number)
+        return int(number * 1000)
+
+    def archive(self, items: list[dict]) -> list[str]:
+        """Hide items from the Photos timeline (nothing is deleted). Returns confirmed media keys."""
+        items = [item for item in items if item.get("media_key") and item.get("dedup_key")][: self.MAX_MEDIA_ITEMS]
+        if not items:
+            return []
+        with self._client() as (client, payloads):
+            try:
+                client.send_api_request(payloads.SetArchive([item["dedup_key"] for item in items]))
+            except Exception as exc:
+                raise GooglePhotosWebError(f"Google Photos Archive failed: {exc}") from exc
+            keys = [item["media_key"] for item in items]
+            self._verify_archive(client, payloads, keys)
+            return keys
 
     def find_visual_matches(self, paths: list[Path]) -> tuple[list[dict], list[dict]]:
         """Match photos by decoded visual content, independent of names and encoding."""
