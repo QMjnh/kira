@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import concurrent.futures
 import importlib
 import json
 import os
@@ -16,10 +15,9 @@ from datetime import UTC, datetime, timedelta
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 
-from . import visual
 from .google_auth import GoogleError, _windows_protect, _windows_unprotect
 from .google_signin import GoogleSignInBrowser, GoogleSignInError, find_browser
-from .media import atomic_json_write, match_key
+from .media import atomic_json_write
 
 
 class GooglePhotosWebError(GoogleError):
@@ -36,7 +34,6 @@ class GooglePhotosWebService:
     INFO_BATCH_SIZE = 100
     VERIFY_ATTEMPTS = 10
     VERIFY_INTERVAL_SECONDS = 0.5
-    VISUAL_NARROW_FALLBACK_LIMIT = 6
     # Google retires the __Secure-*PSIDTS cookies every few hours; a browser swaps in fresh ones
     # through RotateCookies. Kira does the same while it runs and saves whatever Google sends back.
     ROTATE_URL = "https://accounts.google.com/RotateCookies"
@@ -524,139 +521,6 @@ class GooglePhotosWebService:
             self._verify_archive(client, payloads, keys)
             return keys
 
-    def find_visual_matches(self, paths: list[Path]) -> tuple[list[dict], list[dict]]:
-        """Match photos by decoded visual content, independent of names and encoding."""
-        errors: list[dict] = []
-        local_groups: dict[tuple, dict] = {}
-        for path in paths:
-            try:
-                signature = visual.image_signature(path)
-                key = (signature["width"], signature["height"], signature["pixels"])
-                group = local_groups.setdefault(key, {"signature": signature, "paths": [], "name_keys": set()})
-                group["paths"].append(str(path))
-                group["name_keys"].add(match_key(path.name))
-            except Exception as exc:
-                errors.append(
-                    {
-                        "filename": path.name,
-                        "local_files": [str(path)],
-                        "error": f"Could not decode local image for content matching: {exc}",
-                    }
-                )
-
-        if not local_groups:
-            return [], errors
-
-        local_groups_list = list(local_groups.values())
-
-        matches: dict[str, dict] = {}
-        with self._client() as (client, payloads):
-            remote_candidates: list[tuple[dict, list[dict]]] = []
-            for remote in self._list_library(client, payloads):
-                if remote["video"] or remote["partial"] or not remote["owned"]:
-                    continue
-                candidates = [
-                    group
-                    for group in local_groups_list
-                    if visual.dimensions_compatible(
-                        (group["signature"]["width"], group["signature"]["height"]), (remote["width"], remote["height"])
-                    )
-                ]
-                if not candidates:
-                    continue
-                remote_candidates.append((remote, candidates))
-
-            remote_candidates = self._resolve_visual_downloads(client, payloads, remote_candidates)
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
-                futures = {
-                    executor.submit(self._remote_image_signature, client, remote): (remote, candidates)
-                    for remote, candidates in remote_candidates
-                }
-                for future in concurrent.futures.as_completed(futures):
-                    remote, candidates = futures[future]
-                    try:
-                        signature = future.result()
-                    except Exception as exc:
-                        errors.append(
-                            {
-                                "filename": "Google Photos library item",
-                                "local_files": [],
-                                "error": f"Could not inspect one Google Photos thumbnail: {exc}",
-                            }
-                        )
-                        continue
-                    self._record_visual_match(matches, remote, candidates, signature)
-        return list(matches.values()), errors
-
-    def _remote_image_signature(self, client: object, remote: dict) -> dict:
-        try:
-            response = client.session.get(remote["download_url"], timeout=60)
-            if response.status_code < 200 or response.status_code >= 300:
-                raise GooglePhotosWebError(f"original download returned HTTP {response.status_code}")
-            return visual.image_signature(response.content)
-        except GooglePhotosWebError:
-            raise
-        except Exception as exc:
-            raise GooglePhotosWebError(f"original download failed ({type(exc).__name__})") from exc
-
-    def _resolve_visual_downloads(
-        self, client: object, payloads: object, candidates: list[tuple[dict, list[dict]]]
-    ) -> list[tuple[dict, list[dict]]]:
-        by_media = {remote["media_key"]: (remote, groups) for remote, groups in candidates}
-        narrowed: dict[str, tuple[dict, list[dict]]] = {}
-        keys = list(by_media)
-        for start in range(0, len(keys), 100):
-            batch = keys[start : start + 100]
-            try:
-                response = client.send_api_request(payloads.GetBatchMediaInfo(batch))
-                metadata_items = getattr(response, "data", None) or []
-            except Exception as exc:
-                raise GooglePhotosWebError(
-                    f"Could not read Google Photos filenames for content matching: {exc}"
-                ) from exc
-            for metadata in metadata_items:
-                media_key = str(getattr(metadata, "media_key", "") or "")
-                pair = by_media.get(media_key)
-                if pair is None:
-                    continue
-                remote, groups = pair
-                remote_name = match_key(str(getattr(metadata, "file_name", "") or ""))
-                remote_capture = self._remote_capture_time(
-                    getattr(metadata, "timestamp", None), getattr(metadata, "timezone_offset", None)
-                )
-                compatible = [
-                    group
-                    for group in groups
-                    if remote_name in group["name_keys"]
-                    or (remote_capture and remote_capture == group["signature"].get("capture_time"))
-                ]
-                if not compatible and len(groups) <= self.VISUAL_NARROW_FALLBACK_LIMIT:
-                    compatible = list(groups)
-                if compatible:
-                    narrowed[media_key] = (remote, compatible)
-
-        narrowed_keys = list(narrowed)
-        resolved: list[tuple[dict, list[dict]]] = []
-        for start in range(0, len(narrowed_keys), 100):
-            requests = [(key, payloads.GetItemInfo(key)) for key in narrowed_keys[start : start + 100]]
-            try:
-                responses = client.send_api_request([payload for _, payload in requests])
-            except Exception as exc:
-                raise GooglePhotosWebError(
-                    f"Could not prepare Google Photos originals for content matching: {exc}"
-                ) from exc
-            by_id = {response.response_id: response for response in responses}
-            for media_key, payload in requests:
-                data = getattr(by_id.get(payload.payload_id), "data", None)
-                download_url = str(getattr(data, "download_original_url", "") or "")
-                if not download_url:
-                    continue
-                remote, groups = narrowed[media_key]
-                remote["download_url"] = download_url
-                resolved.append((remote, groups))
-        return resolved
-
     @staticmethod
     def _remote_capture_time(timestamp: object, timezone_offset: object) -> str | None:
         try:
@@ -674,97 +538,6 @@ class GooglePhotosWebService:
             return captured.strftime("%Y:%m:%d %H:%M:%S")
         except (OSError, OverflowError, TypeError, ValueError):
             return None
-
-    def _record_visual_match(
-        self, matches: dict[str, dict], remote: dict, candidates: list[dict], signature: dict
-    ) -> None:
-        exact_rows: list[tuple[dict, dict]] = []
-        variant_rows: list[tuple[dict, dict]] = []
-        for candidate in candidates:
-            metrics = visual.similarity_metrics(signature, candidate["signature"])
-            tier = visual.match_tier(metrics)
-            if tier == "reencoded":
-                exact_rows.append((metrics, candidate))
-            elif tier == "edited":
-                variant_rows.append((metrics, candidate))
-
-        if exact_rows:
-            ranked = sorted(exact_rows, key=lambda value: (value[0]["color"], value[0]["difference_hash"]))
-            best_metrics, best = ranked[0]
-            if len(ranked) > 1:
-                next_metrics = ranked[1][0]
-                if (
-                    next_metrics["color"] - best_metrics["color"] < 1.0
-                    and next_metrics["difference_hash"] - best_metrics["difference_hash"] < 3
-                ):
-                    return
-            matches[remote["media_key"]] = {
-                "media_key": remote["media_key"],
-                "local_files": list(best["paths"]),
-                "visual_match_tier": "reencoded",
-                "visual_color_distance": round(best_metrics["color"], 3),
-                "visual_hash_distance": best_metrics["difference_hash"],
-            }
-            return
-
-        if not variant_rows:
-            return
-        ranked = sorted(variant_rows, key=lambda value: (-value[0]["palette"], value[0]["perceptual_hash"]))
-        best_metrics, best = ranked[0]
-        if len(ranked) > 1:
-            next_metrics = ranked[1][0]
-            if (
-                next_metrics["palette"] - best_metrics["palette"] < 0.01
-                and abs(next_metrics["perceptual_hash"] - best_metrics["perceptual_hash"]) < 3
-            ):
-                return
-        matches[remote["media_key"]] = {
-            "media_key": remote["media_key"],
-            "local_files": list(best["paths"]),
-            "visual_match_tier": "edited",
-            "visual_palette_similarity": round(best_metrics["palette"], 4),
-            "visual_phash_distance": best_metrics["perceptual_hash"],
-        }
-
-    def _list_library(self, client: object, payloads: object) -> list[dict]:
-        items: dict[str, dict] = {}
-        page_id = None
-        timestamp = None
-        seen_pages: set[tuple[str, str]] = set()
-        while True:
-            try:
-                response = client.send_api_request(
-                    payloads.GetLibraryPageByTakenDate(
-                        timestamp=timestamp, page_id=page_id, source="both", page_size=500
-                    )
-                )
-                page = response.data
-            except Exception as exc:
-                raise GooglePhotosWebError(f"Could not scan the Google Photos library: {exc}") from exc
-            for item in page.items:
-                media_key = str(item.media_key or "")
-                thumbnail_url = str(item.thumbnail_url or "")
-                if media_key and thumbnail_url:
-                    items[media_key] = {
-                        "media_key": media_key,
-                        "dedup_key": str(item.dedup_key or ""),
-                        "thumbnail_url": thumbnail_url,
-                        "width": int(item.res_width or 0),
-                        "height": int(item.res_height or 0),
-                        "video": item.video_duration is not None,
-                        "partial": bool(item.is_partial_upload),
-                        "owned": bool(item.is_owned),
-                        "timestamp": getattr(item, "timestamp", None),
-                        "timezone_offset": getattr(item, "timezone_offset", None),
-                    }
-            next_page = str(page.next_page_id or "")
-            next_timestamp = str(page.last_item_timestamp or "")
-            token = (next_page, next_timestamp)
-            if not next_page or token in seen_pages:
-                return list(items.values())
-            seen_pages.add(token)
-            page_id = next_page
-            timestamp = page.last_item_timestamp
 
     def library_items(self, progress=None, cancelled: threading.Event | None = None) -> list[dict]:
         """Every item in the Google Photos library, newest first. Metadata only; nothing is downloaded."""

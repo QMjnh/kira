@@ -171,10 +171,6 @@ class GoogleAuth:
         )
         return f"{AUTH_ENDPOINT}?{query}"
 
-    def owns_state(self, state: str) -> bool:
-        with self.lock:
-            return state in self.pending
-
     def finish(self, code: str, state: str) -> None:
         with self.lock:
             pending = self.pending.pop(state, None)

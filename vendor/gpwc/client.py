@@ -1,11 +1,10 @@
 import json
+import re
 import urllib.parse
 from collections.abc import Iterable
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 from typing import Literal, overload
-
-from lxml import html
 
 from . import utils
 from .models import ApiResponse
@@ -59,8 +58,9 @@ class Client:
 
     def parse_main_page(self, page_body: str) -> dict:
         """Parse data from photos.google.com html body"""
-        xml_page = html.fromstring(page_body)
-        script_text: str = xml_page.xpath('//script[@data-id="_gd"]/text()')[0]
+        # Kira: stdlib instead of lxml, so the vendored client needs no compiled modules.
+        # No match (Google sent a signed-out page) still raises IndexError, which callers treat as expired.
+        script_text: str = re.findall(r'<script\b[^>]*\bdata-id="_gd"[^>]*>(.*?)</script>', page_body, re.S)[0]
         script_json = script_text.replace("window.WIZ_global_data = ", "").rstrip().rstrip(";")
         return json.loads(script_json)
 
